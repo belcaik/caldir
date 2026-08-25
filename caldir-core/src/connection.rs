@@ -269,9 +269,10 @@ mod tests {
     use crate::provider::mock_provider::MockProvider;
     use crate::test_utils::{
         incoming_create_diff, incoming_delete_diff, incoming_update_diff, outgoing_create_diff,
-        outgoing_delete_diff, outgoing_update_diff, test_caldir, test_event, test_mock_provider,
-        test_remote_config, test_remote_params,
+        outgoing_delete_diff, outgoing_update_diff, test_caldir, test_event, test_event_time,
+        test_mock_provider, test_remote_config, test_remote_params,
     };
+    use crate::todo::Todo;
     use crate::{CalendarConfig, rpc};
     use pretty_assertions::assert_eq;
 
@@ -695,6 +696,317 @@ mod tests {
             Some(&event_a),
             "event A's base should survive a later push failure",
         );
+    }
+
+    // --- L4-03: items through the whole chain, transport mocked ---
+
+    /// `T-48`, renamed. **The ticket's `a_task_is_pushed_as_a_vtodo_and_never_
+    /// as_a_vevent` is not implementable and the name would assert a
+    /// falsehood.** The outbound RPC field is `pub event: Event` (R70), so a
+    /// `BEGIN:VTODO` payload can never reach `CreateEvent`; the same ticket's
+    /// R56 and the ADJUDICATION's ADR-07 ruling say the push *aborts* with
+    /// `expected 1 event(s) in ICS, found 0`. The constraint wins.
+    ///
+    /// What survives, and is the half R1/A-1 item 3 actually calls inviolable:
+    /// **no VEVENT is synthesized for a task anywhere in the chain**. Proven
+    /// end to end here — real scan, real diff, real apply — by the transport
+    /// having seen nothing at all.
+    #[tokio::test]
+    async fn a_task_push_aborts_and_never_reaches_the_provider_as_a_vevent() {
+        let (_tmp, mock, mut connection) = writable_connection();
+        let todo = Todo::new("Hand in the assignment");
+        let cal_event = connection.local().create_event(todo.clone()).unwrap();
+        let path = cal_event.path().to_path_buf();
+
+        let err = connection
+            .apply_outgoing_diff(&outgoing_create_diff(todo.clone()))
+            .await
+            .expect_err("a task must never be pushed over the event-only wire");
+
+        let ConnectionError::Remote(remote_err) = err else {
+            panic!("expected a remote error, got {err:?}");
+        };
+        assert_eq!(
+            remote_err.to_string(),
+            "expected 1 event(s) in ICS, found 0"
+        );
+
+        assert!(
+            !mock.received_a_request(),
+            "nothing may reach the transport for a task push",
+        );
+
+        // The kind survived on disk: still a VTODO, still no VEVENT.
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("BEGIN:VTODO"), "got {on_disk:?}");
+        assert!(!on_disk.contains("BEGIN:VEVENT"), "got {on_disk:?}");
+        assert_eq!(CalendarItem::load(&path).unwrap(), todo.into());
+    }
+
+    /// `T-50` — R56, the first accepted skew failure: **new core + old
+    /// provider**. Pinned as a *failure*, never a quiet no-op. A task in the
+    /// outgoing set aborts the rest of that calendar's push, and the accepted
+    /// price is "ugly", not "destructive": every local file survives byte-for-
+    /// byte-equivalent, the delete queued behind the task never reaches the
+    /// wire, and the base recorded before the abort is still flushed (AC 4).
+    #[tokio::test]
+    async fn pushing_a_task_to_a_task_less_provider_fails_that_calendar_without_data_loss() {
+        let (_tmp, mock, mut connection) = writable_connection();
+
+        let event = test_event();
+        let todo = Todo::new("Hand in the assignment");
+        let doomed = Event::new("Would be deleted remotely", test_event_time());
+
+        let event_path = connection
+            .local()
+            .create_event(event.clone())
+            .unwrap()
+            .path()
+            .to_path_buf();
+        let todo_path = connection
+            .local()
+            .create_event(todo.clone())
+            .unwrap()
+            .path()
+            .to_path_buf();
+
+        // Only the first change ever reaches the wire; queueing exactly one
+        // reply is itself the assertion that the other two do not.
+        mock.reply::<rpc::CreateEvent>(event.clone());
+
+        let diff = CalendarDiff::from_changes(
+            vec![
+                EventChange::Create(event.clone().into()),
+                EventChange::Create(todo.clone().into()),
+                EventChange::Delete(doomed.into()),
+            ],
+            vec![],
+        );
+
+        let result = connection.apply_outgoing_diff(&diff).await;
+
+        assert!(result.is_err(), "the task push must fail the calendar");
+
+        // Not data loss: both files are still there, and still themselves.
+        assert!(event_path.is_file());
+        assert!(todo_path.is_file());
+        assert_eq!(CalendarItem::load(&todo_path).unwrap(), todo.into());
+
+        // The delete queued behind the task never happened. `captured_request`
+        // asserts the method of the *last* request, so this is exactly "no
+        // DeleteEvent was ever sent".
+        assert_eq!(mock.captured_request::<rpc::CreateEvent>().event, event);
+
+        // AC 4: the base recorded before the abort still reached disk.
+        let reloaded = Calendar::load(connection.local().path()).unwrap();
+        assert_eq!(
+            reloaded.state().sync_base(&event.event_instance_id()),
+            Some(&event),
+        );
+    }
+
+    /// `T-51` — R57 (INVIOLABLE), the second accepted skew failure: **old core
+    /// + new provider**. One undecodable element fails the whole vector, the
+    /// call errors, and the sync aborts *before any apply*. Pinned as a
+    /// failure: the catastrophic alternative is a silent drop, which makes the
+    /// remote list arrive short and feeds the delete path.
+    #[tokio::test]
+    async fn a_task_payload_from_a_newer_provider_fails_the_whole_list_before_any_apply() {
+        let (_tmp, mock, mut connection) = writable_connection();
+
+        // Local, base known, absent from the (decodable half of the) response:
+        // if the short list were accepted, this file is what would be deleted.
+        let local = test_event();
+        let local_path = connection
+            .local()
+            .create_event(local.clone())
+            .unwrap()
+            .path()
+            .to_path_buf();
+        connection
+            .local
+            .record_sync_bases(vec![local.clone()])
+            .unwrap();
+
+        let before = calendar_snapshot(connection.local().path());
+        assert!(
+            before
+                .iter()
+                .any(|(_, item)| item.as_ref() == Some(&local.clone().into())),
+            "the snapshot must actually see the file it is guarding, got {before:?}",
+        );
+
+        // A component this core does not support, beside a perfectly good one.
+        let decodable = CalendarItem::Event(local.clone()).to_ics_string();
+        let undecodable = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VJOURNAL\r\nUID:journal@u-crawler\r\nDTSTAMP:20260801T090000Z\r\n\
+END:VJOURNAL\r\nEND:VCALENDAR\r\n";
+        mock.reply_raw_data(serde_json::json!([decodable, undecodable]));
+
+        let Err(err) = connection.diff(&DateRange::default()).await else {
+            panic!("one undecodable element must fail the whole list");
+        };
+
+        assert!(
+            err.to_string().contains("VJOURNAL"),
+            "the offending component must survive to the connection tier, got {err}",
+        );
+
+        // Nothing applied: no file created, updated or deleted, no base added.
+        assert!(local_path.is_file());
+        assert_eq!(calendar_snapshot(connection.local().path()), before);
+    }
+
+    /// `T-52` — A-6/R100. A VEVENT and a VTODO sharing one UID are two items
+    /// all the way down: two identities, two base files, two `known_event_ids`
+    /// lines. With both present locally, neither reported remotely and the
+    /// shared id known, exactly **one** delete is emitted, against the event's
+    /// file — the task's is withheld by R49's version-skew belt.
+    ///
+    /// Driven through `diff` twice so the backfill path is exercised too: it is
+    /// the one place a task could be judged "in sync" against an *event* (AC 3),
+    /// and a uid-keyed lookup there silently backfills only one of the pair.
+    ///
+    /// Deliberately not a same-direction dual push into one collection: `L5-04`
+    /// makes that a push error (R65/R80), and A-6 never asked for one.
+    #[tokio::test]
+    async fn a_mixed_local_directory_keeps_both_items_distinct_end_to_end() {
+        let (_tmp, mock, mut connection) = writable_connection();
+
+        let uid = EventUid::new("shared-123@u-crawler");
+        let mut event = Event::new("Assignment 3 - submission window", test_event_time());
+        event.uid = uid.clone();
+        let mut todo = Todo::new("Assignment 3 - hand in");
+        todo.uid = uid.clone();
+
+        let event_path = connection
+            .local()
+            .create_event(event.clone())
+            .unwrap()
+            .path()
+            .to_path_buf();
+        let todo_path = connection
+            .local()
+            .create_event(todo.clone())
+            .unwrap()
+            .path()
+            .to_path_buf();
+        assert_ne!(event_path, todo_path, "one UID, two files");
+
+        // Two identities out of one UID.
+        let event_id = CalendarItem::Event(event.clone()).instance_id();
+        let todo_id = CalendarItem::Todo(todo.clone()).instance_id();
+        assert_ne!(event_id, todo_id);
+
+        let mut listed: Vec<EventInstanceId> = connection
+            .local()
+            .events()
+            .unwrap()
+            .into_events()
+            .into_iter()
+            .map(|e| e.item().instance_id())
+            .collect();
+        listed.sort_by_key(|id| id.to_string());
+        let mut expected = vec![event_id.clone(), todo_id.clone()];
+        expected.sort_by_key(|id| id.to_string());
+        assert_eq!(listed, expected);
+
+        // Legacy state: both ids known, neither base recorded. The remote
+        // reports both, unchanged, so the backfill is the only thing that can
+        // record them — and it has to tell the pair apart to record *two*.
+        let state_dir = connection.local().path().join(".caldir/state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(
+            state_dir.join("known_event_ids"),
+            format!("{event_id}\n{todo_id}\n"),
+        )
+        .unwrap();
+        connection.local = Calendar::load(connection.local().path()).unwrap();
+
+        mock.reply::<rpc::ListEvents>(vec![
+            CalendarItem::Event(event.clone()),
+            CalendarItem::Todo(todo.clone()),
+        ]);
+        let in_sync = connection.diff(&DateRange::default()).await.unwrap();
+        assert!(in_sync.is_empty(), "both sides already agree");
+
+        // Two base files, two known-id lines — one of them sigil-prefixed.
+        let bases: Vec<_> = std::fs::read_dir(state_dir.join("bases"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(bases.len(), 2, "one base file per identity, got {bases:?}");
+        let base_for = |id: &EventInstanceId| -> Option<CalendarItem> {
+            connection
+                .local()
+                .state()
+                .sync_bases()
+                .get(id)
+                .and_then(|base| base.as_deref().cloned())
+        };
+        assert_eq!(
+            base_for(&event_id),
+            Some(CalendarItem::Event(event.clone()))
+        );
+        assert_eq!(base_for(&todo_id), Some(CalendarItem::Todo(todo.clone())));
+
+        let known = std::fs::read_to_string(state_dir.join("known_event_ids")).unwrap();
+        let mut lines: Vec<&str> = known.lines().filter(|l| !l.is_empty()).collect();
+        lines.sort_unstable();
+        assert_eq!(
+            lines,
+            vec!["VTODO:shared-123@u-crawler", "shared-123@u-crawler"],
+        );
+
+        // Now neither item is reported remotely.
+        mock.reply::<rpc::ListEvents>(vec![]);
+        let diff = connection.diff(&DateRange::default()).await.unwrap();
+
+        assert_eq!(
+            diff.incoming(),
+            &[EventChange::Delete(CalendarItem::Event(event.clone()))],
+            "exactly one delete, and it is the event's",
+        );
+        assert!(diff.suppressed_task_deletes());
+
+        connection.apply_incoming_diff(&diff).unwrap();
+
+        assert!(!event_path.exists(), "the event's file is the one deleted");
+        assert!(todo_path.is_file(), "the task's file must survive");
+        assert_eq!(CalendarItem::load(&todo_path).unwrap(), todo.into());
+    }
+
+    /// Every `.ics` in the calendar directory, parsed, plus the state dir's
+    /// contents. Parsed values, never raw bytes (R30): `to_ics_string` stamps a
+    /// fresh `DTSTAMP` on every serialize.
+    fn calendar_snapshot(path: &std::path::Path) -> Vec<(String, Option<CalendarItem>)> {
+        let mut snapshot: Vec<(String, Option<CalendarItem>)> = walk(path)
+            .into_iter()
+            .map(|file| {
+                let name = file
+                    .strip_prefix(path)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                let parsed = CalendarItem::load(&file).ok();
+                (name, parsed)
+            })
+            .collect();
+        snapshot.sort_by(|a, b| a.0.cmp(&b.0));
+        snapshot
+    }
+
+    fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files.extend(walk(&path));
+            } else {
+                files.push(path);
+            }
+        }
+        files
     }
 
     #[tokio::test]
