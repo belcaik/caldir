@@ -792,3 +792,40 @@ guidance. Explicitly a non-goal in L5-03. Needs a decision before ship.
 It is exercised only transitively via create_event's 409 fallback, so
 M10/M11 fail by proxy rather than for the right reason. A dedicated
 round-trip test would fix that. Cheap now that the wiremock seam exists.
+
+## ANSWERED — open question Q-3 (VTIMEZONE), by measurement
+caldir emits a zoned DUE/DTSTART as a bare TZID parameter with NO
+VTIMEZONE component, and TOLERATES the server adding one. Measured live:
+Radicale accepts a VTODO with DUE;TZID=Europe/Stockholm and no VTIMEZONE
+(201), returns it with a full synthesized VTIMEZONE sibling, and caldir
+parses that two-component document back to the same zoned DUE because
+VTIMEZONE is exempt from the single-component arity rule (R18/R102).
+Q-3 CLOSED. L8-06 records it in BACKLOG.md.
+
+## R69 — STATED, NOT CLAIMED
+caldir PULLS tasks from CalDAV but CANNOT PUSH them (R70 keeps the
+outbound field Event; a task push aborts with the byte-exact arity
+error). iCloud shares the caldav::ops code path but was NEVER MEASURED.
+The ship report and PR description MUST say both plainly. Do not claim
+iCloud task support anywhere.
+
+## RULING — T-58's name refused, correctly
+`renaming_a_local_task_file_updates_the_same_resource` is unreachable: a
+rename reaches a server only via a push, and R70 forbids a task push.
+Ships as `renaming_a_local_file_updates_the_same_resource_and_never_a_
+second_one` on the VEVENT control. The property transfers to tasks BY
+CONSTRUCTION (event_url takes the UID and nothing else), not by
+measurement - say so rather than implying it was tested.
+spec §18 / reproduction.md citations are STALE. L8-01 fixes them.
+
+## NEW dev-dep, must be disclosed with wiremock
+`serial_test = "3"` in caldir-provider-caldav [dev-dependencies], to keep
+live-tier container ports from colliding. Dev-only.
+ALSO: the live tier requires `curl` on PATH. If unwanted, the
+alternative is a direct hyper client needing http-body-util as a dev-dep.
+
+## OPEN — find_event_location's fallback masks a broken event_url
+L5-05's M4b: a CLOCK-DERIVED href still produced a correct-looking
+outcome, because the REPORT fallback rescues it. T-58 now has an outcome
+assertion on the href itself, but a dedicated unit lock on event_url
+being purely UID-derived would be stronger.
