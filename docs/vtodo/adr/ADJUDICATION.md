@@ -747,3 +747,29 @@ provider layer.
   LIVE defect. A10 is FIXED and the symbol is now `parse_item`.
 - caldir-provider-caldav/CLAUDE.md says shared ops live in `src/ops.rs`;
   the real path is `src/caldav/ops.rs` (pre-existing drift).
+
+## PR-DESCRIPTION MUST DISCLOSE — two items from L5-02
+1. **New dev-dependency**: `wiremock = "0.6"` in caldir-provider-caldav's
+   [dev-dependencies]. Dev-only, never ships in a binary. Justification:
+   L5-01's mutation M7 - consuming only the first of the two REPORTs
+   passed the ENTIRE 812-test suite, i.e. silent task loss with zero
+   coverage. Now locked.
+2. **An observable request change on the fast path**: `find_event_location`'s
+   fast path was a `GetEtag` PROPFIND on the resource; it is now a
+   `calendar-multiget` REPORT on the collection. Outcome-identical for
+   events and locked as such, but it IS a different request on the wire.
+   Anyone with a server treating the two differently should know.
+
+## CORRECTION — L5-02's AC 5 premise was stale
+AC 5 said "caldir-core's DeleteEvent already carries the item after
+L4-02, so the kind is available". FALSE: it carries an `Event`
+(rpc/methods/delete_event.rs), per R70. The kind is plumbed but
+constant-Event end to end today. The outbound wire change belongs with
+L6-01's story, not here.
+
+## L8 DOC DEBT, added
+`caldir-provider-caldav/src/caldav/ops/test_dav.rs` is now the crate's
+HTTP-double seam. context/testing.md must list it beside the
+MockTransport FIFO/last-request traps, WITH the raw-ICS rule attached
+(drive the remote from raw ICS, never from domain values re-encoded by
+the code under test).
