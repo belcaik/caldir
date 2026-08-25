@@ -383,3 +383,25 @@ Cumulative mutation testing across L1: 55 applied, 54 caught, 1
 equivalent. TWO locks were found unable to fail and were REPAIRED
 rather than banked (L1-08's M7 superset hole in x_properties_eq;
 L1-06's M8 non-colliding task fixture).
+
+## RULING EXTENDED — #[non_exhaustive] also covers CalendarItem
+L2-01 correctly flagged that `CalendarItem` is a THIRD growable public
+enum in the same position as `CalendarError` and `ComponentKind`: R93
+plans to grow it with `VJournal`, and adding the attribute later is
+itself breaking. L2-01 left it bare because its AC said "exactly two
+variants" — right call for the ticket, wrong outcome for the release.
+RULING: all THREE get `#[non_exhaustive]` in the 0.15.0 window:
+`CalendarError`, `ComponentKind`, `CalendarItem`. Assigned to L8-05.
+
+## CARRY-FORWARD — public-but-unnameable error types (now TWICE reported)
+`CalendarEventError` is `pub(crate) use`d in `calendar.rs` and never
+re-exported from `lib.rs`, yet it is the error type of the PUBLIC
+`CalendarItem::load` and `CalendarEvent::load`. A downstream cannot
+match on it. Same class as the L0-01 carry-forward for `CalendarError`.
+Resolve BOTH together, in the 0.15.0 window.
+
+## OPEN — `EventError::UnsupportedComponent` name is unpinned
+R76 forbids duplicating the "none" variant on `EventError`, so R19's
+carrier there is a distinct `UnsupportedComponent(String)`. Neither the
+spec nor any ADR pins that name, and the wire error text is USER-VISIBLE.
+Confirm before L2-04/L2-05 wire the RPC codec to it.
