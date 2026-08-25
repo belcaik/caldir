@@ -405,3 +405,35 @@ R76 forbids duplicating the "none" variant on `EventError`, so R19's
 carrier there is a distinct `UnsupportedComponent(String)`. Neither the
 spec nor any ADR pins that name, and the wire error text is USER-VISIBLE.
 Confirm before L2-04/L2-05 wire the RPC codec to it.
+
+## BLOCKER FOR L2-06 — two legacy event() sites are still unowned
+L2-03 proved its own completeness by renaming the accessor: exactly TWO
+production errors remain, and BOTH are outside its scope:
+  caldir-core/src/calendar/event.rs:135  update_attendee_status
+  caldir-core/src/calendar/event.rs:147  add_exdate
+My L2-02 brief said calendar/event.rs was "already handled". That was
+WRONG - L2-02 ADAPTED three field reads INTO `self.event()` calls, so it
+created these, it did not resolve them.
+L2-06 MUST own these two sites before it deletes the accessor, or the
+crate will not compile. Added to L2-06's scope explicitly.
+
+## SCOPE-BRIEF CORRECTION — ".event()" grep over-counts
+`.event()` exists on TWO types. `RemoteEvent::event()` is NOT part of the
+CalendarItem migration. In caldir-core the split was:
+  CalendarEvent::event()  26 production (the migration)
+  RemoteEvent::event()    16 (14 calendar_diff, 2 connection) - NOT ours
+Any future "N call sites" figure must say WHICH type.
+
+## OPEN, pre-existing, NOT introduced here (own ticket)
+`delete_recurring_instance` master/override precedence (L2-03 M7): a
+degenerate file that is BOTH a master (recurrence.is_some()) and the
+target override hits both branches. Current code prefers master
+(EXDATE); nothing locks that choice and no fixture has such a file.
+L2-03 preserved the order exactly and did NOT repair it. Needs either a
+degenerate fixture or an explicit ruling that the shape is illegal.
+
+## OPEN — CalendarError needs a "not an event" variant
+Two unreachable narrowings in calendar.rs fall back to `MasterNotFound`,
+which is semantically wrong if it ever fires. When L3-03 gives tasks
+real paths this wants a proper variant - and it should ride the same
+0.15.0 window as the `#[non_exhaustive]` change.
