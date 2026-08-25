@@ -268,9 +268,10 @@ mod tests {
     use crate::event::{EventUid, XProperty};
     use crate::provider::mock_provider::MockProvider;
     use crate::test_utils::{
-        incoming_create_diff, incoming_delete_diff, incoming_update_diff, outgoing_create_diff,
-        outgoing_delete_diff, outgoing_update_diff, test_caldir, test_event, test_event_time,
-        test_mock_provider, test_remote_config, test_remote_params,
+        VEVENT_CONTROL_ICS, VTODO_ZONED_ICS, incoming_create_diff, incoming_delete_diff,
+        incoming_update_diff, outgoing_create_diff, outgoing_delete_diff, outgoing_update_diff,
+        test_caldir, test_event, test_event_time, test_mock_provider, test_remote_config,
+        test_remote_params,
     };
     use crate::todo::Todo;
     use crate::{CalendarConfig, rpc};
@@ -974,6 +975,142 @@ END:VJOURNAL\r\nEND:VCALENDAR\r\n";
         assert!(!event_path.exists(), "the event's file is the one deleted");
         assert!(todo_path.is_file(), "the task's file must survive");
         assert_eq!(CalendarItem::load(&todo_path).unwrap(), todo.into());
+    }
+
+    /// The u_crawler VTODO, widened to the properties that churn. `VALARM`
+    /// (R24 — a fresh alarm UID per serialize ping-pongs forever), a provider
+    /// `X-*` property (stripped by a local write => churn), and
+    /// `PERCENT-COMPLETE:0` (open question Q-4: `Some(0)` must not read back
+    /// as `None`).
+    const CHURN_VTODO_ICS: &str = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+PRODID:-//u_crawler//EN\r\n\
+CALSCALE:GREGORIAN\r\n\
+BEGIN:VTODO\r\n\
+UID:assignment-123@u-crawler\r\n\
+DTSTAMP:20260801T090000Z\r\n\
+DUE:20260815T235900Z\r\n\
+SUMMARY:Assignment 3 - Recursive descent parser\r\n\
+DESCRIPTION:Submit the parser and a short report via the course portal.\r\n\
+URL:https://example.edu/courses/cs101/assignments/123\r\n\
+PRIORITY:1\r\n\
+STATUS:COMPLETED\r\n\
+COMPLETED:20260814T120000Z\r\n\
+PERCENT-COMPLETE:0\r\n\
+X-GOOGLE-EVENT-ID:abc123\r\n\
+BEGIN:VALARM\r\n\
+ACTION:DISPLAY\r\n\
+DESCRIPTION:Reminder\r\n\
+TRIGGER;RELATED=START:-PT30M\r\n\
+END:VALARM\r\n\
+END:VTODO\r\n\
+END:VCALENDAR\r\n";
+
+    /// `T-49` — **A-2 / R96, the load-bearing idempotence gate.** Sync twice
+    /// against the same (mocked) remote; the *second* diff must be empty.
+    ///
+    /// This is the one test that catches sync churn — an item perceived as
+    /// changed on every run — including mechanisms nobody enumerated. The
+    /// fixture is deliberately wide: `CHURN_VTODO_ICS` above, plus a second,
+    /// *zoned* task whose `DUE` carries a `TZID` and whose `COMPLETED` is
+    /// floating (R22 — a floating `COMPLETED` reading back as `None` is
+    /// churn), plus the VEVENT control, which travels the *other* direction so
+    /// both halves of one sync are exercised.
+    ///
+    /// **Both remote responses are the same raw ICS documents**, handed to the
+    /// transport verbatim (`reply_raw_data`) rather than re-encoded from domain
+    /// values by the code under test. That matters: the remote is an
+    /// independent store that returns what it holds on every GET, so the
+    /// fixture text — not caldir's own encoder — is the source of truth on that
+    /// side. Anything caldir's local write/read loses or invents therefore
+    /// shows up as a real change on pass two instead of cancelling out.
+    ///
+    /// **The comparison is structural, never textual (R30/R31).** Nothing here
+    /// asserts on ICS text, on bytes, or on an ETag: caldir re-stamps `DTSTAMP`
+    /// on every serialize (R25), so a byte- or ETag-based "the push was a
+    /// no-op" claim is false by construction, and Radicale re-sorts properties,
+    /// re-folds at 75 octets and synthesizes `VTIMEZONE` anyway. ICS text is an
+    /// *input* here and never an expected value; the only equality asserted is
+    /// `CalendarDiff::is_empty()`, i.e. parsed-domain `==` on `CalendarItem`.
+    ///
+    /// If this goes red, walk ADR-06's churn table; the diagnostic below prints
+    /// the offending changes, because a bare boolean here is undebuggable.
+    #[tokio::test]
+    async fn syncing_twice_against_a_fake_remote_yields_an_empty_second_diff() {
+        let (_tmp, mock, mut connection) = writable_connection();
+
+        // Fixed date => a deterministic window; `Local` makes it move with the
+        // TZ matrix (R106).
+        let range = DateRange::sync_window_at(
+            chrono::NaiveDate::from_ymd_opt(2026, 8, 25).unwrap(),
+            chrono::Local,
+        );
+
+        let CalendarItem::Event(event) =
+            CalendarItem::from_single_ics_str(VEVENT_CONTROL_ICS).unwrap()
+        else {
+            panic!("the VEVENT control fixture must parse as an event");
+        };
+
+        // The control event is local-only; both tasks live on the remote, so
+        // one sync moves items in *both* directions.
+        connection.local().create_event(event.clone()).unwrap();
+        mock.reply_raw_data(serde_json::json!([CHURN_VTODO_ICS, VTODO_ZONED_ICS]));
+
+        let first = connection.diff(&range).await.unwrap();
+
+        // Non-vacuity: "the second diff is empty" is free if the first was.
+        assert!(
+            !first.is_empty(),
+            "the first sync must actually do work, or this gate proves nothing",
+        );
+        assert_eq!(first.incoming().len(), 2, "got {:#?}", first.incoming());
+        let mut pulled: Vec<String> = first
+            .incoming()
+            .iter()
+            .map(|change| match change {
+                EventChange::Create(item) => item.uid().as_str().to_string(),
+                other => panic!("expected two incoming creates, got {other:?}"),
+            })
+            .collect();
+        pulled.sort();
+        assert_eq!(
+            pulled,
+            vec!["assignment-123@u-crawler", "zoned-123@u-crawler"],
+        );
+        assert_eq!(
+            first.outgoing(),
+            &[EventChange::Create(event.clone().into())],
+        );
+
+        connection.apply_incoming_diff(&first).unwrap();
+        mock.reply::<rpc::CreateEvent>(event.clone());
+        connection.apply_outgoing_diff(&first).await.unwrap();
+
+        // A second `caldir pull` is a fresh process: reload the calendar from
+        // disk so pass two reads its bases from the state directory rather than
+        // from the in-memory map the apply just populated. A base that never
+        // reached disk is churn too.
+        connection.local = Calendar::load(connection.local().path()).unwrap();
+
+        // Pass two: nothing changed on either side. The remote now reports all
+        // three items — the same bytes it was handed for the tasks, and the
+        // event it just accepted.
+        mock.reply_raw_data(serde_json::json!([
+            VEVENT_CONTROL_ICS,
+            CHURN_VTODO_ICS,
+            VTODO_ZONED_ICS
+        ]));
+
+        let second = connection.diff(&range).await.unwrap();
+
+        assert!(
+            second.is_empty(),
+            "second sync churned — consult ADR-06's churn table.\n\
+             incoming: {:#?}\noutgoing: {:#?}",
+            second.incoming(),
+            second.outgoing(),
+        );
     }
 
     /// Every `.ics` in the calendar directory, parsed, plus the state dir's
