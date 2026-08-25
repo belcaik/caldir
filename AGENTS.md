@@ -33,9 +33,11 @@ Calendars come in three flavors:
 
 Bidirectional, last-write-wins, no merge: calendar events are atomic.
 
-Direction is decided by comparing local file mtime against the remote `LAST-MODIFIED`.
+Direction is decided by a **three-way comparison against a stored base** — the ICS snapshot of the last state both sides agreed on, under `.caldir/state/bases/` (`caldir-core/src/diff/calendar_diff.rs`, `update_direction`). Whichever side differs from the base is the side that changed. Local file mtime, remote `LAST-MODIFIED`, and `SEQUENCE` are only the *fallback*: they break a conflict where both sides changed, or handle legacy state with no readable base.
 
-Deletes are detected by comparing the live file set against `known_event_ids`. This file records event identities that have ever synced; IDs are retained after deletes so caldir can keep distinguishing a user delete from a never-seen remote event.
+Deletes are detected against that same sync state: a base's presence records that an identity has synced before, so absence on either side is a delete rather than a never-seen item. `.caldir/state/known_event_ids` is the legacy presence-only format, still read and written for compatibility. Identities are retained after deletes so caldir can keep distinguishing a user delete from a never-seen remote event.
+
+`specs/caldir.md` §"Sync State" is the canonical description.
 
 The default sync window in the CLI is ±365 days from today; events outside the window are left alone, never deleted just for falling outside the fetched range.
 
@@ -49,7 +51,7 @@ Timezone is data, not just display. Events created locally use the system IANA z
 
 ## Providers
 
-A provider (`caldir-provider-xxx`) is a binary that speaks caldir's JSON RPC over stdin/stdout. Implement [`ProviderHandler`](caldir-core/src/rpc/handler.rs) and let `run_provider` handle the protocol.
+A provider (`caldir-provider-xxx`) is a binary that speaks caldir's JSON RPC over stdin/stdout. Implement [`Handler`](caldir-core/src/provider/handler.rs) and let `run_provider` handle the protocol.
 
 ### Storage directory
 

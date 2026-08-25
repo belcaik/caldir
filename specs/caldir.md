@@ -180,6 +180,126 @@ END:VALARM
 
 ---
 
+## VTODO (Task)
+
+A task is a `VTODO` component. caldir models it as a sibling of the event, never a variant of one: an item's kind comes from the component it was parsed from and is preserved across disk, sync base, wire, and server. One `.ics` file holds exactly one supported component—a `VEVENT` or a `VTODO`, never both. A payload carrying the wrong number of them is rejected with `expected 1 supported component(s) in ICS, found {n}`.
+
+### Required Fields
+
+#### `UID`
+**What:** Unique identifier for the task.
+**How caldir uses it:** Exactly as for events. Identity is `(kind, uid, recurrence_id)`—the component kind is part of it, so a task and an event never collide on identity even if they share a UID.
+
+#### `DTSTAMP`
+**What:** Timestamp of when the ICS was created/modified.
+**How caldir uses it:** Same as VEVENT—not stored on the task, re-stamped by the icalendar crate on every write, and invisible to content comparison.
+
+---
+
+### Scheduling Fields
+
+#### `DUE`
+**What:** When the task is due.
+**How caldir uses it:** Optional. Same value formats as an event's `DTSTART` (UTC, floating, zoned, or `VALUE=DATE`). `DUE` is the task's anchor: it is where the filename date comes from, falling back to `DTSTART` when absent.
+**Important:** VTODO uses DUE, never DTEND (RFC-invalid) and never DURATION. RFC 5545 §3.6.2 defines no `DTEND` for a VTODO, so the task type has no end field at all—emitting one isn't possible rather than merely discouraged.
+
+#### `DTSTART`
+**What:** When work on the task starts.
+**How caldir uses it:** Optional, and fully independent of `DUE`. A task may carry `DTSTART`, `DUE`, both, or neither; neither is ever synthesized from the other, and an undated task is never given a fabricated date.
+
+#### `COMPLETED`
+**What:** When the task was completed.
+**How caldir uses it:** Optional. Read from the raw property and kept in the same time representation as `DTSTART`/`DUE`, so a floating or zoned `COMPLETED` survives instead of being coerced to UTC.
+
+---
+
+### Core Fields
+
+#### `SUMMARY`
+**What:** Task title.
+**How caldir uses it:** Optional. Also used to generate the filename slug.
+
+#### `DESCRIPTION`
+**What:** Task notes.
+**How caldir uses it:** Optional. Direct passthrough if present.
+
+#### `LOCATION`
+**What:** Where the task happens.
+**How caldir uses it:** Optional. Direct passthrough as plain text, as on an event.
+
+#### `URL`
+**What:** Standard URL field.
+**How caldir uses it:** Optional. Direct passthrough.
+
+#### `STATUS`
+**What:** Task status.
+**Values:** `NEEDS-ACTION`, `IN-PROCESS`, `COMPLETED`, `CANCELLED`
+**How caldir uses it:** caldir calls this the **task status** (`task_status`) and keeps it separate from the event `STATUS` field—RFC 5545 gives tasks their own value set, and merging the two would put impossible values in front of every event. `NEEDS-ACTION` is the RFC 5545 default and is omitted on write, exactly as `CONFIRMED` is for an event, so an absent line and an explicit `NEEDS-ACTION` round-trip to the same bytes. The property is read raw; a value outside the four is dropped rather than round-tripped.
+
+#### `PERCENT-COMPLETE`
+**What:** How far along the task is, 0-100.
+**How caldir uses it:** Optional passthrough. Absent and `0` are distinct states and stay distinct.
+
+#### `PRIORITY`
+**What:** Priority level.
+**How caldir uses it:** Optional, read and written raw. RFC 5545's range is 0-9, but out-of-range values are legal input and round-trip verbatim—caldir never clamps them. Skipped on events (see "Fields We Skip").
+
+---
+
+### Recurrence Fields
+
+#### `RRULE` / `EXDATE` / `RDATE`
+**How caldir uses it:** Modelled and preserved, never expanded—the same handling and the same `Recurrence` type as an event's recurrence, present on the series master only.
+
+#### `RECURRENCE-ID`
+**How caldir uses it:** Set on an instance override, and the other half of identity, exactly as on an event.
+
+---
+
+### Sync Infrastructure
+
+#### `LAST-MODIFIED`
+**How caldir uses it:** Same as VEVENT—a conflict-resolution signal, ignored by content comparison.
+
+#### `SEQUENCE`
+**How caldir uses it:** Same as VEVENT—the tie-break when the remote has no `LAST-MODIFIED`, ignored by content comparison.
+
+#### `CREATED`
+**What:** When the task was created.
+**How caldir uses it:** Kept on tasks (unlike events) and ignored by content comparison.
+**Why it matters:** It isn't informational here. Under RFC 4791 §9.9 a server may answer a time-range query for an undated completed task on `end > CREATED`; dropping the property would let caldir's own writes fall out of the very query used to find them again.
+
+---
+
+### People
+
+#### `ORGANIZER` / `ATTENDEE`
+**How caldir uses it:** Same as VEVENT, same parameters (`CN`, and `PARTSTAT` on attendees).
+
+---
+
+### Alarms
+
+#### `VALARM` (component)
+**How caldir uses it:** Same as VEVENT—a minimal `ACTION:DISPLAY` block with `TRIGGER` and `DESCRIPTION`, with UID and DTSTAMP stripped so repeated writes are byte-stable.
+
+---
+
+### Attachments
+
+#### `ATTACH`
+**How caldir uses it:** Same as VEVENT—URI-valued attachments are preserved with their parameters; inline binary (`VALUE=BINARY`) is dropped on parse.
+
+---
+
+### What a Task Keeps
+
+caldir round-trips a task's modelled properties plus every `X-` property verbatim, parameters included; any other property—`CATEGORIES`, `GEO`, `RELATED-TO`, `RESOURCES`, `COMMENT`, `CONTACT`, and any other IANA or vendor property caldir does not model—is dropped the first time caldir writes that item, on disk and on the server alike, exactly as it already is for events.
+
+`CLASS` is not a modelled field on a task. An inherited `CLASS` is dropped on the first caldir write like any other unmodelled property.
+
+---
+
 ## Deterministic Generation
 
 ICS files must be generated deterministically for sync to work correctly. If the same event data produces different ICS output on each generation, the sync logic would see false positives (detecting "changes" when nothing actually changed).
@@ -214,12 +334,12 @@ These are valid iCalendar fields we intentionally don't use:
 
 | Field | Why we skip it |
 |-------|----------------|
-| `CREATED` | Informational only, doesn't affect behavior |
-| `PRIORITY` | 0-9 priority level—almost never used |
+| `CREATED` | Skipped on VEVENT—informational only, doesn't affect behavior. Used on VTODO (see §VTODO) |
+| `PRIORITY` | Skipped on VEVENT—almost never used. Used on VTODO (see §VTODO) |
 | `CATEGORIES` | Tags/labels—few apps support them |
 | `GEO` | Lat/long—apps prefer the LOCATION string |
+| `RELATED-TO` | Task hierarchies—not modelled, so it's dropped the first time we write the item. The parser also collapses repeated lines (two in, one out), so a hierarchy couldn't survive a round trip even if it were |
 | `RESOURCES` | Room/equipment booking—very niche |
-| `RDATE` | Extra recurrence dates—RRULE+EXDATE covers 99% of cases |
 | `CONTACT` | Contact info—ORGANIZER is sufficient |
 | `COMMENT` | Extra comments—rarely used |
 | `VTIMEZONE` | Timezone definitions—we use TZID parameter with IANA names instead |
@@ -237,6 +357,13 @@ caldir uses semantic filenames instead of UUIDs:
 **Recurring masters:** `_recurring__{slug}.ics`
 - Example: `_recurring__weekly-standup.ics`
 - No date prefix because the master represents all occurrences
+
+**Tasks:** tasks take the reserved `_task__` prefix, extending the same convention `_recurring__` already uses. `__` is the one separator the summary slugifier can never emit, so `_task__recurring__x` can't be forged by a task titled "recurring x".
+- Recurring master: `_task__recurring__{slug}.ics` — example: `_task__recurring__water-the-plants.ics`
+- Dated: `_task__{date}__{slug}.ics` — example: `_task__2024-04-15T1700__file-taxes.ics`. The date comes from `DUE`, falling back to `DTSTART`
+- Undated: `_task__{slug}.ics` — example: `_task__someday-maybe.ics`. A task with neither `DUE` nor `DTSTART` simply has no date component; one is never synthesized
+
+**Instance overrides:** an override of a recurring series—an item with a `RECURRENCE-ID` but no `RRULE` of its own—uses the **dated** form, named by its own instance time (`2025-03-27T1500__weekly-standup.ics`, `_task__2025-03-27T1500__water-the-plants.ics`). The `_recurring__` / `_task__recurring__` prefix marks a series *master*, not an override. Tasks and events follow the same rule; a task override carrying neither `DUE` nor `DTSTART` falls back to the undated form.
 
 **Collision handling:** If multiple events have the same date/time and slug, a numeric suffix is added (`-2`, `-3`, etc.)
 

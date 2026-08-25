@@ -63,7 +63,7 @@ Callers of `Event::from_ics_str` (all therefore VEVENT-only):
 - `caldir-core/src/event.rs:112` (`from_single_ics_str`)
 - `caldir-core/src/calendar/event.rs:37` (`CalendarEvent::load`)
 - `caldir-provider-webcal/src/commands/list_events.rs:16` (malformed events skipped, `list_events.rs:19-25`)
-- `caldir-provider-caldav/src/caldav/ops.rs:33` (`parse_event`, takes first `Ok`, `ops.rs:32-37`)
+- ~~`caldir-provider-caldav/src/caldav/ops.rs` (`parse_event`, takes first `Ok`)~~ — **FIXED (L5-01).** The symbol is now `parse_item`, it delegates to `CalendarItem::from_single_ics_str`, and it is loud rather than silently first-wins. Hazard A10 is closed.
 - `caldir-cli/src/output/agenda_json.rs:471` (test)
 
 Callers of `Event::from_single_ics_str` / `load_single`:

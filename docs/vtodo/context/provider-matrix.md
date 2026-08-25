@@ -124,9 +124,11 @@ So iCloud owns only credentials, session storage, remote-config shape, and colou
 normalisation; all protocol behaviour (REPORT bodies, comp-filters, ICS parsing)
 lives in the caldav crate and is out of scope here.
 
-**Fetch → Event.** `ops::fetch_events(user, pass, calendar_url, from, to)` returns
-`Vec<Event>` directly (`commands/list_events.rs:19-26`) — there is no
-iCloud-specific mapping layer, no `from_icloud`/`to_icloud` module.
+**Fetch → item.** `ops::fetch_events(user, pass, calendar_url, from, to)` returns
+`Vec<CalendarItem>` directly (**was** `Vec<Event>`; retyped in `L4-02`/`L5-01`) —
+there is no iCloud-specific mapping layer, no `from_icloud`/`to_icloud` module.
+That pass-through is why iCloud inherits task *pulls* with no icloud-crate edit;
+it has never been measured against a live iCloud server.
 
 **Hard VEVENT assumptions.** None are authored in this crate; they are inherited
 wholesale from `caldir-provider-caldav::caldav::ops` (the only iCloud-side

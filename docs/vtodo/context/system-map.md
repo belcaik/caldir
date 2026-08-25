@@ -52,10 +52,11 @@ No fake-event conversion. No VEVENT regressions.
 2. CalDAV issues a `calendar-query` REPORT hard-filtered to
    `<C:comp-filter name="VEVENT">` with a `<C:time-range>` inside it —
    `caldir-provider-caldav/src/caldav/ops/list_events.rs:103-104`.
-3. Response bodies go through `parse_event`, which calls `Event::from_ics_str` and
-   `find_map(Result::ok)` — `caldir-provider-caldav/src/caldav/ops.rs:32-37`. Anything
-   that does not parse as a VEVENT is silently dropped.
-4. Provider returns `Vec<Event>`; core decodes via `Event::from_single_ics_str`
+3. Response bodies go through `parse_item` (**was** `parse_event`; renamed and fixed in
+   `L5-01`), which delegates to `CalendarItem::from_single_ics_str` —
+   `caldir-provider-caldav/src/caldav/ops.rs`. It is now **loud**: a resource that decodes
+   to nothing errors instead of being silently dropped. Hazard A10 is FIXED.
+4. Provider returns `Vec<CalendarItem>` (**was** `Vec<Event>`; retyped in `L4-02`); core decodes via `Event::from_single_ics_str`
    (`caldir-core/src/rpc/ics.rs:32-35` -> `caldir-core/src/event.rs:111-121`), which
    errors `UnexpectedEventCount { expected: 1, found }` for 0 or 2+.
 5. Wrapped as `RemoteEvent(Event)`; `modified_at()` = `Event::last_modified` —
@@ -102,7 +103,7 @@ exists but behaves wrongly or loses data. **COSMETIC** = naming/ergonomics only.
 | A7 | Reminders are spliced by string-replacing the literal `"END:VEVENT\r\n"`; no VEVENT marker => VALARMs silently vanish | `caldir-core/src/event.rs:249` | DEGRADED | local-parser §4/§6.12, provider-contract §6.6, domain-model |
 | A8 | CalDAV time-range REPORT hard-codes `<C:comp-filter name="VEVENT">` — a server-side VTODO is never returned | `caldir-provider-caldav/src/caldav/ops/list_events.rs:103` | BLOCKER | caldav §"Does the REPORT filter", notes 10 |
 | A9 | CalDAV UID-lookup REPORT hard-codes the same filter — update/delete cannot locate a VTODO whose href is not `{uid}.ics` | `caldir-provider-caldav/src/caldav/ops.rs:107` | BLOCKER | caldav 2, notes 10 |
-| A10 | `parse_event` uses `find_map(Result::ok)` — silently keeps the first parseable component and drops the rest, with no error | `caldir-provider-caldav/src/caldav/ops.rs:32-37` | DEGRADED | caldav 4/9, notes 12 |
+| A10 | **FIXED (L5-01).** Was: `parse_event` used `find_map(Result::ok)` — silently kept the first parseable component and dropped the rest, with no error. Now `parse_item` delegates to `CalendarItem::from_single_ics_str` and errors instead | `caldir-provider-caldav/src/caldav/ops.rs` (`parse_item`) | FIXED | caldav 4/9, notes 12 |
 | A11 | Webcal feeds silently yield zero items for a VTODO-only feed — connect only checks `BEGIN:VCALENDAR` | `caldir-provider-webcal/src/commands/list_events.rs:16-25`; `caldir-provider-webcal/src/commands/connect.rs:32-36` | DEGRADED | provider-matrix (webcal 1-2), notes 2 |
 | A12 | Window filter is start/end-shaped: `start < to && end.unwrap_or(start) > from`; undefined without DTSTART | `caldir-core/src/event.rs:136-141` | BLOCKER | sync-engine §8/§9.5-6, provider-contract §6.12 |
 | A13 | The out-of-window skip at `calendar_diff.rs:80` is the **sole** protection against a local-only item being deleted; a wrong `true` leads to `incoming Delete` at `:86` | `caldir-core/src/diff/calendar_diff.rs:80`, `:86` | BLOCKER | sync-engine §9.6, notes 6 |

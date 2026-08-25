@@ -531,11 +531,15 @@ href is **unimplementable** against the MVP's own target server: Radicale return
 `<C:no-uid-conflict/>`** for the same UID at a different href (probe Q-E.3). ADR-02 rule #4 is
 struck by ADJUDICATION C-1.
 
-**R63.** caldir MUST handle `409 <C:no-uid-conflict/>` on push. Reachable in normal use: a user
-renaming a local `.ics` changes the slug but not the UID, so `create_event.rs:26-38` PUTs to a new
-href with `If-None-Match: *` while the old resource still holds that UID — exactly the rejected
-pattern. Required behaviour: on `409`, fall back to `find_event_location` + a conditional PUT,
-i.e. treat it as the update the rename actually is.
+**R63.** caldir MUST handle `409 <C:no-uid-conflict/>` on push. **Correction (ADJUDICATION):** the
+trigger is **not** a local file rename. The href is UID-derived (`caldav/client.rs` `event_url`)
+and used unconditionally on create, so renaming a local `.ics` changes the slug but not the UID
+and therefore PUTs to the *same* href — a `412` under `If-None-Match: *`, or a silent `204`. The
+reachable trigger is a **server-assigned filename**: the UID already lives at a href caldir did
+not choose, so a create against `{uid}.ics` collides. That is exactly what `find_event_location`'s
+REPORT fallback exists for. Required behaviour is unchanged: on `409`, fall back to
+`find_event_location` + a conditional PUT, i.e. treat it as the update it actually is. Tests MUST
+assert the **outcome** (one resource, updated), never the status code.
 
 **R64 (INVIOLABLE).** caldir MUST **never PUT a multi-component `VCALENDAR`**. Radicale answers
 `400 Bad Request` — server log: `Multiple component types in object: 'VEVENT', 'VTODO'` (probe
@@ -760,8 +764,14 @@ error naming the count and MUST NOT load with the VTODO silently dropped (R32).
 **A-8 — zoned payload decodes. R102.** A CalDAV response body containing a `VTIMEZONE` sibling plus
 one VTODO MUST decode successfully (R18, R54).
 
-**A-9 — rename does not destroy. R103.** Renaming a task's local file, then pushing, MUST update
-the same server resource, not surface a `409` (R11, R63).
+**A-9 — rename does not destroy. R103.** Renaming an item's local file, then pushing, MUST update
+the same server resource and never create a second one (R11, R63). **Correction
+(ADJUDICATION):** a rename cannot itself produce a `409` — the href is UID-derived, so the rename
+yields the same href. What A-9 pins is the outcome: one resource, updated in place. It is measured
+on the VEVENT control (`live::radicale::renaming_a_local_file_updates_the_same_resource_and_never_a_second_one`),
+because a *task* rename can never reach a server at all under R70 — a task push aborts in core. The
+property transfers to tasks **by construction** (`event_url` takes the UID and nothing else), not
+by measurement.
 
 **A-10 — no VEVENT regression. R104 (INVIOLABLE).** The 686-test baseline MUST stay green in all
 three CI timezones with **zero edits to existing event tests**. Any required edit to an existing
@@ -831,8 +841,8 @@ in this set**, because `time_slug` is local-tz and a floating `COMPLETED` is zon
 | T-45 | R84, C13 | `output::agenda_text::tests::an_event_only_fixture_renders_byte_identically` | U | TZ |
 | T-46 | R84 | `output::agenda::tests::event_task_and_all_day_on_one_day_order_correctly` | U | **TZ** |
 | T-47 | R84 | `output::agenda::tests::an_undated_task_is_absent_from_the_body_counted_in_the_footer_and_present_in_json` | U | |
-| T-48 | A-1 (1-3), R1 | `connection::tests::a_task_is_pushed_as_a_vtodo_and_never_as_a_vevent` — asserts the captured `CreateEvent` payload contains `BEGIN:VTODO` and **no** `BEGIN:VEVENT` | **C** | |
-| T-49 | A-2, R96 | `connection::tests::syncing_twice_against_a_fake_remote_yields_an_empty_second_diff` | **C** | **TZ** |
+| T-48 | A-1 (1-3), R1 | `connection::tests::a_task_push_aborts_and_never_reaches_the_provider_as_a_vevent` — asserts the push aborts with the byte-exact literal `expected 1 event(s) in ICS, found 0` and that **no** request reached the provider. **Name corrected (ADJUDICATION):** the original `a_task_is_pushed_as_a_vtodo_and_never_as_a_vevent` asserted a falsehood — under R70 nothing is pushed at all, so there is no `CreateEvent` payload to inspect | **C** | |
+| T-49 | A-2, R96 | `connection::tests::syncing_twice_against_a_fake_remote_yields_an_empty_second_diff`. **Raw-fixture requirement (ADJUDICATION):** the remote MUST be driven from raw ICS via `MockProvider::reply_raw_data`, never from domain values via `reply`. `reply` encodes the expected value with `to_ics_string` — the encoder under test — so a lossy serialize cancels on both sides; measured, that blinded **6 of 12** mutations the raw-fixture version catches | **C** | **TZ** |
 | T-50 | R56 | `connection::tests::pushing_a_task_to_a_task_less_provider_fails_that_calendar_without_data_loss` | **C** | |
 | T-51 | R57 | `connection::tests::a_task_payload_from_a_newer_provider_fails_the_whole_list_before_any_apply` | **C** | |
 | T-52 | A-6, R100 | `connection::tests::a_mixed_local_directory_keeps_both_items_distinct_end_to_end` | **C** | |
@@ -841,7 +851,7 @@ in this set**, because `time_slug` is local-tz and a floating `COMPLETED` is zon
 | T-55 | R30, R96 | `live::radicale::get_pass_two_equals_get_pass_one` (never raw bytes vs what was PUT) | **L** | |
 | T-56 | R65 | `live::radicale::pushing_a_same_uid_pair_into_one_collection_surfaces_an_error` | **L** | |
 | T-57 | R67 | `live::radicale::the_server_injects_no_non_x_properties_onto_a_task` | **L** | |
-| T-58 | A-9, R103 | `live::radicale::renaming_a_local_task_file_updates_the_same_resource` | **L** | |
+| T-58 | A-9, R103 | `live::radicale::renaming_a_local_file_updates_the_same_resource_and_never_a_second_one`. **Name corrected (ADJUDICATION):** `renaming_a_local_task_file_updates_the_same_resource` is unreachable — a rename reaches a server only via a push, and R70 forbids a task push. It ships on the VEVENT control; the property transfers to tasks **by construction**, not by measurement | **L** | |
 | T-59 | R104, A-10 | The 686-test baseline, unmodified | U + C | **TZ** |
 
 **R107.** The live tier (T-53..T-58) MUST be runnable from a documented, reproducible container

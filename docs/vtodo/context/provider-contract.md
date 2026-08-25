@@ -12,7 +12,7 @@ Wire envelope: request `{"command": <method>, "params": <object>}`, response
 |---|---|---|---|---|
 | `connect` | `Connect` | `ConnectResponse` | JSON object (`JsonWireValue`) | `caldir-core/src/rpc/methods/connect.rs:13-23` |
 | `list_calendars` | `ListCalendars` | `Vec<CalendarConfig>` | JSON array of objects | `caldir-core/src/rpc/methods/list_calendars.rs:6-13` |
-| `list_events` | `ListEvents` | `Vec<Event>` | JSON array of **ICS strings** | `caldir-core/src/rpc/methods/list_events.rs:6-16` |
+| `list_events` | `ListEvents` | `Vec<CalendarItem>` (**was** `Vec<Event>`, retyped in `L4-02`) | JSON array of **ICS strings** | `caldir-core/src/rpc/methods/list_events.rs:6-16` |
 | `create_event` | `CreateEvent` | `Event` | **ICS string** | `caldir-core/src/rpc/methods/create_event.rs:6-16` |
 | `update_event` | `UpdateEvent` | `Event` | **ICS string** | `caldir-core/src/rpc/methods/update_event.rs:6-16` |
 | `delete_event` | `DeleteEvent` | `()` | `null` | `caldir-core/src/rpc/methods/delete_event.rs:6-16` |
@@ -62,7 +62,7 @@ pub trait Handler: Send + Sync {
         Err("list_calendars is not supported by this provider".into())
     }
 
-    async fn list_events(&self, _cmd: ListEvents) -> Result<Vec<Event>> {
+    async fn list_events(&self, _cmd: ListEvents) -> Result<Vec<CalendarItem>> { // was Vec<Event> before L4-02
         Err("list_events is not supported by this provider".into())
     }
 
@@ -171,6 +171,7 @@ Hard-failure points for anything genuinely new:
 ## 6. VEVENT assumptions in the provider contract
 
 1. **Every event-bearing RPC is typed `Event`**, a VEVENT-only Rust type — `CreateEvent.event`, `UpdateEvent.event`, `DeleteEvent.event`, `ListEvents::Response = Vec<Event>` (`rpc/methods/create_event.rs:10-15`, `update_event.rs:10-15`, `delete_event.rs:10-15`, `list_events.rs:15`). There is no component-kind discriminator on the wire.
+   **UPDATE (L4-02):** the *inbound* half of this is no longer true — `ListEvents::Response` is now `Vec<CalendarItem>`, and `Handler::list_events` returns `Result<Vec<CalendarItem>>`. The **outbound** fields (`CreateEvent.event`, `UpdateEvent.event`, `DeleteEvent.event`) deliberately stay `Event` under R70, which is why a task push aborts in core with `expected 1 event(s) in ICS, found 0` (`EventError::UnexpectedEventCount`) rather than reaching a provider. The inbound decode has its own byte-exact lock, `expected 1 supported component(s) in ICS, found {n}` (`EventError::UnexpectedComponentCount`).
 2. **Method names are event-shaped and closed**: `list_events`, `create_event`, `update_event`, `delete_event` in `enum Method` (`rpc/methods.rs:24-30`); dispatch matches all six exhaustively (`provider/handler.rs:101-108`).
 3. **Encode path emits a VEVENT**: `to_ics_string` builds `let ical_event: icalendar::Event = self.into();` and pushes it into an empty calendar (`caldir-core/src/event.rs:123-133`; `impl From<&Event> for icalendar::Event` at `event/to_icalendar.rs:4`).
 4. **Decode path reads only VEVENTs**: `icalendar.events().map(Event::try_from)` — every non-VEVENT component in the document is silently discarded (`caldir-core/src/event.rs:96-102`).
