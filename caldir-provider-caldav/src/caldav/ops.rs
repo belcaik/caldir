@@ -4,7 +4,7 @@
 //! provider (iCloud, generic CalDAV, etc.).
 
 use anyhow::{Context, Result};
-use caldir_core::{CalendarItem, Event};
+use caldir_core::CalendarItem;
 use http::{Method, Request, Uri};
 use libdav::dav::{GetEtag, make_relative_url};
 use libdav::requests::{DavRequest, ParseResponseError};
@@ -25,22 +25,19 @@ pub use list_calendars::{RawCalendar, list_calendars_raw};
 pub use list_events::fetch_events;
 pub use update_event::update_event;
 
-/// Parse the first valid event out of a single-resource ICS document.
+/// Decode the one supported item on a single CalDAV resource.
 ///
-/// CalDAV resources contain a single VEVENT (plus any RECURRENCE-ID overrides);
-/// we take the first one that parses cleanly and silently drop malformed events.
-pub(super) fn parse_event(ics: &str) -> Option<Event> {
-    CalendarItem::from_ics_str(ics)
-        .ok()?
-        .into_iter()
-        // TODO(L5-01): the loader now yields items, so this narrowing WIDENS
-        // the existing silent drop from "malformed" to "malformed or not an
-        // event" — a VTODO on a CalDAV resource disappears here. L5-01 owns
-        // making tasks visible to this provider; do not read this as clean.
-        .find_map(|result| match result {
-            Ok(CalendarItem::Event(event)) => Some(event),
-            _ => None,
-        })
+/// A CalDAV resource holds exactly one supported component — a `VEVENT` (plus
+/// any `RECURRENCE-ID` overrides) or a `VTODO` — optionally beside a
+/// `VTIMEZONE`, which is exempt from the count (R18, R102). Anything else is
+/// an error naming what it found.
+///
+/// Loud, never a skip: a resource that decodes to nothing is indistinguishable
+/// from a resource the server never returned, and that absence is exactly what
+/// the delete path acts on (R19, R48, R74). The arity and component-name rules
+/// are `CalendarItem`'s, not re-derived here (R54).
+pub(super) fn parse_item(ics: &str) -> Result<CalendarItem> {
+    Ok(CalendarItem::from_single_ics_str(ics)?)
 }
 
 /// Result of looking up a CalDAV resource by UID.
@@ -174,17 +171,99 @@ impl DavRequest for FindEventByUid<'_> {
 mod tests {
     use super::*;
 
+    /// The Radicale shape for any zoned task: a synthesized `VTIMEZONE`
+    /// sibling alongside the one `VTODO` (probe Q-C). Inline, so the
+    /// multi-component shape this fixture exists for cannot be edited out.
+    const RADICALE_ZONED_VTODO_ICS: &str = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+PRODID:-//Radicale//NONSGML Radicale Server//EN\r\n\
+BEGIN:VTIMEZONE\r\n\
+TZID:Europe/Stockholm\r\n\
+BEGIN:STANDARD\r\n\
+DTSTART:19701025T030000\r\n\
+TZOFFSETFROM:+0200\r\n\
+TZOFFSETTO:+0100\r\n\
+TZNAME:CET\r\n\
+END:STANDARD\r\n\
+BEGIN:DAYLIGHT\r\n\
+DTSTART:19700329T020000\r\n\
+TZOFFSETFROM:+0100\r\n\
+TZOFFSETTO:+0200\r\n\
+TZNAME:CEST\r\n\
+END:DAYLIGHT\r\n\
+END:VTIMEZONE\r\n\
+BEGIN:VTODO\r\n\
+UID:zoned-task@u-crawler\r\n\
+DTSTAMP:20260801T090000Z\r\n\
+DUE;TZID=Europe/Stockholm:20260815T235900\r\n\
+SUMMARY:Zoned deadline\r\n\
+END:VTODO\r\n\
+END:VCALENDAR\r\n";
+
     #[test]
     fn parse_event_extracts_uid_and_summary() {
         let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:evt-1@caldir\r\nDTSTART:20260615T100000Z\r\nDTEND:20260615T110000Z\r\nSUMMARY:Test\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
 
-        let event = parse_event(ics).expect("should parse");
+        let item = parse_item(ics).expect("should parse");
+        let CalendarItem::Event(event) = item else {
+            panic!("expected the VEVENT, got {item:?}");
+        };
         assert_eq!(event.uid.as_str(), "evt-1@caldir");
         assert_eq!(event.summary.as_deref(), Some("Test"));
     }
 
     #[test]
-    fn parse_event_returns_none_on_invalid_ics() {
-        assert!(parse_event("not ics").is_none());
+    fn parse_event_errors_on_invalid_ics() {
+        assert!(parse_item("not ics").is_err());
+    }
+
+    /// `R66`/`R19`. The old `find_map(Result::ok)` returned the VEVENT and
+    /// dropped the VTODO without a word; a short remote list is exactly what
+    /// the delete path acts on (R48, R74). A multi-component resource is now
+    /// an error naming the count.
+    #[test]
+    fn a_multi_component_resource_errors_rather_than_keeping_the_first() {
+        let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VEVENT\r\nUID:evt-1@caldir\r\nDTSTART:20260615T100000Z\r\nDTEND:20260615T110000Z\r\nSUMMARY:Meeting\r\nEND:VEVENT\r\n\
+BEGIN:VTODO\r\nUID:task-1@caldir\r\nSUMMARY:Task\r\nEND:VTODO\r\n\
+END:VCALENDAR\r\n";
+
+        let err = parse_item(ics).expect_err("keeping the first component is the R66 defect");
+
+        assert!(
+            err.to_string().contains('2'),
+            "the error must name the count it found (R75), got: {err}"
+        );
+    }
+
+    /// `R19`. An unsupported data-bearing component names itself and is never
+    /// an empty `Ok`.
+    #[test]
+    fn a_vjournal_only_resource_errors_and_names_the_component() {
+        let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VJOURNAL\r\nUID:journal-1@caldir\r\nDTSTAMP:20260801T090000Z\r\nEND:VJOURNAL\r\n\
+END:VCALENDAR\r\n";
+
+        let err = parse_item(ics).expect_err("an unsupported component must not decode");
+
+        assert!(
+            err.to_string().contains("VJOURNAL"),
+            "R19: the error must name the component, got: {err}"
+        );
+    }
+
+    /// `R18`/`R102`. The single most likely regression of a naive arity check:
+    /// every zoned task Radicale returns carries a `VTIMEZONE` sibling.
+    #[test]
+    fn a_vtimezone_sibling_does_not_break_a_zoned_task() {
+        let item = parse_item(RADICALE_ZONED_VTODO_ICS)
+            .expect("a VTIMEZONE sibling must not be counted towards arity");
+
+        let CalendarItem::Todo(todo) = item else {
+            panic!("expected the VTODO, got {item:?}");
+        };
+
+        assert_eq!(todo.uid.as_str(), "zoned-task@u-crawler");
+        assert_eq!(todo.summary.as_deref(), Some("Zoned deadline"));
     }
 }

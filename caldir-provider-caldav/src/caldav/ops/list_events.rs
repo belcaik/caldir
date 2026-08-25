@@ -1,23 +1,27 @@
 //! Fetch events from a CalDAV calendar within a time range.
 
 use anyhow::{Context, Result};
-use caldir_core::Event;
+use caldir_core::CalendarItem;
 use http::{Method, Request, Uri};
 use libdav::dav::make_relative_url;
 use libdav::requests::{DavRequest, ParseResponseError};
 
 use crate::caldav::{create_caldav_client, format_caldav_datetime, url_to_href};
 
-use super::parse_event;
+use super::parse_item;
 
-/// Fetch events from a CalDAV calendar within a time range.
+/// Fetch a CalDAV calendar's items: events in the window, and every task.
+///
+/// Item-typed, because a `VTODO` has nowhere else to go — narrowing back to
+/// `Event` here would re-create the silent drop this listing exists to avoid
+/// (R19, R53).
 pub async fn fetch_events(
     username: &str,
     password: &str,
     calendar_url: &str,
     from: &str,
     to: &str,
-) -> Result<Vec<Event>> {
+) -> Result<Vec<CalendarItem>> {
     let caldav = create_caldav_client(calendar_url, username, password)?;
 
     let calendar_href = url_to_href(calendar_url);
@@ -34,17 +38,23 @@ pub async fn fetch_events(
         resources.extend(response.resources);
     }
 
-    let mut events = Vec::new();
-    for resource in resources {
-        // TODO(L5-01): `parse_event` narrows to VEVENT and drops everything
-        // else silently, so the VTODO REPORT's resources land here and vanish.
-        // L5-01 (R66) owns making them visible; this is named, not hidden.
-        if let Some(event) = parse_event(&resource.data) {
-            events.push(event);
-        }
-    }
+    decode_resources(resources)
+}
 
-    Ok(events)
+/// Decode every fetched resource, or fail the whole listing.
+///
+/// **A partially-decoded listing is forbidden (R74, AC 3).** Core reads a
+/// remote listing as the complete remote state, so an item missing from it is
+/// a delete. "Log and continue" here would turn one unreadable resource into a
+/// deleted local file; the run aborts instead, before any apply (R19, R48).
+fn decode_resources(resources: Vec<CalendarResource>) -> Result<Vec<CalendarItem>> {
+    resources
+        .into_iter()
+        .map(|resource| {
+            parse_item(&resource.data)
+                .with_context(|| format!("Failed to decode calendar resource {}", resource.href))
+        })
+        .collect()
 }
 
 /// The REPORTs one `fetch_events` run issues, in order.
@@ -133,7 +143,7 @@ fn calendar_query_body(filter: ComponentFilter<'_>) -> String {
 /// A fetched calendar resource with its ICS data.
 #[derive(Debug)]
 struct CalendarResource {
-    _href: String,
+    href: String,
     _etag: Option<String>,
     data: String,
 }
@@ -215,7 +225,7 @@ fn parse_calendar_resources(
         // Only include resources that have calendar data
         if let Some(data) = data {
             resources.push(CalendarResource {
-                _href: href,
+                href,
                 _etag: etag,
                 data,
             });
@@ -267,6 +277,76 @@ mod tests {
         );
 
         assert_eq!(vevent_body(), expected, "the VEVENT query must not move");
+    }
+
+    const VEVENT_RESOURCE_ICS: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VEVENT\r\nUID:evt-1@caldir\r\nDTSTART:20260615T100000Z\r\nDTEND:20260615T110000Z\r\n\
+SUMMARY:Meeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+    const VTODO_RESOURCE_ICS: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VTODO\r\nUID:task-1@caldir\r\nDTSTAMP:20260801T090000Z\r\nSTATUS:COMPLETED\r\n\
+SUMMARY:File the tax return\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
+
+    /// A `VJOURNAL` — supported by no caldir version, and the shape a
+    /// forward-dated server can put on the wire at any time.
+    const VJOURNAL_RESOURCE_ICS: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VJOURNAL\r\nUID:journal-1@caldir\r\nDTSTAMP:20260801T090000Z\r\nEND:VJOURNAL\r\n\
+END:VCALENDAR\r\n";
+
+    fn resource(href: &str, data: &str) -> CalendarResource {
+        CalendarResource {
+            href: href.to_string(),
+            _etag: None,
+            data: data.to_string(),
+        }
+    }
+
+    /// R53/R66. The VTODO REPORT's resources reach the caller as tasks. Before
+    /// `L5-01` they were fetched and then dropped on the floor by
+    /// `find_map(Result::ok)`, which reads to core as "the server does not have
+    /// this task" — i.e. a delete.
+    #[test]
+    fn a_task_resource_reaches_the_caller_as_a_task() {
+        let items = decode_resources(vec![
+            resource("/cal/evt-1.ics", VEVENT_RESOURCE_ICS),
+            resource("/cal/task-1.ics", VTODO_RESOURCE_ICS),
+        ])
+        .expect("both resources decode");
+
+        let kinds: Vec<&str> = items
+            .iter()
+            .map(|item| match item {
+                CalendarItem::Event(_) => "event",
+                CalendarItem::Todo(_) => "todo",
+            })
+            .collect();
+
+        assert_eq!(kinds, ["event", "todo"], "got {items:?}");
+        assert_eq!(items[1].uid().as_str(), "task-1@caldir");
+    }
+
+    /// AC 3 (R74, R48, R19). One undecodable resource fails the **whole**
+    /// listing. A partial listing is forbidden: core treats a remote listing as
+    /// the complete remote state, so a resource quietly missing from it is a
+    /// delete of the user's local file.
+    #[test]
+    fn one_undecodable_resource_fails_the_whole_listing() {
+        let err = decode_resources(vec![
+            resource("/cal/evt-1.ics", VEVENT_RESOURCE_ICS),
+            resource("/cal/journal-1.ics", VJOURNAL_RESOURCE_ICS),
+            resource("/cal/task-1.ics", VTODO_RESOURCE_ICS),
+        ])
+        .expect_err("a partially-decoded listing must never be returned");
+
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("/cal/journal-1.ics"),
+            "the failure must name the offending resource, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("VJOURNAL"),
+            "R19: the failure must name the component, got: {rendered}"
+        );
     }
 
     /// T-37 (R51, R58). The VTODO `calendar-query` carries **no**

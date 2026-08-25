@@ -7,7 +7,7 @@ use libdav::caldav::GetCalendarResources;
 
 use crate::caldav::{create_caldav_client, event_url, url_to_href};
 
-use super::parse_event;
+use super::parse_item;
 
 /// Create a new event on a CalDAV calendar.
 ///
@@ -57,7 +57,7 @@ pub async fn create_event(
     if let Some(response) = get_response
         && let Some(resource) = response.resources.into_iter().next()
         && let Ok(content) = resource.content
-        && let Some(fetched_event) = parse_event(&content.data)
+        && let Ok(caldir_core::CalendarItem::Event(fetched_event)) = parse_item(&content.data)
     {
         return Ok(fetched_event);
     }

@@ -1,7 +1,7 @@
 //! List events within a time range from an iCloud calendar.
 
 use anyhow::Result;
-use caldir_core::Event;
+use caldir_core::CalendarItem;
 use caldir_core::provider::ProviderStorage;
 use caldir_core::rpc::ListEvents;
 use caldir_provider_caldav::caldav::ops;
@@ -10,7 +10,7 @@ use crate::constants::PROVIDER_NAME;
 use crate::remote_config::ICloudRemoteConfig;
 use crate::session::SessionStore;
 
-pub async fn handle(cmd: ListEvents) -> Result<Vec<Event>> {
+pub async fn handle(cmd: ListEvents) -> Result<Vec<CalendarItem>> {
     let config = ICloudRemoteConfig::try_from(&cmd.remote)?;
     let store = SessionStore::new(ProviderStorage::for_provider(PROVIDER_NAME)?);
     let session = store.load(&config.icloud_account)?;

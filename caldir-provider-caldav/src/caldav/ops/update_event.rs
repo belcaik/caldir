@@ -7,7 +7,7 @@ use libdav::caldav::GetCalendarResources;
 
 use crate::caldav::{create_caldav_client, url_to_href};
 
-use super::{find_event_location, parse_event};
+use super::{find_event_location, parse_item};
 
 /// Update an existing event on a CalDAV calendar.
 ///
@@ -56,7 +56,7 @@ pub async fn update_event(
     if let Some(response) = get_response
         && let Some(resource) = response.resources.into_iter().next()
         && let Ok(content) = resource.content
-        && let Some(fetched_event) = parse_event(&content.data)
+        && let Ok(caldir_core::CalendarItem::Event(fetched_event)) = parse_item(&content.data)
     {
         return Ok(fetched_event);
     }
