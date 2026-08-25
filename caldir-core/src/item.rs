@@ -101,15 +101,53 @@ impl CalendarItem {
 
     /// The event backing this item, or `None` for any other kind.
     ///
-    /// The narrowing the VEVENT-only sync seams still need. It is not a drop:
-    /// every caller looks the item up by an *event* identity, and a stored
-    /// base always shares its key's kind, so `None` here is unreachable rather
-    /// than lossy — and where it is reached anyway it means "no base", which
-    /// costs a three-way compare, never a delete (R19).
+    /// Test-only since `L3-03`: the sync seams are item-typed end to end now,
+    /// so production never narrows here. It survives for the test-side base
+    /// accessor, which asserts against an `Event`.
+    #[cfg(test)]
     pub(crate) fn as_event(&self) -> Option<&Event> {
         match self {
             CalendarItem::Event(event) => Some(event),
             CalendarItem::Todo(_) => None,
+        }
+    }
+
+    /// Whether the item is `STATUS:CANCELLED`, in whichever kind's own value
+    /// set (R42).
+    ///
+    /// `CANCELLED` **only**. `COMPLETED` is not a tombstone: a task can be
+    /// completed on the server and still have to be created locally, and the
+    /// MVP's own fixture is `STATUS:COMPLETED`. Folding it in here would make
+    /// a completed task un-pullable.
+    pub(crate) fn is_cancelled(&self) -> bool {
+        match self {
+            CalendarItem::Event(event) => event.status == crate::event::Status::Cancelled,
+            CalendarItem::Todo(todo) => todo.status == crate::todo::TodoStatus::Cancelled,
+        }
+    }
+
+    /// `SEQUENCE`, the tiebreak direction detection falls back on when the
+    /// remote reports no `LAST-MODIFIED` (R40).
+    pub(crate) fn sequence(&self) -> i32 {
+        match self {
+            CalendarItem::Event(event) => event.sequence,
+            CalendarItem::Todo(todo) => todo.sequence,
+        }
+    }
+
+    /// Narrow to an `Event` for the event-only RPC wire (R70, R71).
+    ///
+    /// Not a drop: the `Err` is the arity error the wire already reports, so a
+    /// task push aborts loudly instead of being pushed as something else.
+    /// `L6-01` owns turning this into a user-facing story.
+    pub(crate) fn into_event(self) -> Result<Event, EventError> {
+        match self {
+            CalendarItem::Event(event) => Ok(event),
+            // TODO(L6-01): pushing a task over an event-only seam.
+            CalendarItem::Todo(_) => Err(EventError::UnexpectedEventCount {
+                expected: 1,
+                found: 0,
+            }),
         }
     }
 

@@ -1,7 +1,7 @@
 use crate::output::time::format_datetime;
 use caldir_core::{
-    Attachment, Attendee, Caldir, Calendar, CalendarDiff, EventChange, Recurrence, Reminder,
-    TimeFormat, XProperty,
+    Attachment, Attendee, Caldir, Calendar, CalendarDiff, CalendarItem, EventChange, Recurrence,
+    Reminder, TimeFormat, XProperty,
 };
 use owo_colors::OwoColorize;
 use std::collections::{HashMap, HashSet};
@@ -33,22 +33,28 @@ fn colorize_diff(kind: &EventChange, text: &str) -> String {
 
 impl Render for EventChange {
     fn render(&self, caldir: &Caldir) -> String {
-        let event = match self {
-            EventChange::Create(event) | EventChange::Delete(event) => event,
+        let item = match self {
+            EventChange::Create(item) | EventChange::Delete(item) => item,
             EventChange::Update { to, .. } => to,
         };
 
-        let summary_text = &event.summary.clone().unwrap_or("(Untitled)".to_string());
+        let summary_text = &item.summary().unwrap_or("(Untitled)").to_string();
 
         let summary = colorize_diff(self, summary_text);
 
-        let time = format_datetime(&event.start, caldir.config().time_format());
-
-        let recurring = if event.recurrence.is_some() {
-            " 🔁"
-        } else {
-            ""
+        // TODO(L7-07): a task renders with an EMPTY time column. `DUE` and the
+        // task status still have no row here, so a task-only diff is visible
+        // but under-described. Minimum to compile; L7-07 owns the real
+        // rendering.
+        let (time, is_recurring) = match item {
+            CalendarItem::Event(event) => (
+                format_datetime(&event.start, caldir.config().time_format()),
+                event.recurrence.is_some(),
+            ),
+            CalendarItem::Todo(todo) => (String::new(), todo.recurrence.is_some()),
         };
+
+        let recurring = if is_recurring { " 🔁" } else { "" };
 
         format!(
             "{} {} {}{}",
@@ -222,8 +228,16 @@ fn render_field_diffs(diff: &EventChange, caldir: &Caldir) -> Vec<String> {
     let mut lines = Vec::new();
     let time_format = caldir.config().time_format();
 
-    // Only show field diffs for updates
-    if let EventChange::Update { from: old, to: new } = diff {
+    // Only show field diffs for updates.
+    //
+    // TODO(L7-07): event-only. A task update prints its header line but NO
+    // field rows — `due`, `status`, `percent-complete` and `completed` have no
+    // rows here yet. Minimum to compile; L7-07 owns the task rows.
+    if let EventChange::Update {
+        from: CalendarItem::Event(old),
+        to: CalendarItem::Event(new),
+    } = diff
+    {
         if old.summary != new.summary {
             lines.push(format!(
                 "{}: {} → {}",

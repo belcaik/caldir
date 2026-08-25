@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use crate::caldir::TimeFormat;
 use crate::diff::{CalendarDiff, EventChange};
+use crate::item::CalendarItem;
 use crate::provider::mock_provider::MockProvider;
 use crate::{
     Caldir, CaldirConfig, Calendar, CalendarConfig, CalendarEvent, Event, EventTime, Provider,
@@ -103,28 +104,46 @@ pub fn test_remote() -> (MockProvider, Remote) {
     (mock, remote)
 }
 
-pub fn outgoing_create_diff(event: Event) -> CalendarDiff {
-    CalendarDiff::from_changes(vec![EventChange::Create(event)], vec![])
+pub fn outgoing_create_diff(item: impl Into<CalendarItem>) -> CalendarDiff {
+    CalendarDiff::from_changes(vec![EventChange::Create(item.into())], vec![])
 }
 
-pub fn outgoing_update_diff(from: Event, to: Event) -> CalendarDiff {
-    CalendarDiff::from_changes(vec![EventChange::Update { from, to }], vec![])
+pub fn outgoing_update_diff(
+    from: impl Into<CalendarItem>,
+    to: impl Into<CalendarItem>,
+) -> CalendarDiff {
+    CalendarDiff::from_changes(
+        vec![EventChange::Update {
+            from: from.into(),
+            to: to.into(),
+        }],
+        vec![],
+    )
 }
 
-pub fn outgoing_delete_diff(event: Event) -> CalendarDiff {
-    CalendarDiff::from_changes(vec![EventChange::Delete(event)], vec![])
+pub fn outgoing_delete_diff(item: impl Into<CalendarItem>) -> CalendarDiff {
+    CalendarDiff::from_changes(vec![EventChange::Delete(item.into())], vec![])
 }
 
-pub fn incoming_create_diff(event: Event) -> CalendarDiff {
-    CalendarDiff::from_changes(vec![], vec![EventChange::Create(event)])
+pub fn incoming_create_diff(item: impl Into<CalendarItem>) -> CalendarDiff {
+    CalendarDiff::from_changes(vec![], vec![EventChange::Create(item.into())])
 }
 
-pub fn incoming_update_diff(from: Event, to: Event) -> CalendarDiff {
-    CalendarDiff::from_changes(vec![], vec![EventChange::Update { from, to }])
+pub fn incoming_update_diff(
+    from: impl Into<CalendarItem>,
+    to: impl Into<CalendarItem>,
+) -> CalendarDiff {
+    CalendarDiff::from_changes(
+        vec![],
+        vec![EventChange::Update {
+            from: from.into(),
+            to: to.into(),
+        }],
+    )
 }
 
-pub fn incoming_delete_diff(event: Event) -> CalendarDiff {
-    CalendarDiff::from_changes(vec![], vec![EventChange::Delete(event)])
+pub fn incoming_delete_diff(item: impl Into<CalendarItem>) -> CalendarDiff {
+    CalendarDiff::from_changes(vec![], vec![EventChange::Delete(item.into())])
 }
 
 pub fn test_provider(slug: &str) -> (TempDir, Provider) {

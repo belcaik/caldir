@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 
 use super::event_change::EventChange;
 use crate::calendar::{CalendarListing, SyncBases};
-use crate::event::Status;
 use crate::item::CalendarItem;
 use crate::{CalendarEvent, DateRange, RemoteEvent};
 
@@ -43,68 +42,74 @@ impl CalendarDiff {
         range: &DateRange,
         deletes: Deletes,
     ) -> Self {
-        let local_event_ids: HashSet<_> = local_events
+        // Keyed by the kind-carrying identity (R36): a VEVENT and a VTODO
+        // sharing a UID are two entries on each side, so `.collect()` cannot
+        // silently merge them and no lookup can match across kinds.
+        let local_item_ids: HashSet<_> = local_events
             .iter()
-            // VEVENT-only: this set is compared against remote *event* ids, and
-            // pass 2 below only ever looks up an event identity.
-            .filter_map(|e| Some(e.event()?.event_instance_id()))
+            .map(|e| e.item().instance_id())
             .collect();
 
         let remote_by_id: HashMap<_, &RemoteEvent> = remote_events
             .iter()
-            .map(|e| (e.event().event_instance_id(), e))
+            .map(|e| (e.item().instance_id(), e))
             .collect();
+
+        // R49 version-skew belt: a pre-VTODO provider still filters on VEVENT
+        // and reports no tasks at all. Their total absence is version skew,
+        // not a delete. Scoped to *tasks*, so event deletes are untouched
+        // (R1, R2), and to the *all-tasks-absent* case, so a task missing from
+        // a task-carrying response is still a real delete (R99).
+        // TODO(L3-04): the accompanying warning (R49, R50) still has to land.
+        let remote_reports_tasks = remote_events
+            .iter()
+            .any(|e| matches!(e.item(), CalendarItem::Todo(_)));
 
         let mut outgoing = Vec::new();
         let mut incoming = Vec::new();
 
         for local_event in &local_events {
-            // Narrowing, not a filter: a task simply produces no change here.
-            // It is never treated as absent-and-therefore-deleted, because the
-            // delete branches below are inside this same `Some` arm.
-            let Some(event) = local_event.event() else {
-                continue;
-            };
-            let id = event.event_instance_id();
+            let item = local_event.item();
+            let id = item.instance_id();
 
             // In both local and remote: skip if equal, otherwise update
             if let Some(remote_event) = remote_by_id.get(&id) {
-                if event == remote_event.event() {
+                if item == remote_event.item() {
                     continue;
                 }
 
                 // Both cancelled: treat as in-sync regardless of field drift.
-                // Cancelled events are historical; we don't churn syncing them.
-                if event.status == Status::Cancelled
-                    && remote_event.event().status == Status::Cancelled
-                {
+                // Cancelled items are historical; we don't churn syncing them.
+                // `CANCELLED` only, never `COMPLETED` (R42).
+                if item.is_cancelled() && remote_event.item().is_cancelled() {
                     continue;
                 }
 
-                // Never push an unspecified (None) visibility — inherit the remote's.
-                let mut to_push = event.clone();
-                if to_push.visibility.is_none() {
-                    to_push.visibility = remote_event.event().visibility;
+                // Never push an unspecified (None) visibility — inherit the
+                // remote's. Event-only: `VTODO` has no `CLASS` field to patch.
+                let mut to_push = item.clone();
+                if let (CalendarItem::Event(push), CalendarItem::Event(remote)) =
+                    (&mut to_push, remote_event.item())
+                    && push.visibility.is_none()
+                {
+                    push.visibility = remote.visibility;
                 }
 
-                let base = sync_bases
-                    .get(&id)
-                    .and_then(Option::as_deref)
-                    .and_then(CalendarItem::as_event);
-                let direction = if &to_push == remote_event.event() {
+                let base = sync_bases.get(&id).and_then(Option::as_deref);
+                let direction = if &to_push == remote_event.item() {
                     Some(UpdateDirection::Pull)
                 } else {
-                    update_direction(local_event, event, remote_event, base)
+                    update_direction(local_event, item, remote_event, base)
                 };
 
                 match direction {
                     Some(UpdateDirection::Push) => outgoing.push(EventChange::Update {
-                        from: remote_event.event().clone(),
+                        from: remote_event.item().clone(),
                         to: to_push,
                     }),
                     Some(UpdateDirection::Pull) => incoming.push(EventChange::Update {
-                        from: event.clone(),
-                        to: remote_event.event().clone(),
+                        from: item.clone(),
+                        to: remote_event.item().clone(),
                     }),
                     None => {}
                 }
@@ -119,26 +124,31 @@ impl CalendarDiff {
             // (R47): `false` here means `continue` — neither the delete below
             // nor the create — and `true` is what authorizes the delete.
             if let (Some(from), Some(to)) = (range.from, range.to)
-                && !local_event.item().has_occurrence_in_range(from, to)
+                && !item.has_occurrence_in_range(from, to)
             {
                 continue;
             }
 
             if sync_bases.get(&id).is_some() {
                 // R48: suppressed when the local listing is incomplete.
-                if deletes == Deletes::Allowed {
-                    incoming.push(EventChange::Delete(event.clone()));
+                // R49: suppressed for tasks when the remote reported none.
+                let suppressed_by_version_skew =
+                    matches!(item, CalendarItem::Todo(_)) && !remote_reports_tasks;
+
+                if deletes == Deletes::Allowed && !suppressed_by_version_skew {
+                    incoming.push(EventChange::Delete(item.clone()));
                 }
             } else {
-                outgoing.push(EventChange::Create(event.clone()));
+                outgoing.push(EventChange::Create(item.clone()));
             }
         }
 
         for remote_event in &remote_events {
-            let id = remote_event.event().event_instance_id();
+            let item = remote_event.item();
+            let id = item.instance_id();
 
             // Already in local and remote, skip
-            if local_event_ids.contains(&id) {
+            if local_item_ids.contains(&id) {
                 continue;
             }
 
@@ -146,21 +156,22 @@ impl CalendarDiff {
             // A missing file is semantically equivalent to STATUS:CANCELLED —
             // both mean "not active". Avoids resurrecting tombstones on pull
             // and avoids spurious push-deletes for events Google has already
-            // cancelled.
-            if remote_event.event().status == Status::Cancelled {
+            // cancelled. `CANCELLED` only, never `COMPLETED` (R42): a remote
+            // completed task must still be created locally.
+            if item.is_cancelled() {
                 continue;
             }
 
             if sync_bases.get(&id).is_some() {
-                // Remote event was in local, gone now. Delete remotely —
+                // Remote item was in local, gone now. Delete remotely —
                 // unless R48 suppressed deletes: the local file may only be
                 // unreadable, not gone.
                 if deletes == Deletes::Allowed {
-                    outgoing.push(EventChange::Delete(remote_event.event().clone()));
+                    outgoing.push(EventChange::Delete(item.clone()));
                 }
             } else {
                 // Not in local, create it!
-                incoming.push(EventChange::Create(remote_event.event().clone()));
+                incoming.push(EventChange::Create(item.clone()));
             }
         }
 
@@ -226,14 +237,14 @@ enum UpdateDirection {
 
 fn update_direction(
     local: &CalendarEvent,
-    local_event: &crate::Event,
+    local_item: &CalendarItem,
     remote: &RemoteEvent,
-    base: Option<&crate::Event>,
+    base: Option<&CalendarItem>,
 ) -> Option<UpdateDirection> {
     // If base exists, use that for determining direction:
     if let Some(base) = base {
-        let local_has_changes = local_event != base;
-        let remote_has_changes = remote.event() != base;
+        let local_has_changes = local_item != base;
+        let remote_has_changes = remote.item() != base;
 
         match (local_has_changes, remote_has_changes) {
             (false, false) => return None,
@@ -245,20 +256,22 @@ fn update_direction(
 
     // Both sides changed, or no base exists for this legacy sync state (TODO: resolve conflicts?),
     // use mtime / LAST-MODIFIED to determine direction. If both are equal, default to pull.
-    if local_is_newer(local, local_event, remote) {
+    if local_is_newer(local, local_item, remote) {
         Some(UpdateDirection::Push)
     } else {
         Some(UpdateDirection::Pull)
     }
 }
 
-fn local_is_newer(local: &CalendarEvent, local_event: &crate::Event, remote: &RemoteEvent) -> bool {
-    if remote.modified_at().is_none() && local_event.sequence != remote.event().sequence {
-        return local_event.sequence > remote.event().sequence;
+fn local_is_newer(local: &CalendarEvent, local_item: &CalendarItem, remote: &RemoteEvent) -> bool {
+    if remote.modified_at().is_none() && local_item.sequence() != remote.item().sequence() {
+        return local_item.sequence() > remote.item().sequence();
     }
 
     match (local.modified_at(), remote.modified_at()) {
         (Some(l), Some(r)) => l > r,
+        // R41: Push-biased. A wrong Pull destroys the user's local edit with
+        // no recovery, so this arm is not a tiebreak to tidy up.
         (Some(_), None) => true,
         (None, Some(_)) => false,
         (None, None) => true,
@@ -270,9 +283,9 @@ mod tests {
     use super::*;
     use crate::Event;
     use crate::calendar::{CalendarError, CalendarListing};
-    use crate::event::{EventInstanceId, EventTime};
+    use crate::event::{EventInstanceId, EventTime, Status};
     use crate::test_utils::{test_calendar, test_calendar_event, test_event, test_event_time};
-    use crate::todo::Todo;
+    use crate::todo::{Todo, TodoStatus};
     use chrono::{DateTime, TimeZone, Utc};
     use pretty_assertions::assert_eq;
 
@@ -319,7 +332,7 @@ mod tests {
             &DateRange::default(),
         );
 
-        assert_eq!(diff.outgoing, vec![EventChange::Create(new_event)]);
+        assert_eq!(diff.outgoing, vec![EventChange::Create(new_event.into())]);
         assert_eq!(diff.incoming, vec![]);
     }
 
@@ -339,7 +352,7 @@ mod tests {
         );
 
         assert_eq!(diff.outgoing, vec![]);
-        assert_eq!(diff.incoming, vec![EventChange::Create(new_event)]);
+        assert_eq!(diff.incoming, vec![EventChange::Create(new_event.into())]);
     }
 
     #[test]
@@ -359,7 +372,10 @@ mod tests {
             &DateRange::default(),
         );
 
-        assert_eq!(diff.outgoing, vec![EventChange::Delete(remote_event)]);
+        assert_eq!(
+            diff.outgoing,
+            vec![EventChange::Delete(remote_event.into())]
+        );
         assert_eq!(diff.incoming, vec![]);
     }
 
@@ -389,8 +405,8 @@ mod tests {
         assert_eq!(
             diff.incoming,
             vec![EventChange::Update {
-                from: event,
-                to: cancelled,
+                from: event.into(),
+                to: cancelled.into(),
             }]
         );
     }
@@ -490,7 +506,7 @@ mod tests {
         );
 
         assert_eq!(diff.outgoing, vec![]);
-        assert_eq!(diff.incoming, vec![EventChange::Delete(local_event)]);
+        assert_eq!(diff.incoming, vec![EventChange::Delete(local_event.into())]);
     }
 
     #[test]
@@ -510,7 +526,7 @@ mod tests {
         );
 
         assert_eq!(diff.outgoing, vec![]);
-        assert_eq!(diff.incoming, vec![EventChange::Delete(local_event)]);
+        assert_eq!(diff.incoming, vec![EventChange::Delete(local_event.into())]);
     }
 
     #[test]
@@ -538,8 +554,8 @@ mod tests {
         assert_eq!(
             diff.outgoing,
             vec![EventChange::Update {
-                from: remote_event,
-                to: local_event,
+                from: remote_event.into(),
+                to: local_event.into(),
             }]
         );
         assert_eq!(diff.incoming, vec![]);
@@ -575,8 +591,8 @@ mod tests {
         assert_eq!(
             diff.incoming,
             vec![EventChange::Update {
-                from: local,
-                to: remote,
+                from: local.into(),
+                to: remote.into(),
             }]
         );
     }
@@ -606,8 +622,8 @@ mod tests {
         assert_eq!(
             diff.incoming,
             vec![EventChange::Update {
-                from: base,
-                to: remote,
+                from: base.into(),
+                to: remote.into(),
             }]
         );
     }
@@ -643,8 +659,8 @@ mod tests {
         assert_eq!(
             diff.incoming,
             vec![EventChange::Update {
-                from: base,
-                to: remote,
+                from: base.into(),
+                to: remote.into(),
             }]
         );
     }
@@ -679,8 +695,8 @@ mod tests {
         assert_eq!(
             diff.incoming,
             vec![EventChange::Update {
-                from: local,
-                to: remote,
+                from: local.into(),
+                to: remote.into(),
             }]
         );
     }
@@ -713,8 +729,8 @@ mod tests {
         assert_eq!(
             diff.outgoing,
             vec![EventChange::Update {
-                from: remote,
-                to: local,
+                from: remote.into(),
+                to: local.into(),
             }]
         );
     }
@@ -777,8 +793,8 @@ mod tests {
         assert_eq!(
             diff.incoming,
             vec![EventChange::Update {
-                from: local_event,
-                to: remote_event,
+                from: local_event.into(),
+                to: remote_event.into(),
             }]
         );
     }
@@ -815,8 +831,8 @@ mod tests {
         assert_eq!(
             diff.incoming,
             vec![EventChange::Update {
-                from: local_event,
-                to: remote_event,
+                from: local_event.into(),
+                to: remote_event.into(),
             }]
         );
     }
@@ -850,7 +866,12 @@ mod tests {
 
         assert_eq!(diff.incoming, vec![]);
         match diff.outgoing.as_slice() {
-            [EventChange::Update { to, .. }] => {
+            [
+                EventChange::Update {
+                    to: CalendarItem::Event(to),
+                    ..
+                },
+            ] => {
                 assert_eq!(to.summary.as_deref(), Some("Edited locally"));
                 assert_eq!(to.visibility, Some(crate::event::Visibility::Private));
             }
@@ -886,8 +907,8 @@ mod tests {
         assert_eq!(
             diff.incoming,
             vec![EventChange::Update {
-                from: local_event,
-                to: remote_event,
+                from: local_event.into(),
+                to: remote_event.into(),
             }]
         );
     }
@@ -940,8 +961,8 @@ mod tests {
         assert_eq!(
             diff.incoming,
             vec![EventChange::Update {
-                from: local_event,
-                to: remote_event,
+                from: local_event.into(),
+                to: remote_event.into(),
             }]
         );
     }
@@ -996,7 +1017,7 @@ mod tests {
         let diff = CalendarDiff::compute(vec![calendar_event], vec![], &synced_ids, &range);
 
         assert_eq!(diff.outgoing, vec![]);
-        assert_eq!(diff.incoming, vec![EventChange::Delete(event)]);
+        assert_eq!(diff.incoming, vec![EventChange::Delete(event.into())]);
     }
 
     /// T-29 (spec §18, R48/C7). A calendar with an unreadable `.ics` has a
@@ -1058,8 +1079,8 @@ mod tests {
         assert_eq!(incoming_deletes, Vec::<&EventChange>::new());
 
         // Delete-scoped, not a blanket "do nothing".
-        assert_eq!(diff.outgoing, vec![EventChange::Create(local_new)]);
-        assert_eq!(diff.incoming, vec![EventChange::Create(remote_new)]);
+        assert_eq!(diff.outgoing, vec![EventChange::Create(local_new.into())]);
+        assert_eq!(diff.incoming, vec![EventChange::Create(remote_new.into())]);
     }
 
     /// The other polarity (R47): a complete listing deletes exactly as before.
@@ -1086,8 +1107,14 @@ mod tests {
             &DateRange::default(),
         );
 
-        assert_eq!(diff.outgoing, vec![EventChange::Delete(remote_deleted)]);
-        assert_eq!(diff.incoming, vec![EventChange::Delete(local_deleted)]);
+        assert_eq!(
+            diff.outgoing,
+            vec![EventChange::Delete(remote_deleted.into())]
+        );
+        assert_eq!(
+            diff.incoming,
+            vec![EventChange::Delete(local_deleted.into())]
+        );
     }
 
     // ========================================================================
@@ -1321,7 +1348,10 @@ mod tests {
         );
 
         assert_eq!(expanded.outgoing, vec![]);
-        assert_eq!(expanded.incoming, vec![EventChange::Delete(recurring)]);
+        assert_eq!(
+            expanded.incoming,
+            vec![EventChange::Delete(recurring.into())]
+        );
 
         // In window, that same event still produces the incoming delete —
         // the polarity R47 warns about, pinned on the event side.
@@ -1336,7 +1366,7 @@ mod tests {
         );
 
         assert_eq!(in_window.outgoing, vec![]);
-        assert_eq!(in_window.incoming, vec![EventChange::Delete(event)]);
+        assert_eq!(in_window.incoming, vec![EventChange::Delete(event.into())]);
     }
 
     /// T-25 (R97, A-3). The exact shape of the data-loss bug: a previously
@@ -1366,5 +1396,220 @@ mod tests {
 
         assert_eq!(diff.incoming, vec![], "R97: no incoming delete");
         assert_eq!(diff.outgoing, vec![], "R97: no outgoing delete either");
+    }
+
+    /// T-26 (R98, A-4). An undated task with no base is a *create*, never a
+    /// skip: R44 row N/N makes the window predicate unconditionally true, so
+    /// a bounded window must not swallow it.
+    #[test]
+    fn an_undated_task_with_no_base_produces_one_outgoing_create() {
+        let (_tmp, calendar) = test_calendar();
+        let todo = Todo::new("Undated, never synced");
+        let calendar_event = CalendarEvent::create(&calendar, todo.clone()).unwrap();
+
+        let diff = CalendarDiff::compute(
+            vec![calendar_event],
+            vec![],
+            &SyncBases::new(),
+            &DateRange {
+                from: Some(window_from()),
+                to: Some(window_to()),
+            },
+        );
+
+        assert_eq!(
+            diff.outgoing,
+            vec![EventChange::Create(CalendarItem::Todo(todo))],
+            "R98: an undated task with no base is pushed, not skipped"
+        );
+        assert_eq!(diff.incoming, vec![]);
+    }
+
+    /// T-27 (R99, A-5). Absence stays meaningful. The remote response is
+    /// non-empty and *does* carry a task, so R49's version-skew belt is off;
+    /// a tracked task missing from it is a real incoming delete.
+    #[test]
+    fn a_task_omitted_from_a_non_empty_remote_list_is_still_deleted() {
+        let (_tmp, calendar) = test_calendar();
+
+        let gone = Todo::new("Deleted on the server");
+        let survivor = Todo::new("Still on the server");
+
+        let local_gone = CalendarEvent::create(&calendar, gone.clone()).unwrap();
+        let local_survivor = CalendarEvent::create(&calendar, survivor.clone()).unwrap();
+
+        let mut sync_bases = SyncBases::new();
+        sync_bases.insert_event_base(CalendarItem::from(gone.clone()).instance_id(), gone.clone());
+
+        let diff = CalendarDiff::compute(
+            vec![local_gone, local_survivor],
+            vec![RemoteEvent::new(survivor)],
+            &sync_bases,
+            &DateRange {
+                from: Some(window_from()),
+                to: Some(window_to()),
+            },
+        );
+
+        assert_eq!(
+            diff.incoming,
+            vec![EventChange::Delete(CalendarItem::Todo(gone))],
+            "R99: a task missing from a task-carrying remote list is deleted"
+        );
+        assert_eq!(diff.outgoing, vec![]);
+    }
+
+    /// T-28 (R42). Both skip-rules key on `CANCELLED` only. If `COMPLETED`
+    /// ever joined the "missing locally + remote cancelled" rule the MVP's own
+    /// `STATUS:COMPLETED` fixture would never be pulled.
+    #[test]
+    fn a_remote_completed_task_absent_locally_is_created_and_both_cancelled_drift_is_ignored() {
+        let mut completed = Todo::new("Hand in the assignment");
+        completed.status = TodoStatus::Completed;
+
+        let created = CalendarDiff::compute(
+            vec![],
+            vec![RemoteEvent::new(completed.clone())],
+            &SyncBases::new(),
+            &DateRange::default(),
+        );
+
+        assert_eq!(
+            created.incoming,
+            vec![EventChange::Create(CalendarItem::Todo(completed))],
+            "R42: COMPLETED is not CANCELLED — the task must be created locally"
+        );
+        assert_eq!(created.outgoing, vec![]);
+
+        // Both cancelled, with field drift: historical, so no churn.
+        let (_tmp, calendar) = test_calendar();
+        let mut local_cancelled = Todo::new("Cancelled locally");
+        local_cancelled.status = TodoStatus::Cancelled;
+        let calendar_event = CalendarEvent::create(&calendar, local_cancelled.clone()).unwrap();
+
+        let mut remote_cancelled = local_cancelled.clone();
+        remote_cancelled.summary = Some("Cancelled remotely, renamed".to_string());
+        remote_cancelled.description = Some("drift".to_string());
+
+        let drifted = CalendarDiff::compute(
+            vec![calendar_event],
+            vec![RemoteEvent::new(remote_cancelled)],
+            &SyncBases::new(),
+            &DateRange::default(),
+        );
+
+        assert_eq!(drifted.outgoing, vec![], "R42: both cancelled, no churn");
+        assert_eq!(drifted.incoming, vec![]);
+    }
+
+    /// T-31 (R36 hazard 3, A-6). A VEVENT and a VTODO sharing a UID are two
+    /// identities on **both** sides.
+    ///
+    /// Locally: only one of the pair is tracked, so exactly **one** delete
+    /// fires — against the file whose identity is actually in the bases. A
+    /// kind-agnostic key makes the base lookup true on both loop iterations
+    /// and fires two (hazard 3).
+    ///
+    /// Remotely: a same-UID pair must survive `.collect()` as two entries and
+    /// produce two creates. A kind-agnostic key silently merges them and one
+    /// component is lost (hazard 2).
+    #[test]
+    fn a_shared_uid_pair_produces_exactly_one_delete_against_the_right_file() {
+        let (_tmp, calendar) = test_calendar();
+
+        let uid = |value: &str| crate::event::EventUid::new(value.to_string());
+
+        let mut event = test_event();
+        event.uid = uid("shared-123@u-crawler");
+
+        let mut todo = Todo::new("Same UID, different component");
+        todo.uid = uid("shared-123@u-crawler");
+
+        let local_event = CalendarEvent::create(&calendar, event.clone()).unwrap();
+        let local_todo = CalendarEvent::create(&calendar, todo.clone()).unwrap();
+
+        // A second same-UID pair, this one only on the remote. It also keeps
+        // R49's task-less belt off, so the local delete below is authorized.
+        let mut remote_event = test_event();
+        remote_event.uid = uid("remote-pair@u-crawler");
+        remote_event.summary = Some("Remote event of the pair".to_string());
+
+        let mut remote_todo = Todo::new("Remote task of the pair");
+        remote_todo.uid = uid("remote-pair@u-crawler");
+
+        // Only the local TASK identity is tracked.
+        let mut sync_bases = SyncBases::new();
+        sync_bases.insert_event_base(CalendarItem::from(todo.clone()).instance_id(), todo.clone());
+
+        let diff = CalendarDiff::compute(
+            vec![local_event, local_todo],
+            vec![
+                RemoteEvent::new(remote_event.clone()),
+                RemoteEvent::new(remote_todo.clone()),
+            ],
+            &sync_bases,
+            &DateRange::default(),
+        );
+
+        assert_eq!(
+            diff.incoming
+                .iter()
+                .filter(|c| matches!(c, EventChange::Delete(_)))
+                .count(),
+            1,
+            "R36 hazard 3: one tracked identity means exactly one delete"
+        );
+
+        assert_eq!(
+            diff.incoming,
+            vec![
+                EventChange::Delete(CalendarItem::Todo(todo)),
+                EventChange::Create(CalendarItem::Event(remote_event)),
+                EventChange::Create(CalendarItem::Todo(remote_todo)),
+            ],
+            "the delete lands on the tracked task, and the remote same-UID pair \
+             stays two items (R36 hazard 2)"
+        );
+
+        assert_eq!(
+            diff.outgoing,
+            vec![EventChange::Create(CalendarItem::Event(event))],
+            "the untracked local sibling is a create, not a second delete"
+        );
+    }
+
+    /// T-32 (R41). The Push-biased `(Some, None)` fallback is existing VEVENT
+    /// behaviour and must not invert for tasks: a wrong Pull destroys the
+    /// user's local edit with no recovery.
+    #[test]
+    fn a_task_with_no_last_modified_and_no_sequence_pushes() {
+        let (_tmp, calendar) = test_calendar();
+
+        let mut local = Todo::new("Edited locally");
+        local.last_modified = None;
+        local.sequence = 0;
+        let calendar_event = CalendarEvent::create(&calendar, local.clone()).unwrap();
+
+        let mut remote = local.clone();
+        remote.summary = Some("Stale remote copy".to_string());
+        remote.last_modified = None;
+        remote.sequence = 0;
+
+        let diff = CalendarDiff::compute(
+            vec![calendar_event],
+            vec![RemoteEvent::new(remote.clone())],
+            &SyncBases::new(),
+            &DateRange::default(),
+        );
+
+        assert_eq!(
+            diff.outgoing,
+            vec![EventChange::Update {
+                from: CalendarItem::Todo(remote),
+                to: CalendarItem::Todo(local),
+            }],
+            "R41: no LAST-MODIFIED and no SEQUENCE stays Push-biased for tasks"
+        );
+        assert_eq!(diff.incoming, vec![], "R41: never an incoming update here");
     }
 }

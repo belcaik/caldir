@@ -11,11 +11,12 @@ use std::collections::HashSet;
 
 pub(crate) use sync_bases::SyncBases;
 
+use crate::item::CalendarItem;
+
+#[cfg(test)]
 use crate::Event;
 #[cfg(test)]
 use crate::EventInstanceId;
-#[cfg(test)]
-use crate::item::CalendarItem;
 
 #[derive(Debug)]
 pub struct CalendarState {
@@ -35,12 +36,16 @@ impl CalendarState {
         Ok(Self { sync_bases })
     }
 
-    pub(crate) fn record_sync_bases(
+    pub(crate) fn record_sync_bases<I>(
         &mut self,
-        events: impl IntoIterator<Item = Event>,
+        items: I,
         state_dir: &Path,
-    ) -> Result<(), CalendarStateError> {
-        self.sync_bases.record(events, state_dir)
+    ) -> Result<(), CalendarStateError>
+    where
+        I: IntoIterator,
+        I::Item: Into<CalendarItem>,
+    {
+        self.sync_bases.record(items, state_dir)
     }
 
     pub(crate) fn sync_bases(&self) -> &SyncBases {
@@ -85,7 +90,7 @@ mod tests {
 
         let dst = tempfile::TempDir::new().unwrap();
         state
-            .record_sync_bases(std::iter::empty(), dst.path())
+            .record_sync_bases(std::iter::empty::<CalendarItem>(), dst.path())
             .unwrap();
 
         let written = std::fs::read_to_string(dst.path().join(KNOWN_IDS_FILE_NAME)).unwrap();
@@ -100,7 +105,7 @@ mod tests {
 
         let dst = tempfile::TempDir::new().unwrap();
         state
-            .record_sync_bases(std::iter::empty(), dst.path())
+            .record_sync_bases(std::iter::empty::<CalendarItem>(), dst.path())
             .unwrap();
 
         let written = std::fs::read_to_string(dst.path().join(KNOWN_IDS_FILE_NAME)).unwrap();
@@ -114,7 +119,7 @@ mod tests {
         let mut state = CalendarState::load(dir.path()).unwrap();
 
         state
-            .record_sync_bases(std::iter::empty(), &state_dir)
+            .record_sync_bases(std::iter::empty::<CalendarItem>(), &state_dir)
             .unwrap();
 
         assert!(state_dir.join(KNOWN_IDS_FILE_NAME).is_file());

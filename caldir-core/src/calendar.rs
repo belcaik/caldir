@@ -393,9 +393,12 @@ impl Calendar {
         Ok(items)
     }
 
-    /// Create new event in calendar
-    pub fn create_event(&self, event: Event) -> Result<CalendarEvent, CalendarError> {
-        let calendar_event = CalendarEvent::create(self, event)?;
+    /// Create a new item in the calendar, of whichever supported kind.
+    pub fn create_event(
+        &self,
+        item: impl Into<CalendarItem>,
+    ) -> Result<CalendarEvent, CalendarError> {
+        let calendar_event = CalendarEvent::create(self, item)?;
         Ok(calendar_event)
     }
 
@@ -424,12 +427,13 @@ impl Calendar {
             .filter(|id| id.contains('@'))
     }
 
-    pub(crate) fn record_sync_bases(
-        &mut self,
-        events: impl IntoIterator<Item = Event>,
-    ) -> Result<(), CalendarError> {
+    pub(crate) fn record_sync_bases<I>(&mut self, items: I) -> Result<(), CalendarError>
+    where
+        I: IntoIterator,
+        I::Item: Into<CalendarItem>,
+    {
         self.state
-            .record_sync_bases(events, &calendar_state_dir(&self.path))?;
+            .record_sync_bases(items, &calendar_state_dir(&self.path))?;
         Ok(())
     }
 

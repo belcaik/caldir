@@ -1,4 +1,4 @@
-use crate::{Event, event::EventInstanceId, item::CalendarItem};
+use crate::{event::EventInstanceId, item::CalendarItem};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -52,15 +52,12 @@ impl SyncBases {
 
     /// Records new bases and persists them. Only the given items' base files
     /// are written, so a sync touches O(changes) files, not O(history).
-    ///
-    /// Still `Event`-typed on the way in: the sync engine becomes item-aware in
-    /// `L3-03`. The store underneath it already is.
-    pub(crate) fn record(
-        &mut self,
-        events: impl IntoIterator<Item = Event>,
-        state_dir: &Path,
-    ) -> Result<(), CalendarStateError> {
-        let items: Vec<CalendarItem> = events.into_iter().map(CalendarItem::from).collect();
+    pub(crate) fn record<I>(&mut self, items: I, state_dir: &Path) -> Result<(), CalendarStateError>
+    where
+        I: IntoIterator,
+        I::Item: Into<CalendarItem>,
+    {
+        let items: Vec<CalendarItem> = items.into_iter().map(Into::into).collect();
 
         for item in &items {
             self.insert_event_base(item.instance_id(), item.clone());

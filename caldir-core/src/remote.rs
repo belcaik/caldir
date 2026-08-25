@@ -43,17 +43,20 @@ impl Remote {
         change: &EventChange,
     ) -> Result<Option<RemoteEvent>, RemoteError> {
         match change {
-            EventChange::Create(event) => {
-                let remote_event = self.create_event(event.clone()).await?;
+            EventChange::Create(item) => {
+                let remote_event = self.create_event(item.clone().into_event()?).await?;
                 Ok(Some(remote_event))
             }
             EventChange::Update { from, to } => {
-                let merged = to.clone().with_x_properties_merged_from(from);
+                let merged = to
+                    .clone()
+                    .into_event()?
+                    .with_x_properties_merged_from(&from.clone().into_event()?);
                 let remote_event = self.update_event(merged).await?;
                 Ok(Some(remote_event))
             }
-            EventChange::Delete(event) => {
-                self.delete_event(event.clone()).await?;
+            EventChange::Delete(item) => {
+                self.delete_event(item.clone().into_event()?).await?;
                 Ok(None)
             }
         }
@@ -108,7 +111,7 @@ mod tests {
         mock.reply::<rpc::CreateEvent>(event.clone());
 
         remote
-            .apply_change(&EventChange::Create(event.clone()))
+            .apply_change(&EventChange::Create(event.clone().into()))
             .await
             .unwrap();
 
@@ -125,8 +128,8 @@ mod tests {
 
         remote
             .apply_change(&EventChange::Update {
-                from,
-                to: to.clone(),
+                from: from.into(),
+                to: to.clone().into(),
             })
             .await
             .unwrap();
@@ -158,7 +161,10 @@ mod tests {
         mock.reply::<rpc::UpdateEvent>(to.clone());
 
         remote
-            .apply_change(&EventChange::Update { from, to })
+            .apply_change(&EventChange::Update {
+                from: from.into(),
+                to: to.into(),
+            })
             .await
             .unwrap();
 
@@ -170,6 +176,24 @@ mod tests {
         );
     }
 
+    /// R70/R71: the RPC payload is still an `Event`, so a task-shaped change
+    /// cannot reach a provider. It aborts with the arity error the wire
+    /// already defines — never a synthesized event, which would push a task
+    /// as if it were a meeting. `L6-01` owns the user-facing story.
+    #[tokio::test]
+    async fn a_task_change_aborts_instead_of_reaching_the_provider() {
+        let (mock, remote) = test_remote();
+        let todo = crate::todo::Todo::new("Hand in the assignment");
+
+        let err = remote
+            .apply_change(&EventChange::Create(todo.into()))
+            .await
+            .expect_err("a task must never be pushed over the event-only wire");
+
+        assert_eq!(err.to_string(), "expected 1 event(s) in ICS, found 0");
+        assert!(!mock.received_a_request(), "nothing may reach the provider");
+    }
+
     #[tokio::test]
     async fn apply_change_sends_delete_event_for_outgoing_delete() {
         let (mock, remote) = test_remote();
@@ -177,7 +201,7 @@ mod tests {
         mock.reply::<rpc::DeleteEvent>(());
 
         remote
-            .apply_change(&EventChange::Delete(event.clone()))
+            .apply_change(&EventChange::Delete(event.clone().into()))
             .await
             .unwrap();
 

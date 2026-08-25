@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use crate::calendar::{CalendarError, SyncBases};
 use crate::diff::EventChange;
 use crate::event::EventInstanceId;
-use crate::{Calendar, CalendarDiff, CalendarEvent, DateRange, Event, Remote, RemoteEvent};
+use crate::item::CalendarItem;
+use crate::{Calendar, CalendarDiff, CalendarEvent, DateRange, Remote, RemoteEvent};
 use error::ConnectionError;
 
 /// A connection is a [local calendar] + [remote calendar] pair
@@ -69,12 +70,9 @@ impl Connection {
             .events()?
             .into_events()
             .into_iter()
-            // VEVENT-only map: a task has no event identity, so it cannot be
-            // a key here. TODO(L3-01): key this map by item identity.
-            .filter_map(|e| {
-                let id = e.event()?.event_instance_id();
-                Some((id, e))
-            })
+            // Keyed by the kind-carrying identity (R36), so a task is
+            // reachable here and an event/task UID pair never collides.
+            .map(|e| (e.item().instance_id(), e))
             .collect();
 
         let mut sync_bases = Vec::new();
@@ -105,12 +103,9 @@ impl Connection {
             .events()?
             .into_events()
             .into_iter()
-            // VEVENT-only map: a task has no event identity, so it cannot be
-            // a key here. TODO(L3-01): key this map by item identity.
-            .filter_map(|e| {
-                let id = e.event()?.event_instance_id();
-                Some((id, e))
-            })
+            // Keyed by the kind-carrying identity (R36), so a task is
+            // reachable here and an event/task UID pair never collides.
+            .map(|e| (e.item().instance_id(), e))
             .collect();
 
         let mut sync_bases = Vec::new();
@@ -138,34 +133,28 @@ impl Connection {
             .events()?
             .into_events()
             .into_iter()
-            // VEVENT-only map: a task has no event identity, so it cannot be
-            // a key here. TODO(L3-01): key this map by item identity.
-            .filter_map(|e| {
-                let id = e.event()?.event_instance_id();
-                Some((id, e))
-            })
+            // Keyed by the kind-carrying identity (R36), so a task is
+            // reachable here and an event/task UID pair never collides.
+            .map(|e| (e.item().instance_id(), e))
             .collect();
 
         for change in diff.outgoing() {
             match change {
-                EventChange::Create(event) => {
-                    if let Some(cal_event) =
-                        events_by_instance_id.remove(&event.event_instance_id())
-                    {
+                EventChange::Create(item) => {
+                    if let Some(cal_event) = events_by_instance_id.remove(&item.instance_id()) {
                         cal_event.delete().map_err(CalendarError::from)?;
                     }
                 }
                 EventChange::Update { from, to } => {
-                    if let Some(cal_event) = events_by_instance_id.get_mut(&to.event_instance_id())
-                    {
+                    if let Some(cal_event) = events_by_instance_id.get_mut(&to.instance_id()) {
                         cal_event
                             .update(from.clone())
                             .map_err(CalendarError::from)?;
                     }
                 }
-                EventChange::Delete(event) => {
-                    let cal_event = self.local.create_event(event.clone())?;
-                    events_by_instance_id.insert(event.event_instance_id(), cal_event);
+                EventChange::Delete(item) => {
+                    let cal_event = self.local.create_event(item.clone())?;
+                    events_by_instance_id.insert(item.instance_id(), cal_event);
                 }
             }
         }
@@ -182,27 +171,23 @@ fn bases_to_backfill(
     local_events: &[CalendarEvent],
     remote_events: &[RemoteEvent],
     sync_bases: &SyncBases,
-) -> Vec<Event> {
+) -> Vec<CalendarItem> {
     let local_by_id: HashMap<_, _> = local_events
         .iter()
-        // VEVENT-only map: remote lookups below are all by event identity.
-        .filter_map(|e| {
-            let event = e.event()?;
-            Some((event.event_instance_id(), event))
-        })
+        .map(|e| (e.item().instance_id(), e.item()))
         .collect();
 
     let mut backfill = Vec::new();
 
     for remote in remote_events {
-        let remote = remote.event();
-        let id = remote.event_instance_id();
+        let remote = remote.item();
+        let id = remote.instance_id();
 
         let in_sync = local_by_id.get(&id).is_some_and(|local| *local == remote);
 
         let base_is_current = match sync_bases.get(&id) {
             None => continue,
-            Some(Some(base)) => base.as_event() == Some(remote),
+            Some(Some(base)) => &**base == remote,
             Some(None) => false,
         };
 
@@ -218,24 +203,24 @@ fn pull_incoming_changes(
     local: &Calendar,
     diff: &CalendarDiff,
     events_by_instance_id: &mut HashMap<EventInstanceId, CalendarEvent>,
-    sync_bases: &mut Vec<Event>,
+    sync_bases: &mut Vec<CalendarItem>,
 ) -> Result<(), ConnectionError> {
     for change in diff.incoming() {
         match change {
-            EventChange::Create(event) => {
-                let cal_event = local.create_event(event.clone())?;
-                let id = event.event_instance_id();
+            EventChange::Create(item) => {
+                let cal_event = local.create_event(item.clone())?;
+                let id = item.instance_id();
                 events_by_instance_id.insert(id, cal_event);
-                sync_bases.push(event.clone());
+                sync_bases.push(item.clone());
             }
             EventChange::Update { to, .. } => {
-                if let Some(cal_event) = events_by_instance_id.get_mut(&to.event_instance_id()) {
+                if let Some(cal_event) = events_by_instance_id.get_mut(&to.instance_id()) {
                     cal_event.update(to.clone()).map_err(CalendarError::from)?;
                 }
                 sync_bases.push(to.clone());
             }
-            EventChange::Delete(event) => {
-                if let Some(cal_event) = events_by_instance_id.remove(&event.event_instance_id()) {
+            EventChange::Delete(item) => {
+                if let Some(cal_event) = events_by_instance_id.remove(&item.instance_id()) {
                     cal_event.delete().map_err(CalendarError::from)?;
                 }
             }
@@ -249,26 +234,26 @@ async fn push_outgoing_changes(
     remote: &Remote,
     diff: &CalendarDiff,
     events_by_instance_id: &mut HashMap<EventInstanceId, CalendarEvent>,
-    sync_bases: &mut Vec<Event>,
+    sync_bases: &mut Vec<CalendarItem>,
 ) -> Result<(), ConnectionError> {
     for change in diff.outgoing() {
         if let Some(remote_event) = remote.apply_change(change).await? {
-            let returned_event = remote_event.event();
+            let returned_item = remote_event.item();
 
             // Sometimes provider overwrite the event's UID:
             let original_event_id = match change {
-                EventChange::Create(event) => event.event_instance_id(),
-                EventChange::Update { to, .. } => to.event_instance_id(),
+                EventChange::Create(item) => item.instance_id(),
+                EventChange::Update { to, .. } => to.instance_id(),
                 EventChange::Delete(_) => unreachable!("apply_change returns None for Delete"),
             };
 
             if let Some(cal_event) = events_by_instance_id.get_mut(&original_event_id) {
                 cal_event
-                    .update(returned_event.clone())
+                    .update(returned_item.clone())
                     .map_err(CalendarError::from)?;
             }
 
-            sync_bases.push(returned_event.clone());
+            sync_bases.push(returned_item.clone());
         }
     }
 
@@ -278,6 +263,7 @@ async fn push_outgoing_changes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Event;
     use crate::diff::EventChange;
     use crate::event::{EventUid, XProperty};
     use crate::provider::mock_provider::MockProvider;
@@ -347,7 +333,7 @@ mod tests {
         let mut connection = Connection::new(calendar, remote);
         let diff = connection.diff(&DateRange::default()).await.unwrap();
 
-        assert_eq!(diff.outgoing(), &[EventChange::Create(event)]);
+        assert_eq!(diff.outgoing(), &[EventChange::Create(event.into())]);
     }
 
     #[tokio::test]
@@ -689,8 +675,8 @@ mod tests {
 
         let diff = CalendarDiff::from_changes(
             vec![
-                EventChange::Create(event_a.clone()),
-                EventChange::Create(event_b),
+                EventChange::Create(event_a.clone().into()),
+                EventChange::Create(event_b.into()),
             ],
             vec![],
         );

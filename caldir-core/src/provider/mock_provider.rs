@@ -42,6 +42,12 @@ impl MockProvider {
         )
     }
 
+    /// Whether any request reached the transport at all. For seams that must
+    /// abort *before* the wire.
+    pub(crate) fn received_a_request(&self) -> bool {
+        self.transport.captured_request().is_some()
+    }
+
     /// Decode the captured request as `C`, asserting the wire method matches `C::METHOD`.
     pub(crate) fn captured_request<C: Rpc + DeserializeOwned>(&self) -> C {
         let raw = self
