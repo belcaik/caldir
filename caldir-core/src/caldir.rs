@@ -395,4 +395,69 @@ mod tests {
             Err(CaldirError::Calendar(_))
         ));
     }
+
+    // --- VTODO support (RED regression tests) ---
+
+    /// u_crawler emits `deadlines/` (VTODO) and `windows/` (VEVENT) as siblings
+    /// under the calendar dir, so caldir sees them as two separate calendars.
+    ///
+    /// Control half of the blast-radius question: listing the VEVENT calendar on
+    /// its own is unaffected by the VTODO calendar next to it.
+    #[test]
+    fn vevent_calendar_lists_independently_of_a_sibling_vtodo_calendar() {
+        use crate::test_utils::{VEVENT_CONTROL_ICS, VTODO_ICS, write_ics};
+
+        let (_tmp, caldir) = test_caldir();
+        let deadlines = caldir.create_calendar("deadlines", None).unwrap();
+        let windows = caldir.create_calendar("windows", None).unwrap();
+        write_ics(deadlines.path(), "assignment-123.ics", VTODO_ICS);
+        write_ics(windows.path(), "assignment-123.ics", VEVENT_CONTROL_ICS);
+
+        assert_eq!(caldir.calendars().len(), 2);
+        assert_eq!(windows.events().unwrap().len(), 1);
+    }
+
+    /// Blast radius across calendars: aggregating every calendar the way the CLI
+    /// agenda does (`caldir-cli/src/output/agenda.rs:35`, which propagates the
+    /// per-calendar error with `?`) must not be killed by the VTODO calendar.
+    #[test]
+    fn aggregating_all_calendars_survives_a_vtodo_calendar() {
+        use crate::test_utils::{VEVENT_CONTROL_ICS, VTODO_ICS, write_ics};
+        use chrono::TimeZone;
+
+        let (_tmp, caldir) = test_caldir();
+        let deadlines = caldir.create_calendar("deadlines", None).unwrap();
+        let windows = caldir.create_calendar("windows", None).unwrap();
+        write_ics(deadlines.path(), "assignment-123.ics", VTODO_ICS);
+        write_ics(windows.path(), "assignment-123.ics", VEVENT_CONTROL_ICS);
+
+        let from = chrono::Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+        let to = chrono::Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+
+        let mut summaries = Vec::new();
+
+        for calendar in caldir.calendars() {
+            let calendar = calendar.unwrap();
+            let events = calendar
+                .expanded_events_in_range(from, to)
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "aggregating calendar {:?} failed, so the whole agenda across \
+                     every calendar fails: {err:?}",
+                        calendar.slug()
+                    )
+                });
+            summaries.extend(events.into_iter().filter_map(|e| e.summary));
+        }
+
+        summaries.sort();
+
+        assert_eq!(
+            summaries,
+            vec![
+                "Assignment 3 - Recursive descent parser",
+                "Assignment 3 - submission window",
+            ]
+        );
+    }
 }

@@ -153,3 +153,87 @@ pub fn test_binary(filename: &str) -> (TempDir, PathBuf) {
 
     (tmp, path)
 }
+
+// --- VTODO reproduction fixtures (stage 2) ---
+//
+// Representative of `u_crawler` output: a course directory with
+// `deadlines/<slug>.ics` (VTODO) and `windows/<slug>.ics` (VEVENT).
+
+/// RFC 5545 valid VTODO-only document, CRLF line endings.
+pub const VTODO_ICS: &str = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+PRODID:-//u_crawler//EN\r\n\
+CALSCALE:GREGORIAN\r\n\
+BEGIN:VTODO\r\n\
+UID:assignment-123@u-crawler\r\n\
+DTSTAMP:20260801T090000Z\r\n\
+DUE:20260815T235900Z\r\n\
+SUMMARY:Assignment 3 - Recursive descent parser\r\n\
+DESCRIPTION:Submit the parser and a short report via the course portal.\r\n\
+URL:https://example.edu/courses/cs101/assignments/123\r\n\
+PRIORITY:1\r\n\
+STATUS:COMPLETED\r\n\
+COMPLETED:20260814T120000Z\r\n\
+END:VTODO\r\n\
+END:VCALENDAR\r\n";
+
+/// Control fixture: the same assignment expressed as a VEVENT (the
+/// `windows/` half of the u_crawler output). Must keep working.
+pub const VEVENT_CONTROL_ICS: &str = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+PRODID:-//u_crawler//EN\r\n\
+CALSCALE:GREGORIAN\r\n\
+BEGIN:VEVENT\r\n\
+UID:window-123@u-crawler\r\n\
+DTSTAMP:20260801T090000Z\r\n\
+DTSTART:20260815T100000Z\r\n\
+DTEND:20260815T120000Z\r\n\
+SUMMARY:Assignment 3 - submission window\r\n\
+DESCRIPTION:Submission window for assignment 3.\r\n\
+URL:https://example.edu/courses/cs101/assignments/123\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n";
+
+/// Probe fixture: a valid VCALENDAR with no components at all.
+pub const EMPTY_VCALENDAR_ICS: &str = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+PRODID:-//u_crawler//EN\r\n\
+END:VCALENDAR\r\n";
+
+/// Write a raw ICS document into a directory, returning its path.
+pub fn write_ics(dir: &std::path::Path, filename: &str, contents: &str) -> PathBuf {
+    let path = dir.join(filename);
+    std::fs::write(&path, contents).unwrap();
+    path
+}
+
+/// A VTODO whose `DUE` carries a TZID and whose `COMPLETED` is floating
+/// (non-UTC) — the two properties the icalendar crate's typed accessors
+/// silently lose (`get_completed()` returns `None` for a non-UTC value while
+/// retaining the raw property).
+pub const VTODO_ZONED_ICS: &str = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+PRODID:-//u_crawler//EN\r\n\
+CALSCALE:GREGORIAN\r\n\
+BEGIN:VTODO\r\n\
+UID:zoned-123@u-crawler\r\n\
+DTSTAMP:20260801T090000Z\r\n\
+DUE;TZID=Europe/Stockholm:20260815T235900\r\n\
+COMPLETED:20260814T120000\r\n\
+SUMMARY:Zoned deadline\r\n\
+END:VTODO\r\n\
+END:VCALENDAR\r\n";
+
+/// Parse a single-VTODO document into the crate's `icalendar::Todo`.
+/// Panics unless the document holds exactly one VTODO.
+pub fn parse_icalendar_todo(ics: &str) -> icalendar::Todo {
+    let calendar: icalendar::Calendar = ics.parse().expect("fixture parses as a VCALENDAR");
+    let todos: Vec<icalendar::Todo> = calendar
+        .components
+        .iter()
+        .filter_map(|component| component.as_todo().cloned())
+        .collect();
+
+    assert_eq!(todos.len(), 1, "fixture must hold exactly one VTODO");
+    todos.into_iter().next().unwrap()
+}

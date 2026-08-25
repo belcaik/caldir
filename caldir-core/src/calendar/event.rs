@@ -532,4 +532,42 @@ mod tests {
 
         assert!(matches!(err, CalendarEventError::NotRecurring(_)));
     }
+
+    // --- VTODO support (RED regression tests) ---
+
+    #[test]
+    fn load_reads_a_vtodo_file() {
+        use crate::test_utils::{VTODO_ICS, write_ics};
+
+        let (_tmp, calendar) = test_calendar();
+        let path = write_ics(calendar.path(), "assignment-123.ics", VTODO_ICS);
+
+        match CalendarEvent::load(&path) {
+            Ok(cal_event) => assert_eq!(
+                cal_event.event().summary.as_deref(),
+                Some("Assignment 3 - Recursive descent parser")
+            ),
+            Err(CalendarEventError::ExpectedSingleEvent { found, .. }) => panic!(
+                "VTODO file rejected at caldir-core/src/calendar/event.rs:45 with found={found}: \
+                 icalendar::Calendar::events() yields no VEVENT for a VTODO document"
+            ),
+            Err(err) => panic!("VTODO file rejected for an unexpected reason: {err:?}"),
+        }
+    }
+
+    /// Control: the VEVENT half of the same u_crawler output must keep loading.
+    #[test]
+    fn load_reads_the_vevent_control_file() {
+        use crate::test_utils::{VEVENT_CONTROL_ICS, write_ics};
+
+        let (_tmp, calendar) = test_calendar();
+        let path = write_ics(calendar.path(), "window-123.ics", VEVENT_CONTROL_ICS);
+
+        let cal_event = CalendarEvent::load(&path).unwrap();
+
+        assert_eq!(
+            cal_event.event().summary.as_deref(),
+            Some("Assignment 3 - submission window")
+        );
+    }
 }
