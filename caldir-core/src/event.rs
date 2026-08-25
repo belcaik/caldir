@@ -17,6 +17,9 @@ pub mod tz_normalize;
 mod visibility;
 mod x_property;
 
+// Test-only since `L4-01` folded the last production narrowing into
+// `CalendarItem::into_event`.
+#[cfg(test)]
 use crate::item::CalendarItem;
 pub use attachment::Attachment;
 pub use attendee::{Attendee, ParticipationStatus};
@@ -92,24 +95,6 @@ impl Event {
             url: None,
             attachments: Vec::new(),
             x_properties: Vec::new(),
-        }
-    }
-
-    /// Parse a one-component ICS document and narrow it back to an event.
-    ///
-    /// Parsing is the item loader's job; this is the lossy step the two
-    /// remaining VEVENT-only seams still need — the RPC wire, whose payload
-    /// struct stays `Event` so no provider crate changes (R70), and sync
-    /// bases. A task reaching either has nowhere to go, so it aborts with the
-    /// arity error those seams already report (R71).
-    pub(crate) fn narrowed_from_single_ics_str(contents: &str) -> Result<Self, EventError> {
-        match CalendarItem::from_single_ics_str(contents)? {
-            CalendarItem::Event(event) => Ok(event),
-            // TODO(L6-01): pushing a task over an event-only seam.
-            CalendarItem::Todo(_) => Err(EventError::UnexpectedEventCount {
-                expected: 1,
-                found: 0,
-            }),
         }
     }
 
@@ -227,7 +212,8 @@ impl Event {
     /// Panics on any deviation — for use in tests with known-good fixtures.
     #[cfg(test)]
     pub(crate) fn parse_single_ics(contents: &str) -> Event {
-        Self::narrowed_from_single_ics_str(contents)
+        CalendarItem::from_single_ics_str(contents)
+            .and_then(CalendarItem::into_event)
             .expect("expected exactly one valid event in ICS")
     }
 
