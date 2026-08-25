@@ -13,7 +13,7 @@ mod test_utils;
 
 // Public API:
 pub use caldir::{Caldir, CaldirConfig, CaldirError, TimeFormat};
-pub use calendar::{Calendar, CalendarConfig, CalendarEvent};
+pub use calendar::{Calendar, CalendarConfig, CalendarEvent, CalendarListing, SkippedEvent};
 pub use connection::Connection;
 pub use diff::{CalendarDiff, EventChange};
 pub use event::{

@@ -88,7 +88,7 @@ fn run_interactive(caldir: &Caldir) -> Result<()> {
         let email = email.to_string();
         let cal_slug = cal.slug().unwrap_or("(Unknown calendar)").to_string();
 
-        for ce in cal.events()? {
+        for ce in cal.events()?.into_events() {
             let event = ce.event();
             let in_range = event.occurs_in_range(from, to);
             let is_pending = event.is_invite_for(&email)

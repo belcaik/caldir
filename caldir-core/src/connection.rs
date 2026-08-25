@@ -35,14 +35,14 @@ impl Connection {
     }
 
     pub async fn diff(&mut self, range: &DateRange) -> Result<CalendarDiff, ConnectionError> {
-        let local_events = self.local().events()?;
+        let local_listing = self.local().events()?;
         let remote_events = self.remote().list_events(range).await?;
 
         // State migration: in-sync pairs never produce a change to apply, so
         // this is the only place their base can be recorded. Without it,
         // legacy known-id entries would sit on the mtime fallback forever.
         let backfill = bases_to_backfill(
-            &local_events,
+            local_listing.events(),
             &remote_events,
             self.local.state().sync_bases(),
         );
@@ -52,7 +52,8 @@ impl Connection {
 
         let sync_bases = self.local().state().sync_bases();
 
-        let mut diff = CalendarDiff::compute(local_events, remote_events, sync_bases, range);
+        let mut diff =
+            CalendarDiff::compute_from_listing(local_listing, remote_events, sync_bases, range);
 
         if self.read_only() {
             diff.discard_outgoing();
@@ -66,6 +67,7 @@ impl Connection {
         let mut events_by_instance_id: HashMap<EventInstanceId, CalendarEvent> = self
             .local
             .events()?
+            .into_events()
             .into_iter()
             .map(|e| (e.event().event_instance_id(), e))
             .collect();
@@ -96,6 +98,7 @@ impl Connection {
         let mut events_by_instance_id: HashMap<EventInstanceId, CalendarEvent> = self
             .local
             .events()?
+            .into_events()
             .into_iter()
             .map(|e| (e.event().event_instance_id(), e))
             .collect();
@@ -123,6 +126,7 @@ impl Connection {
         let mut events_by_instance_id: HashMap<EventInstanceId, CalendarEvent> = self
             .local
             .events()?
+            .into_events()
             .into_iter()
             .map(|e| (e.event().event_instance_id(), e))
             .collect();
@@ -370,6 +374,63 @@ mod tests {
         assert!(!reloaded.state().synced_event_ids().contains(&id));
     }
 
+    /// R48/C7 at the sync seam: one unreadable file in the calendar directory
+    /// suppresses every delete the diff would otherwise emit, both directions.
+    #[tokio::test]
+    async fn diff_emits_no_deletes_when_a_local_file_is_unreadable() {
+        let (_tmp, caldir) = test_caldir();
+        let calendar = caldir
+            .create_calendar("writable-cal", Some(calendar_config(Some(false))))
+            .unwrap();
+
+        // Local, base known, absent remotely → would be an incoming Delete.
+        let local_only = test_event();
+        calendar.create_event(local_only.clone()).unwrap();
+
+        // Remote, base known, absent locally → would be an outgoing Delete.
+        let remote_only = Event::new("Remote only", crate::test_utils::test_event_time());
+
+        std::fs::write(calendar.path().join("broken.ics"), "not an ics file at all").unwrap();
+
+        let state_dir = calendar.path().join(".caldir/state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(
+            state_dir.join("known_event_ids"),
+            format!(
+                "{}\n{}",
+                local_only.event_instance_id(),
+                remote_only.event_instance_id()
+            ),
+        )
+        .unwrap();
+        let calendar = Calendar::load(calendar.path()).unwrap();
+        assert!(calendar.events().unwrap().is_incomplete());
+
+        let mock = test_mock_provider();
+        mock.reply::<rpc::ListEvents>(vec![remote_only]);
+        let remote = Remote::new(mock.provider(), test_remote_params());
+
+        let mut connection = Connection::new(calendar, remote);
+        let diff = connection.diff(&DateRange::default()).await.unwrap();
+
+        assert!(
+            !diff
+                .outgoing()
+                .iter()
+                .any(|c| matches!(c, EventChange::Delete(_))),
+            "outgoing must contain no deletes, got {:?}",
+            diff.outgoing()
+        );
+        assert!(
+            !diff
+                .incoming()
+                .iter()
+                .any(|c| matches!(c, EventChange::Delete(_))),
+            "incoming must contain no deletes, got {:?}",
+            diff.incoming()
+        );
+    }
+
     #[tokio::test]
     async fn apply_incoming_diff_creates_file_for_incoming_create() {
         let (_tmp, _mock, mut connection) = writable_connection();
@@ -527,7 +588,7 @@ mod tests {
             .await
             .unwrap();
 
-        let reloaded = connection.local().events().unwrap();
+        let reloaded = connection.local().events().unwrap().into_events();
         assert_eq!(reloaded.len(), 1);
         assert_eq!(reloaded[0].event().x_properties, canonical.x_properties);
         assert_eq!(
@@ -561,7 +622,7 @@ mod tests {
             .await
             .unwrap();
 
-        let reloaded = connection.local().events().unwrap();
+        let reloaded = connection.local().events().unwrap().into_events();
         assert_eq!(reloaded.len(), 1);
         assert_eq!(reloaded[0].event().uid, canonical.uid);
 
@@ -654,7 +715,7 @@ mod tests {
             .discard_outgoing_diff(&outgoing_update_diff(original.clone(), modified))
             .unwrap();
 
-        let reloaded = connection.local().events().unwrap();
+        let reloaded = connection.local().events().unwrap().into_events();
         assert_eq!(reloaded.len(), 1);
         assert_eq!(reloaded[0].event().summary, original.summary);
     }

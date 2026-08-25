@@ -1,7 +1,7 @@
 mod duplicate_file;
 
 use anyhow::Result;
-use caldir_core::CalendarEvent;
+use caldir_core::{CalendarEvent, SkippedEvent};
 use duplicate_file::duplicate_file_warnings;
 use owo_colors::OwoColorize;
 use std::io::Write;
@@ -34,6 +34,17 @@ impl DoctorWarning {
 
         Ok(())
     }
+}
+
+/// One warning per `.ics` file the listing had to skip.
+///
+/// Per-file degradation must not silently swallow malformed files: a file that
+/// used to fail the whole calendar still reports the very same message (R77).
+pub(crate) fn skipped_warnings(skipped: &[SkippedEvent]) -> Vec<DoctorWarning> {
+    skipped
+        .iter()
+        .map(|skipped| DoctorWarning::UnreadableEvents(skipped.error().to_string()))
+        .collect()
 }
 
 type EventCheck = fn(&[CalendarEvent]) -> Vec<DoctorWarning>;

@@ -65,7 +65,7 @@ mod tests {
         calendar.create_event(event.clone()).unwrap();
         calendar.create_event(event).unwrap();
 
-        let warnings = duplicate_file_warnings(&calendar.events().unwrap());
+        let warnings = duplicate_file_warnings(calendar.events().unwrap().events());
 
         assert_eq!(warnings.len(), 1);
         let DoctorWarning::DuplicateFiles(paths) = &warnings[0] else {
@@ -81,7 +81,7 @@ mod tests {
         calendar.create_event(test_event("Standup")).unwrap();
         calendar.create_event(test_event("Standup")).unwrap();
 
-        let warnings = duplicate_file_warnings(&calendar.events().unwrap());
+        let warnings = duplicate_file_warnings(calendar.events().unwrap().events());
 
         assert!(warnings.is_empty());
     }

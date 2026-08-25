@@ -1,6 +1,7 @@
 mod config;
 mod error;
 mod event;
+mod listing;
 mod state;
 
 use crate::event::{EventInstanceId, EventTime, EventUid, Recurrence, expand_in_range};
@@ -13,6 +14,7 @@ pub use config::CalendarConfig;
 pub use error::CalendarError;
 pub use event::CalendarEvent;
 pub(crate) use event::CalendarEventError;
+pub use listing::{CalendarListing, SkippedEvent};
 pub use state::CalendarState;
 pub(crate) use state::SyncBases;
 
@@ -102,20 +104,27 @@ impl Calendar {
         self.path().file_name().and_then(|s| s.to_str())
     }
 
-    /// Load all events in calendar
-    pub fn events(&self) -> Result<Vec<CalendarEvent>, CalendarError> {
-        let mut events: Vec<CalendarEvent> = Vec::new();
+    /// Load all events in calendar.
+    ///
+    /// A file that fails to load is recorded as skipped rather than aborting
+    /// the listing: one bad `.ics` must never hide its healthy siblings. Only
+    /// directory-level failures are returned as `Err`.
+    pub fn events(&self) -> Result<CalendarListing, CalendarError> {
+        let mut listing = CalendarListing::default();
 
         for entry in std::fs::read_dir(self.path())? {
             let entry = entry?;
             let path = entry.path();
 
             if entry.file_type()?.is_file() && path.extension().is_some_and(|ext| ext == "ics") {
-                events.push(CalendarEvent::load(path)?);
+                match CalendarEvent::load(path.clone()) {
+                    Ok(event) => listing.push_event(event),
+                    Err(err) => listing.push_skipped(path, err.into()),
+                }
             }
         }
 
-        Ok(events)
+        Ok(listing)
     }
 
     /// Load specific event in calendar
@@ -131,6 +140,7 @@ impl Calendar {
     ) -> Result<Option<CalendarEvent>, CalendarError> {
         let found = self
             .events()?
+            .into_events()
             .into_iter()
             .find(|ce| ce.event().event_instance_id() == *id);
 
@@ -143,6 +153,7 @@ impl Calendar {
     pub fn master_event_for(&self, uid: &str) -> Result<Option<Event>, CalendarError> {
         let master = self
             .events()?
+            .into_events()
             .into_iter()
             .find(|ce| ce.event().uid.as_str() == uid && ce.event().recurrence.is_some())
             .map(|ce| ce.event().clone());
@@ -186,7 +197,7 @@ impl Calendar {
         split_end: EventTime,
         new_recurrence: Option<Recurrence>,
     ) -> Result<Event, CalendarError> {
-        let mut all_events = self.events()?;
+        let mut all_events = self.events()?.into_events();
 
         let master_idx = all_events
             .iter()
@@ -252,7 +263,7 @@ impl Calendar {
         let mut override_event = None;
 
         // Find master event (+ potential override event)
-        for ce in self.events()? {
+        for ce in self.events()?.into_events() {
             if ce.event().uid != *uid {
                 continue;
             }
@@ -330,7 +341,11 @@ impl Calendar {
         from: DateTime<Utc>,
         to: DateTime<Utc>,
     ) -> Result<Vec<Event>, CalendarError> {
-        let events = self.events()?.into_iter().map(|ce| ce.event().clone());
+        let events = self
+            .events()?
+            .into_events()
+            .into_iter()
+            .map(|ce| ce.event().clone());
         Ok(expand_in_range(events, from, to))
     }
 
@@ -551,6 +566,7 @@ mod tests {
     fn loaded_overrides(cal: &Calendar, uid: &str) -> Vec<Event> {
         cal.events()
             .unwrap()
+            .into_events()
             .into_iter()
             .map(|ce| ce.event().clone())
             .filter(|e| e.uid.as_str() == uid && e.recurrence_id.is_some())
@@ -1151,5 +1167,74 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, CalendarError::MasterNotFound(_)));
+    }
+
+    // --- VTODO support (RED regression tests) ---
+
+    /// Blast radius within one calendar: a single VTODO file must not take the
+    /// sibling VEVENT files down with it (`?` at caldir-core/src/calendar.rs:114).
+    #[test]
+    fn events_lists_a_vtodo_file_alongside_its_vevent_sibling() {
+        use crate::test_utils::{VEVENT_CONTROL_ICS, VTODO_ICS, write_ics};
+
+        let (_tmp, calendar) = test_calendar();
+        write_ics(calendar.path(), "window-123.ics", VEVENT_CONTROL_ICS);
+        write_ics(calendar.path(), "assignment-123.ics", VTODO_ICS);
+
+        let events = match calendar.events() {
+            Ok(listing) => listing.into_events(),
+            Err(err) => panic!(
+                "one VTODO file aborted the whole calendar listing, including the \
+                 VEVENT sibling: {err:?}"
+            ),
+        };
+
+        let mut uids: Vec<&str> = events.iter().map(|ce| ce.event().uid.as_str()).collect();
+        uids.sort_unstable();
+
+        assert_eq!(
+            uids,
+            vec!["assignment-123@u-crawler", "window-123@u-crawler"]
+        );
+    }
+
+    /// Graceful per-file degradation: an unloadable `.ics` file is skipped and
+    /// reported, never fatal, and never silently dropped from the listing.
+    #[test]
+    fn an_unreadable_file_is_skipped_and_reported_not_fatal() {
+        use crate::test_utils::{VEVENT_CONTROL_ICS, write_ics};
+
+        let (_tmp, calendar) = test_calendar();
+        write_ics(calendar.path(), "window-123.ics", VEVENT_CONTROL_ICS);
+        let broken = write_ics(calendar.path(), "broken.ics", "this is not ICS at all\r\n");
+
+        let listing = calendar
+            .events()
+            .expect("one unreadable file must not abort the whole calendar listing");
+
+        let uids: Vec<&str> = listing
+            .events()
+            .iter()
+            .map(|ce| ce.event().uid.as_str())
+            .collect();
+        assert_eq!(uids, vec!["window-123@u-crawler"]);
+
+        assert!(listing.is_incomplete());
+        assert_eq!(listing.skipped().len(), 1);
+        assert_eq!(listing.skipped()[0].path(), broken);
+    }
+
+    /// Control: a calendar holding only VEVENT files still lists them.
+    #[test]
+    fn events_lists_the_vevent_control_file() {
+        use crate::test_utils::{VEVENT_CONTROL_ICS, write_ics};
+
+        let (_tmp, calendar) = test_calendar();
+        write_ics(calendar.path(), "window-123.ics", VEVENT_CONTROL_ICS);
+
+        let events = calendar.events().unwrap().into_events();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event().uid.as_str(), "window-123@u-crawler");
     }
 }

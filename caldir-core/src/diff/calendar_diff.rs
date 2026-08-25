@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::event_change::EventChange;
-use crate::calendar::SyncBases;
+use crate::calendar::{CalendarListing, SyncBases};
 use crate::event::Status;
 use crate::{CalendarEvent, DateRange, RemoteEvent};
 
@@ -11,11 +11,36 @@ pub struct CalendarDiff {
 }
 
 impl CalendarDiff {
-    pub(crate) fn compute(
+    /// Diff a local listing against the remote. R48: a listing that skipped an
+    /// unreadable file is known-incomplete, so no local absence proves a delete
+    /// and every delete for this calendar is suppressed, both directions.
+    pub(crate) fn compute_from_listing(
+        local_listing: CalendarListing,
+        remote_events: Vec<RemoteEvent>,
+        sync_bases: &SyncBases,
+        range: &DateRange,
+    ) -> Self {
+        let deletes = if local_listing.is_incomplete() {
+            Deletes::Suppressed
+        } else {
+            Deletes::Allowed
+        };
+
+        Self::compute_with(
+            local_listing.into_events(),
+            remote_events,
+            sync_bases,
+            range,
+            deletes,
+        )
+    }
+
+    fn compute_with(
         local_events: Vec<CalendarEvent>,
         remote_events: Vec<RemoteEvent>,
         sync_bases: &SyncBases,
         range: &DateRange,
+        deletes: Deletes,
     ) -> Self {
         let local_event_ids: HashSet<_> = local_events
             .iter()
@@ -84,7 +109,10 @@ impl CalendarDiff {
             }
 
             if sync_bases.get(&id).is_some() {
-                incoming.push(EventChange::Delete(event.clone()));
+                // R48: suppressed when the local listing is incomplete.
+                if deletes == Deletes::Allowed {
+                    incoming.push(EventChange::Delete(event.clone()));
+                }
             } else {
                 outgoing.push(EventChange::Create(event.clone()));
             }
@@ -108,8 +136,12 @@ impl CalendarDiff {
             }
 
             if sync_bases.get(&id).is_some() {
-                // Remote event was in local, gone now. Delete remotely.
-                outgoing.push(EventChange::Delete(remote_event.event().clone()));
+                // Remote event was in local, gone now. Delete remotely —
+                // unless R48 suppressed deletes: the local file may only be
+                // unreadable, not gone.
+                if deletes == Deletes::Allowed {
+                    outgoing.push(EventChange::Delete(remote_event.event().clone()));
+                }
             } else {
                 // Not in local, create it!
                 incoming.push(EventChange::Create(remote_event.event().clone()));
@@ -140,9 +172,35 @@ impl CalendarDiff {
 
 #[cfg(test)]
 impl CalendarDiff {
+    /// Diff a complete list of local events: absence locally is trustworthy
+    /// evidence of a delete. Production always goes through
+    /// [`CalendarDiff::compute_from_listing`], which carries the R48 signal.
+    pub(crate) fn compute(
+        local_events: Vec<CalendarEvent>,
+        remote_events: Vec<RemoteEvent>,
+        sync_bases: &SyncBases,
+        range: &DateRange,
+    ) -> Self {
+        Self::compute_with(
+            local_events,
+            remote_events,
+            sync_bases,
+            range,
+            Deletes::Allowed,
+        )
+    }
+
     pub(crate) fn from_changes(outgoing: Vec<EventChange>, incoming: Vec<EventChange>) -> Self {
         Self { outgoing, incoming }
     }
+}
+
+/// Whether absence from the local listing may be inferred as a delete (R48).
+/// Defaults to `Allowed` everywhere the listing is known complete.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Deletes {
+    Allowed,
+    Suppressed,
 }
 
 enum UpdateDirection {
@@ -194,8 +252,9 @@ fn local_is_newer(local: &CalendarEvent, remote: &RemoteEvent) -> bool {
 mod tests {
     use super::*;
     use crate::Event;
+    use crate::calendar::{CalendarError, CalendarListing};
     use crate::event::EventTime;
-    use crate::test_utils::{test_calendar, test_calendar_event, test_event};
+    use crate::test_utils::{test_calendar, test_calendar_event, test_event, test_event_time};
     use chrono::{TimeZone, Utc};
     use pretty_assertions::assert_eq;
 
@@ -856,5 +915,96 @@ mod tests {
 
         assert_eq!(diff.outgoing, vec![]);
         assert_eq!(diff.incoming, vec![EventChange::Delete(event)]);
+    }
+
+    /// T-29 (spec §18, R48/C7). A calendar with an unreadable `.ics` has a
+    /// known-incomplete listing: no absence in it is evidence of a delete, so
+    /// EVERY delete is suppressed, both directions. Creates still flow.
+    #[test]
+    fn unreadable_local_files_suppress_all_deletes() {
+        let (_tmp, calendar) = test_calendar();
+
+        // Local, base known, absent remotely → would be an incoming Delete.
+        let local_deleted = test_event();
+        let local_deleted_event = calendar.create_event(local_deleted.clone()).unwrap();
+
+        // Local, no base, absent remotely → still an outgoing Create.
+        let local_new = Event::new("Local new", test_event_time());
+        let local_new_event = calendar.create_event(local_new.clone()).unwrap();
+
+        // Remote, base known, absent locally → would be an outgoing Delete.
+        let remote_deleted = Event::new("Remote deleted", test_event_time());
+
+        // Remote, no base, absent locally → still an incoming Create.
+        let remote_new = Event::new("Remote new", test_event_time());
+
+        let mut sync_bases = SyncBases::new();
+        sync_bases.insert_known_event_id(local_deleted.event_instance_id());
+        sync_bases.insert_known_event_id(remote_deleted.event_instance_id());
+
+        let mut listing = CalendarListing::default();
+        listing.push_event(local_deleted_event);
+        listing.push_event(local_new_event);
+        listing.push_skipped(
+            calendar.path().join("broken.ics"),
+            CalendarError::MasterNotFound("broken".to_string()),
+        );
+        assert!(listing.is_incomplete());
+
+        let diff = CalendarDiff::compute_from_listing(
+            listing,
+            vec![
+                RemoteEvent::new(remote_deleted.clone()),
+                RemoteEvent::new(remote_new.clone()),
+            ],
+            &sync_bases,
+            &DateRange::default(),
+        );
+
+        let outgoing_deletes: Vec<_> = diff
+            .outgoing()
+            .iter()
+            .filter(|c| matches!(c, EventChange::Delete(_)))
+            .collect();
+        let incoming_deletes: Vec<_> = diff
+            .incoming()
+            .iter()
+            .filter(|c| matches!(c, EventChange::Delete(_)))
+            .collect();
+
+        assert_eq!(outgoing_deletes, Vec::<&EventChange>::new());
+        assert_eq!(incoming_deletes, Vec::<&EventChange>::new());
+
+        // Delete-scoped, not a blanket "do nothing".
+        assert_eq!(diff.outgoing, vec![EventChange::Create(local_new)]);
+        assert_eq!(diff.incoming, vec![EventChange::Create(remote_new)]);
+    }
+
+    /// The other polarity (R47): a complete listing deletes exactly as before.
+    #[test]
+    fn complete_listing_still_emits_deletes_in_both_directions() {
+        let (_tmp, calendar) = test_calendar();
+
+        let local_deleted = test_event();
+        let local_deleted_event = calendar.create_event(local_deleted.clone()).unwrap();
+        let remote_deleted = Event::new("Remote deleted", test_event_time());
+
+        let mut sync_bases = SyncBases::new();
+        sync_bases.insert_known_event_id(local_deleted.event_instance_id());
+        sync_bases.insert_known_event_id(remote_deleted.event_instance_id());
+
+        let mut listing = CalendarListing::default();
+        listing.push_event(local_deleted_event);
+        assert!(!listing.is_incomplete());
+
+        let diff = CalendarDiff::compute_from_listing(
+            listing,
+            vec![RemoteEvent::new(remote_deleted.clone())],
+            &sync_bases,
+            &DateRange::default(),
+        );
+
+        assert_eq!(diff.outgoing, vec![EventChange::Delete(remote_deleted)]);
+        assert_eq!(diff.incoming, vec![EventChange::Delete(local_deleted)]);
     }
 }
