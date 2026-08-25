@@ -4,7 +4,7 @@
 //! provider (iCloud, generic CalDAV, etc.).
 
 use anyhow::{Context, Result};
-use caldir_core::Event;
+use caldir_core::{CalendarItem, Event};
 use http::{Method, Request, Uri};
 use libdav::dav::{GetEtag, make_relative_url};
 use libdav::requests::{DavRequest, ParseResponseError};
@@ -30,10 +30,17 @@ pub use update_event::update_event;
 /// CalDAV resources contain a single VEVENT (plus any RECURRENCE-ID overrides);
 /// we take the first one that parses cleanly and silently drop malformed events.
 pub(super) fn parse_event(ics: &str) -> Option<Event> {
-    Event::from_ics_str(ics)
+    CalendarItem::from_ics_str(ics)
         .ok()?
         .into_iter()
-        .find_map(Result::ok)
+        // TODO(L5-01): the loader now yields items, so this narrowing WIDENS
+        // the existing silent drop from "malformed" to "malformed or not an
+        // event" — a VTODO on a CalDAV resource disappears here. L5-01 owns
+        // making tasks visible to this provider; do not read this as clean.
+        .find_map(|result| match result {
+            Ok(CalendarItem::Event(event)) => Some(event),
+            _ => None,
+        })
 }
 
 /// Result of looking up a CalDAV resource by UID.

@@ -29,34 +29,12 @@ impl CalendarEvent {
         Ok(CalendarEvent { item, path })
     }
 
+    /// Load whichever supported item the file holds (R5, R32).
     pub fn load(path: impl Into<PathBuf>) -> Result<Self, CalendarEventError> {
         let path = path.into();
+        let item = CalendarItem::load(&path)?;
 
-        if !path.is_file() {
-            return Err(CalendarEventError::NotFound(path));
-        }
-
-        let contents = std::fs::read_to_string(&path)?;
-
-        let events = Event::from_ics_str(&contents)
-            .map_err(|err| CalendarEventError::InvalidEvent(path.clone(), err))?;
-
-        let event = match <[Result<Event, _>; 1]>::try_from(events) {
-            Ok([result]) => {
-                result.map_err(|err| CalendarEventError::InvalidEvent(path.clone(), err))?
-            }
-            Err(events) => {
-                return Err(CalendarEventError::ExpectedSingleEvent {
-                    path,
-                    found: events.len(),
-                });
-            }
-        };
-
-        Ok(CalendarEvent {
-            item: CalendarItem::Event(event),
-            path,
-        })
+        Ok(CalendarEvent { item, path })
     }
 
     pub fn update(&mut self, item: impl Into<CalendarItem>) -> Result<(), CalendarEventError> {
@@ -95,20 +73,14 @@ impl CalendarEvent {
     }
 
     /// Narrowing accessor: `Some` only when the stored item is an event.
-    pub fn as_event(&self) -> Option<&Event> {
+    ///
+    /// A `CalendarEvent` can now hold a task, so every VEVENT-only caller has
+    /// to answer the kind question here rather than assume it.
+    pub fn event(&self) -> Option<&Event> {
         match &self.item {
             CalendarItem::Event(event) => Some(event),
             CalendarItem::Todo(_) => None,
         }
-    }
-
-    /// TEMPORARY, removed in L2-06: the VEVENT-only accessor the ~70 existing
-    /// call sites still use. Unreachable for tasks today — `load` still
-    /// rejects a VTODO, so only `create`/`update` can store one, and no
-    /// caller does yet.
-    pub fn event(&self) -> &Event {
-        self.as_event()
-            .expect("CalendarEvent::event() on a task; migrate the caller to as_event() (L2-06)")
     }
 
     pub fn path(&self) -> &Path {
@@ -132,7 +104,8 @@ impl CalendarEvent {
         email: &str,
         status: ParticipationStatus,
     ) -> Result<(), CalendarEventError> {
-        let mut event = self.event().clone();
+        // An RSVP is meaningless on a task (R81).
+        let mut event = self.event().ok_or(CalendarEventError::NotAnEvent)?.clone();
 
         event.set_attendee_status(email, status)?;
 
@@ -144,7 +117,8 @@ impl CalendarEvent {
 
     /// Add an EXDATE to a recurring master
     pub(crate) fn add_exdate(&mut self, exdate: EventTime) -> Result<(), CalendarEventError> {
-        let mut event = self.event().clone();
+        // Only a recurring VEVENT master carries EXDATEs.
+        let mut event = self.event().ok_or(CalendarEventError::NotAnEvent)?.clone();
 
         let Some(recurrence) = event.recurrence.as_mut() else {
             return Err(CalendarEventError::NotRecurring(
@@ -338,7 +312,7 @@ mod tests {
             Some("2026-01-01T1200__test-event.ics")
         );
 
-        let mut event = cal_event.event().clone();
+        let mut event = cal_event.event().unwrap().clone();
         event.summary = Some("Planning Session".to_string());
         cal_event.update(event).unwrap();
 
@@ -357,7 +331,7 @@ mod tests {
             Some("2026-01-01T1200__test-event.ics")
         );
 
-        let mut event = cal_event.event().clone();
+        let mut event = cal_event.event().unwrap().clone();
         event.location = Some("Conference Room".to_string());
         cal_event.update(event).unwrap();
 
@@ -403,7 +377,7 @@ mod tests {
     #[test]
     fn update_pins_file_mtime_to_new_last_modified() {
         let (_tmp, mut cal_event) = test_calendar_event();
-        let mut event = cal_event.event().clone();
+        let mut event = cal_event.event().unwrap().clone();
         let when = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
         event.last_modified = Some(when);
 
@@ -422,7 +396,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            cal_event.event().attendees[0].status,
+            cal_event.event().unwrap().attendees[0].status,
             Some(ParticipationStatus::Accepted)
         );
 
@@ -434,7 +408,7 @@ mod tests {
     fn update_attendee_status_preserves_sequence_and_sets_last_modified() {
         let (_tmp, mut cal_event) =
             cal_event_with_attendees(vec![Attendee::new("bob@example.com")]);
-        let sequence_before = cal_event.event().sequence;
+        let sequence_before = cal_event.event().unwrap().sequence;
 
         let before = Utc::now();
         cal_event
@@ -442,9 +416,10 @@ mod tests {
             .unwrap();
         let after = Utc::now();
 
-        assert_eq!(cal_event.event().sequence, sequence_before);
+        assert_eq!(cal_event.event().unwrap().sequence, sequence_before);
         let last_modified = cal_event
             .event()
+            .unwrap()
             .last_modified
             .expect("last_modified should be set");
         assert!(last_modified >= before);
@@ -461,7 +436,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            cal_event.event().attendees[0].status,
+            cal_event.event().unwrap().attendees[0].status,
             Some(ParticipationStatus::Tentative)
         );
     }
@@ -500,7 +475,9 @@ mod tests {
             .expect("Failed to delete calendar event");
 
         // "test-event" slug is now available for cal_event_2 to use:
-        cal_event_2.update(cal_event_2.event().clone()).unwrap();
+        cal_event_2
+            .update(cal_event_2.event().unwrap().clone())
+            .unwrap();
 
         assert_eq!(
             cal_event_2.filename(),
@@ -524,10 +501,16 @@ mod tests {
         cal_event.add_exdate(exdate.clone()).unwrap();
 
         assert_eq!(
-            cal_event.event().recurrence.as_ref().unwrap().exdates,
+            cal_event
+                .event()
+                .unwrap()
+                .recurrence
+                .as_ref()
+                .unwrap()
+                .exdates,
             vec![exdate]
         );
-        assert_eq!(cal_event.event().sequence, 1);
+        assert_eq!(cal_event.event().unwrap().sequence, 1);
     }
 
     #[test]
@@ -540,16 +523,22 @@ mod tests {
 
         // No duplicate EXDATE, and the second call didn't bump SEQUENCE again.
         assert_eq!(
-            cal_event.event().recurrence.as_ref().unwrap().exdates,
+            cal_event
+                .event()
+                .unwrap()
+                .recurrence
+                .as_ref()
+                .unwrap()
+                .exdates,
             vec![exdate]
         );
-        assert_eq!(cal_event.event().sequence, 1);
+        assert_eq!(cal_event.event().unwrap().sequence, 1);
     }
 
     #[test]
     fn add_exdate_errors_when_event_is_not_recurring() {
         let (_tmp, mut cal_event) = test_calendar_event();
-        assert!(cal_event.event().recurrence.is_none());
+        assert!(cal_event.event().unwrap().recurrence.is_none());
 
         let err = cal_event
             .add_exdate(EventTime::DateTimeUtc(
@@ -571,7 +560,7 @@ mod tests {
 
         match CalendarEvent::load(&path) {
             Ok(cal_event) => assert_eq!(
-                cal_event.event().summary.as_deref(),
+                cal_event.item().summary(),
                 Some("Assignment 3 - Recursive descent parser")
             ),
             Err(CalendarEventError::ExpectedSingleEvent { found, .. }) => panic!(
@@ -593,7 +582,7 @@ mod tests {
         let cal_event = CalendarEvent::load(&path).unwrap();
 
         assert_eq!(
-            cal_event.event().summary.as_deref(),
+            cal_event.event().unwrap().summary.as_deref(),
             Some("Assignment 3 - submission window")
         );
     }
@@ -794,7 +783,7 @@ SUMMARY:Planning Session\r\nUID:byte-identity@caldir\r\nEND:VEVENT\r\nEND:VCALEN
         assert_eq!(bytes_without_dtstamp(cal_event.path()), CREATED_ICS);
 
         // update
-        let mut updated = cal_event.event().clone();
+        let mut updated = cal_event.event().unwrap().clone();
         updated.summary = Some("Planning Session".to_string());
         cal_event.update(updated).unwrap();
         assert_eq!(
@@ -805,9 +794,12 @@ SUMMARY:Planning Session\r\nUID:byte-identity@caldir\r\nEND:VEVENT\r\nEND:VCALEN
 
         // load
         let reloaded = CalendarEvent::load(cal_event.path()).unwrap();
-        assert_eq!(reloaded.event().uid.as_str(), "byte-identity@caldir");
         assert_eq!(
-            reloaded.event().summary.as_deref(),
+            reloaded.event().unwrap().uid.as_str(),
+            "byte-identity@caldir"
+        );
+        assert_eq!(
+            reloaded.event().unwrap().summary.as_deref(),
             Some("Planning Session")
         );
     }
@@ -874,8 +866,8 @@ SUMMARY:Planning Session\r\nUID:byte-identity@caldir\r\nEND:VEVENT\r\nEND:VCALEN
         assert!(first.path().is_file() && second.path().is_file());
     }
 
-    /// The narrowing accessor: `as_event()` answers the kind question that
-    /// `event()` cannot, and `item()` exposes the stored item itself.
+    /// The narrowing accessor: `event()` answers the kind question a caller
+    /// can no longer assume, and `item()` exposes the stored item itself.
     #[test]
     fn as_event_narrows_only_for_events() {
         use crate::{CalendarItem, Todo};
@@ -885,12 +877,37 @@ SUMMARY:Planning Session\r\nUID:byte-identity@caldir\r\nEND:VEVENT\r\nEND:VCALEN
         let event_backed = CalendarEvent::create(&calendar, test_event()).unwrap();
         assert!(matches!(event_backed.item(), CalendarItem::Event(_)));
         assert_eq!(
-            event_backed.as_event().map(|event| event.uid.as_str()),
-            Some(event_backed.event().uid.as_str())
+            event_backed.event().map(|event| event.uid.as_str()),
+            Some(event_backed.item().uid().as_str())
         );
 
         let task_backed = CalendarEvent::create(&calendar, Todo::new("A task")).unwrap();
         assert!(matches!(task_backed.item(), CalendarItem::Todo(_)));
-        assert!(task_backed.as_event().is_none());
+        assert!(task_backed.event().is_none());
+    }
+
+    /// The two VEVENT-only mutators can now be reached with a task behind
+    /// them, because `load` admits one. They must refuse it as an error —
+    /// never panic, and never write an event-shaped file over a task.
+    #[test]
+    fn the_vevent_only_mutators_refuse_a_task() {
+        use crate::Todo;
+
+        let (_tmp, calendar) = test_calendar();
+        let mut task = CalendarEvent::create(&calendar, Todo::new("A task")).unwrap();
+        let bytes_before = std::fs::read(task.path()).unwrap();
+
+        assert!(matches!(
+            task.update_attendee_status("someone@example.com", ParticipationStatus::Accepted),
+            Err(CalendarEventError::NotAnEvent)
+        ));
+        assert!(matches!(
+            task.add_exdate(EventTime::DateTimeUtc(
+                Utc.with_ymd_and_hms(2026, 1, 3, 12, 0, 0).unwrap()
+            )),
+            Err(CalendarEventError::NotAnEvent)
+        ));
+
+        assert_eq!(std::fs::read(task.path()).unwrap(), bytes_before);
     }
 }

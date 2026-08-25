@@ -17,6 +17,7 @@ pub mod tz_normalize;
 mod visibility;
 mod x_property;
 
+use crate::item::CalendarItem;
 pub use attachment::Attachment;
 pub use attendee::{Attendee, ParticipationStatus};
 pub use availability::Availability;
@@ -94,30 +95,27 @@ impl Event {
         }
     }
 
-    /// Parse ICS document to list of events
-    pub fn from_ics_str(contents: &str) -> Result<Vec<Result<Self, EventError>>, EventError> {
-        let icalendar: icalendar::Calendar = contents
-            .parse()
-            .map_err(|err| EventError::InvalidIcs(contents.to_string(), err))?;
-
-        Ok(icalendar.events().map(Event::try_from).collect())
-    }
-
     pub(crate) fn load_single(path: &std::path::Path) -> Result<Self, EventError> {
         let contents =
             std::fs::read_to_string(path).map_err(|err| EventError::Io(path.to_path_buf(), err))?;
 
-        Self::from_single_ics_str(&contents)
+        Self::narrowed_from_single_ics_str(&contents)
     }
 
-    pub(crate) fn from_single_ics_str(contents: &str) -> Result<Self, EventError> {
-        let events = Self::from_ics_str(contents)?;
-
-        match <[Result<Self, EventError>; 1]>::try_from(events) {
-            Ok([result]) => result,
-            Err(events) => Err(EventError::UnexpectedEventCount {
+    /// Parse a one-component ICS document and narrow it back to an event.
+    ///
+    /// Parsing is the item loader's job; this is the lossy step the two
+    /// remaining VEVENT-only seams still need — the RPC wire, whose payload
+    /// struct stays `Event` so no provider crate changes (R70), and sync
+    /// bases. A task reaching either has nowhere to go, so it aborts with the
+    /// arity error those seams already report (R71).
+    pub(crate) fn narrowed_from_single_ics_str(contents: &str) -> Result<Self, EventError> {
+        match CalendarItem::from_single_ics_str(contents)? {
+            CalendarItem::Event(event) => Ok(event),
+            // TODO(L6-01): pushing a task over an event-only seam.
+            CalendarItem::Todo(_) => Err(EventError::UnexpectedEventCount {
                 expected: 1,
-                found: events.len(),
+                found: 0,
             }),
         }
     }
@@ -236,7 +234,8 @@ impl Event {
     /// Panics on any deviation — for use in tests with known-good fixtures.
     #[cfg(test)]
     pub(crate) fn parse_single_ics(contents: &str) -> Event {
-        Self::from_single_ics_str(contents).expect("expected exactly one valid event in ICS")
+        Self::narrowed_from_single_ics_str(contents)
+            .expect("expected exactly one valid event in ICS")
     }
 
     // icalendar library adds UID to every VALARM
@@ -319,7 +318,7 @@ SUMMARY:Test Event
 END:VEVENT"
             .replace('\n', "\r\n");
 
-        let result = Event::from_ics_str(&ics);
+        let result = CalendarItem::from_ics_str(&ics);
         assert!(matches!(result, Err(EventError::InvalidIcs(_, _))));
     }
 
@@ -947,7 +946,7 @@ VERSION:2.0
 END:VCALENDAR
 "
         .replace('\n', "\r\n");
-        let events = Event::from_ics_str(&ics).unwrap();
+        let events = CalendarItem::from_ics_str(&ics).unwrap();
         assert!(events.is_empty());
     }
 
@@ -964,12 +963,12 @@ END:VCALENDAR
 "
         .replace('\n', "\r\n");
 
-        let events = Event::from_ics_str(&ics).unwrap();
+        let events = CalendarItem::from_ics_str(&ics).unwrap();
 
         assert_eq!(events.len(), 1);
         let event = events.into_iter().next().unwrap().unwrap();
-        assert_eq!(event.uid.as_str(), "only@caldir");
-        assert_eq!(event.summary.as_deref(), Some("Only event"));
+        assert_eq!(event.uid().as_str(), "only@caldir");
+        assert_eq!(event.summary(), Some("Only event"));
     }
 
     #[test]
@@ -995,16 +994,16 @@ END:VCALENDAR
 "
         .replace('\n', "\r\n");
 
-        let events: Vec<Event> = Event::from_ics_str(&ics)
+        let events: Vec<CalendarItem> = CalendarItem::from_ics_str(&ics)
             .unwrap()
             .into_iter()
             .map(Result::unwrap)
             .collect();
 
         assert_eq!(events.len(), 3);
-        assert_eq!(events[0].uid.as_str(), "first@caldir");
-        assert_eq!(events[1].uid.as_str(), "second@caldir");
-        assert_eq!(events[2].uid.as_str(), "third@caldir");
+        assert_eq!(events[0].uid().as_str(), "first@caldir");
+        assert_eq!(events[1].uid().as_str(), "second@caldir");
+        assert_eq!(events[2].uid().as_str(), "third@caldir");
     }
 
     #[test]
@@ -1057,7 +1056,7 @@ END:VEVENT
 "
         .replace('\n', "\r\n");
 
-        let result = Event::from_ics_str(&ics);
+        let result = CalendarItem::from_ics_str(&ics);
 
         assert!(matches!(result, Err(EventError::InvalidIcs(_, _))));
     }
@@ -1082,10 +1081,10 @@ END:VCALENDAR
 "
         .replace('\n', "\r\n");
 
-        let events = Event::from_ics_str(&ics).unwrap();
+        let events = CalendarItem::from_ics_str(&ics).unwrap();
 
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].as_ref().unwrap().uid.as_str(), "good@caldir");
+        assert_eq!(events[0].as_ref().unwrap().uid().as_str(), "good@caldir");
         assert!(matches!(events[1], Err(EventError::MissingUid)));
     }
 
@@ -1111,7 +1110,7 @@ END:VCALENDAR
     fn from_ics_str_parses_a_vtodo_document() {
         use crate::test_utils::VTODO_ICS;
 
-        let parsed = Event::from_ics_str(VTODO_ICS)
+        let parsed = CalendarItem::from_ics_str(VTODO_ICS)
             .unwrap_or_else(|err| panic!("VTODO document failed to parse: {err:?}"));
 
         assert_eq!(
@@ -1128,9 +1127,9 @@ END:VCALENDAR
             .unwrap()
             .unwrap_or_else(|err| panic!("VTODO could not be converted to an Event: {err:?}"));
 
-        assert_eq!(event.uid.as_str(), "assignment-123@u-crawler");
+        assert_eq!(event.uid().as_str(), "assignment-123@u-crawler");
         assert_eq!(
-            event.summary.as_deref(),
+            event.summary(),
             Some("Assignment 3 - Recursive descent parser")
         );
     }
@@ -1139,9 +1138,9 @@ END:VCALENDAR
     fn from_single_ics_str_parses_a_vtodo_document() {
         use crate::test_utils::VTODO_ICS;
 
-        match Event::from_single_ics_str(VTODO_ICS) {
-            Ok(event) => assert_eq!(event.uid.as_str(), "assignment-123@u-crawler"),
-            Err(EventError::UnexpectedEventCount { expected, found }) => panic!(
+        match CalendarItem::from_single_ics_str(VTODO_ICS) {
+            Ok(event) => assert_eq!(event.uid().as_str(), "assignment-123@u-crawler"),
+            Err(EventError::UnexpectedComponentCount { expected, found }) => panic!(
                 "VTODO rejected by arity check at caldir-core/src/event.rs:116 \
                  (expected {expected}, found {found})"
             ),
@@ -1154,13 +1153,10 @@ END:VCALENDAR
     fn from_single_ics_str_parses_the_vevent_control_document() {
         use crate::test_utils::VEVENT_CONTROL_ICS;
 
-        let event = Event::from_single_ics_str(VEVENT_CONTROL_ICS).unwrap();
+        let event = CalendarItem::from_single_ics_str(VEVENT_CONTROL_ICS).unwrap();
 
-        assert_eq!(event.uid.as_str(), "window-123@u-crawler");
-        assert_eq!(
-            event.summary.as_deref(),
-            Some("Assignment 3 - submission window")
-        );
+        assert_eq!(event.uid().as_str(), "window-123@u-crawler");
+        assert_eq!(event.summary(), Some("Assignment 3 - submission window"));
     }
 
     /// Observed, and correct, behaviour for a component-less document: nothing
@@ -1169,12 +1165,12 @@ END:VCALENDAR
     fn from_ics_str_yields_nothing_for_a_component_less_document() {
         use crate::test_utils::EMPTY_VCALENDAR_ICS;
 
-        let parsed = Event::from_ics_str(EMPTY_VCALENDAR_ICS).unwrap();
+        let parsed = CalendarItem::from_ics_str(EMPTY_VCALENDAR_ICS).unwrap();
 
         assert!(parsed.is_empty());
         assert!(matches!(
-            Event::from_single_ics_str(EMPTY_VCALENDAR_ICS),
-            Err(EventError::UnexpectedEventCount {
+            CalendarItem::from_single_ics_str(EMPTY_VCALENDAR_ICS),
+            Err(EventError::UnexpectedComponentCount {
                 expected: 1,
                 found: 0
             })

@@ -72,7 +72,7 @@ impl Connection {
             // VEVENT-only map: a task has no event identity, so it cannot be
             // a key here. TODO(L3-01): key this map by item identity.
             .filter_map(|e| {
-                let id = e.as_event()?.event_instance_id();
+                let id = e.event()?.event_instance_id();
                 Some((id, e))
             })
             .collect();
@@ -108,7 +108,7 @@ impl Connection {
             // VEVENT-only map: a task has no event identity, so it cannot be
             // a key here. TODO(L3-01): key this map by item identity.
             .filter_map(|e| {
-                let id = e.as_event()?.event_instance_id();
+                let id = e.event()?.event_instance_id();
                 Some((id, e))
             })
             .collect();
@@ -141,7 +141,7 @@ impl Connection {
             // VEVENT-only map: a task has no event identity, so it cannot be
             // a key here. TODO(L3-01): key this map by item identity.
             .filter_map(|e| {
-                let id = e.as_event()?.event_instance_id();
+                let id = e.event()?.event_instance_id();
                 Some((id, e))
             })
             .collect();
@@ -187,7 +187,7 @@ fn bases_to_backfill(
         .iter()
         // VEVENT-only map: remote lookups below are all by event identity.
         .filter_map(|e| {
-            let event = e.as_event()?;
+            let event = e.event()?;
             Some((event.event_instance_id(), event))
         })
         .collect();
@@ -609,7 +609,10 @@ mod tests {
 
         let reloaded = connection.local().events().unwrap().into_events();
         assert_eq!(reloaded.len(), 1);
-        assert_eq!(reloaded[0].event().x_properties, canonical.x_properties);
+        assert_eq!(
+            reloaded[0].event().unwrap().x_properties,
+            canonical.x_properties
+        );
         assert_eq!(
             connection
                 .local()
@@ -643,7 +646,7 @@ mod tests {
 
         let reloaded = connection.local().events().unwrap().into_events();
         assert_eq!(reloaded.len(), 1);
-        assert_eq!(reloaded[0].event().uid, canonical.uid);
+        assert_eq!(reloaded[0].event().unwrap().uid, canonical.uid);
 
         let synced = connection.local().state().synced_event_ids();
         assert!(synced.contains(&canonical_id));
@@ -736,7 +739,7 @@ mod tests {
 
         let reloaded = connection.local().events().unwrap().into_events();
         assert_eq!(reloaded.len(), 1);
-        assert_eq!(reloaded[0].event().summary, original.summary);
+        assert_eq!(reloaded[0].event().unwrap().summary, original.summary);
     }
 
     #[tokio::test]

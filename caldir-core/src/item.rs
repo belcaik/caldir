@@ -1,5 +1,5 @@
 use crate::calendar::CalendarEventError;
-use crate::event::{Event, EventError};
+use crate::event::{Event, EventError, EventUid};
 use crate::todo::Todo;
 use chrono::{DateTime, Utc};
 use icalendar::{CalendarComponent, Component};
@@ -77,6 +77,22 @@ impl CalendarItem {
                 path,
                 found: items.len(),
             }),
+        }
+    }
+
+    /// The item's UID, from whichever kind backs it.
+    pub fn uid(&self) -> &EventUid {
+        match self {
+            CalendarItem::Event(event) => &event.uid,
+            CalendarItem::Todo(todo) => &todo.uid,
+        }
+    }
+
+    /// The item's `SUMMARY`, from whichever kind backs it.
+    pub fn summary(&self) -> Option<&str> {
+        match self {
+            CalendarItem::Event(event) => event.summary.as_deref(),
+            CalendarItem::Todo(todo) => todo.summary.as_deref(),
         }
     }
 

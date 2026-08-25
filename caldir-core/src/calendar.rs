@@ -139,7 +139,7 @@ impl Calendar {
         id: &EventInstanceId,
     ) -> Result<Option<CalendarEvent>, CalendarError> {
         let found = self.events()?.into_events().into_iter().find(|ce| {
-            ce.as_event()
+            ce.event()
                 .is_some_and(|event| event.event_instance_id() == *id)
         });
 
@@ -155,10 +155,10 @@ impl Calendar {
             .into_events()
             .into_iter()
             .find(|ce| {
-                ce.as_event()
+                ce.event()
                     .is_some_and(|event| event.uid.as_str() == uid && event.recurrence.is_some())
             })
-            .and_then(|ce| ce.as_event().cloned());
+            .and_then(|ce| ce.event().cloned());
         Ok(master)
     }
 
@@ -204,7 +204,7 @@ impl Calendar {
         let master_idx = all_events
             .iter()
             .position(|ce| {
-                ce.as_event()
+                ce.event()
                     .is_some_and(|event| event.uid == *master_uid && event.recurrence.is_some())
             })
             .ok_or_else(|| CalendarError::MasterNotFound(master_uid.as_str().to_string()))?;
@@ -212,7 +212,7 @@ impl Calendar {
         let mut master_ce = all_events.swap_remove(master_idx);
         // Unreachable: `master_idx` was found through `as_event` above.
         let master_event = master_ce
-            .as_event()
+            .event()
             .ok_or_else(|| CalendarError::MasterNotFound(master_uid.as_str().to_string()))?
             .clone();
         let master_recurrence = master_event
@@ -246,7 +246,7 @@ impl Calendar {
 
         let split_start_utc = split_start.to_utc();
         for ce in all_events.into_iter() {
-            let Some(event) = ce.as_event() else {
+            let Some(event) = ce.event() else {
                 continue;
             };
             if event.uid != *master_uid {
@@ -278,7 +278,7 @@ impl Calendar {
 
         // Find master event (+ potential override event)
         for ce in self.events()?.into_events() {
-            let Some(event) = ce.as_event() else {
+            let Some(event) = ce.event() else {
                 continue;
             };
             if event.uid != *uid {
@@ -329,7 +329,7 @@ impl Calendar {
             Some(mut ce) => {
                 // Unreachable: `event_by_instance_id` only matches events.
                 // TODO(L3-03): tasks need their own instance-override path.
-                let Some(mut event) = ce.as_event().cloned() else {
+                let Some(mut event) = ce.event().cloned() else {
                     return Err(CalendarError::MasterNotFound(id.uid().as_str().to_string()));
                 };
                 apply(&mut event);
@@ -369,7 +369,7 @@ impl Calendar {
             .into_iter()
             // TODO(L2-07): this yields `CalendarItem`, and tasks stop being
             // dropped here.
-            .filter_map(|ce| ce.as_event().cloned());
+            .filter_map(|ce| ce.event().cloned());
         Ok(expand_in_range(events, from, to))
     }
 
@@ -592,7 +592,7 @@ mod tests {
             .unwrap()
             .into_events()
             .into_iter()
-            .map(|ce| ce.event().clone())
+            .map(|ce| ce.event().unwrap().clone())
             .filter(|e| e.uid.as_str() == uid && e.recurrence_id.is_some())
             .collect()
     }
@@ -653,7 +653,7 @@ mod tests {
     fn event_by_instance_id_finds_non_recurring_event() {
         let (_tmp, calendar) = test_calendar();
         let cal_event = calendar.create_event(test_event()).unwrap();
-        let id = cal_event.event().event_instance_id();
+        let id = cal_event.event().unwrap().event_instance_id();
 
         let found = calendar.event_by_instance_id(&id).unwrap();
 
@@ -680,7 +680,7 @@ mod tests {
 
         assert!(found.is_some());
         assert_eq!(
-            found.unwrap().event().summary.as_deref(),
+            found.unwrap().event().unwrap().summary.as_deref(),
             Some("Special standup")
         );
     }
@@ -1213,7 +1213,7 @@ mod tests {
             ),
         };
 
-        let mut uids: Vec<&str> = events.iter().map(|ce| ce.event().uid.as_str()).collect();
+        let mut uids: Vec<&str> = events.iter().map(|ce| ce.item().uid().as_str()).collect();
         uids.sort_unstable();
 
         assert_eq!(
@@ -1239,7 +1239,7 @@ mod tests {
         let uids: Vec<&str> = listing
             .events()
             .iter()
-            .map(|ce| ce.event().uid.as_str())
+            .map(|ce| ce.event().unwrap().uid.as_str())
             .collect();
         assert_eq!(uids, vec!["window-123@u-crawler"]);
 
@@ -1259,6 +1259,9 @@ mod tests {
         let events = calendar.events().unwrap().into_events();
 
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event().uid.as_str(), "window-123@u-crawler");
+        assert_eq!(
+            events[0].event().unwrap().uid.as_str(),
+            "window-123@u-crawler"
+        );
     }
 }

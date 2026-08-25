@@ -10,6 +10,9 @@ pub enum CalendarEventError {
     #[error("expected exactly one event in {path}, found {found}")]
     ExpectedSingleEvent { path: PathBuf, found: usize },
 
+    #[error("this item is not an event")]
+    NotAnEvent,
+
     #[error(
         "expected exactly one VEVENT or VTODO in {path}, found {found}; \
          split it into one file per item"

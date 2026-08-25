@@ -46,7 +46,7 @@ impl CalendarDiff {
             .iter()
             // VEVENT-only: this set is compared against remote *event* ids, and
             // pass 2 below only ever looks up an event identity.
-            .filter_map(|e| Some(e.as_event()?.event_instance_id()))
+            .filter_map(|e| Some(e.event()?.event_instance_id()))
             .collect();
 
         let remote_by_id: HashMap<_, &RemoteEvent> = remote_events
@@ -61,7 +61,7 @@ impl CalendarDiff {
             // Narrowing, not a filter: a task simply produces no change here.
             // It is never treated as absent-and-therefore-deleted, because the
             // delete branches below are inside this same `Some` arm.
-            let Some(event) = local_event.as_event() else {
+            let Some(event) = local_event.event() else {
                 continue;
             };
             let id = event.event_instance_id();
@@ -273,7 +273,7 @@ mod tests {
     #[test]
     fn an_id_known_only_in_the_bases_triggers_no_delete() {
         let (_tmp, calendar_event) = test_calendar_event();
-        let event = calendar_event.event().clone();
+        let event = calendar_event.event().unwrap().clone();
 
         let mut sync_bases = SyncBases::new();
         // What an older caldir parses a task line into: one opaque UID.
@@ -296,7 +296,7 @@ mod tests {
     #[test]
     fn new_local_event_becomes_outgoing_create() {
         let (_tmp, calendar_event) = test_calendar_event();
-        let new_event = calendar_event.event().clone();
+        let new_event = calendar_event.event().unwrap().clone();
 
         let local_events = vec![calendar_event];
         let remote_events = vec![];
@@ -464,7 +464,7 @@ mod tests {
     #[test]
     fn deleted_remote_event_becomes_incoming_delete() {
         let (_tmp, calendar_event) = test_calendar_event();
-        let local_event = calendar_event.event().clone();
+        let local_event = calendar_event.event().unwrap().clone();
 
         let mut synced_ids = SyncBases::new();
         synced_ids.insert_known_event_id(local_event.event_instance_id());
@@ -486,7 +486,7 @@ mod tests {
     #[test]
     fn event_base_marks_event_as_previously_synced() {
         let (_tmp, calendar_event) = test_calendar_event();
-        let local_event = calendar_event.event().clone();
+        let local_event = calendar_event.event().unwrap().clone();
         let id = local_event.event_instance_id();
 
         let mut sync_bases = SyncBases::new();

@@ -15,7 +15,7 @@ fn duplicate_file_sets(events: &[CalendarEvent]) -> Vec<Vec<PathBuf>> {
     for ce in events {
         // Only events carry an `EventInstanceId`. `L2-08` makes this check
         // kind-aware; until then a task is not bucketed at all.
-        let Some(event) = ce.as_event() else {
+        let Some(event) = ce.event() else {
             continue;
         };
 

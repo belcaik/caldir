@@ -46,7 +46,7 @@ fn run_direct(caldir: &Caldir, path_str: &str, response_str: &str) -> Result<()>
     let mut cal_event = CalendarEvent::load(&path).context("Failed to load event")?;
     // An RSVP is meaningless on a task (R81). Fail before anything is written;
     // `L7-04` owns the final wording.
-    let Some(event) = cal_event.as_event() else {
+    let Some(event) = cal_event.event() else {
         anyhow::bail!("Cannot RSVP to a task: {}", path.display());
     };
 
@@ -96,7 +96,7 @@ fn run_interactive(caldir: &Caldir) -> Result<()> {
         for ce in cal.events()?.into_events() {
             // Tasks have no invites to answer (R81), so they are simply not
             // listed here; `L7-04` owns the user-facing story.
-            let Some(event) = ce.as_event() else {
+            let Some(event) = ce.event() else {
                 continue;
             };
 

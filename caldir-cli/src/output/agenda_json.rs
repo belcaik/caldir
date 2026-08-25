@@ -468,12 +468,10 @@ URL:https://meet.google.com/abc-defg-hij\r\n\
 X-GOOGLE-CONFERENCE:https://meet.google.com/abc-defg-hij\r\n\
 END:VEVENT\r\n\
 END:VCALENDAR\r\n";
-        let event = Event::from_ics_str(ics)
-            .unwrap()
-            .into_iter()
-            .next()
-            .unwrap()
-            .unwrap();
+        let event = match caldir_core::CalendarItem::from_single_ics_str(ics).unwrap() {
+            caldir_core::CalendarItem::Event(event) => event,
+            item => panic!("VEVENT fixture parsed as {item:?}"),
+        };
 
         let json = serde_json::to_value(entry(event)).unwrap();
 
