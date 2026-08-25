@@ -45,6 +45,12 @@ caldir connect google --hosted=false
 This will prompt you to create OAuth credentials in Google Cloud Console and set up the right
 permissions.
 
+### Tasks are not supported
+
+Google keeps tasks in a separate product with its own API, so caldir does not sync them here.
+
+If a task (`VTODO`) file ends up inside a Google-backed calendar directory, `caldir push` and `caldir sync` stop that one calendar with an error. Nothing is deleted and no file is modified — your other calendars sync as usual — but that calendar will keep failing until you move the task somewhere else.
+
 ## iCloud
 
 ```bash
@@ -73,6 +79,11 @@ caldir connect outlook --hosted=false
 
 This will prompt you to register an app in the Azure portal and provide a client ID and secret.
 
+### Tasks are not supported
+
+Microsoft keeps tasks in a separate product with its own API, so caldir does not sync them here.
+
+If a task (`VTODO`) file ends up inside an Outlook-backed calendar directory, `caldir push` and `caldir sync` stop that one calendar with an error. Nothing is deleted and no file is modified — your other calendars sync as usual — but that calendar will keep failing until you move the task somewhere else.
 
 ## Other CalDAV server
 

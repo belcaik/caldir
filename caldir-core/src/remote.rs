@@ -194,6 +194,44 @@ mod tests {
         assert!(!mock.received_a_request(), "nothing may reach the provider");
     }
 
+    /// The other half of `push_outgoing_changes`'s
+    /// `unreachable!("apply_change returns None for Delete")`: a `Delete` that
+    /// succeeds must yield no `RemoteEvent`. Its task sibling — a `Delete`
+    /// that aborts before it can return at all — is pinned in
+    /// `connection::tests::a_task_only_delete_aborts_before_reaching_the_provider`.
+    #[tokio::test]
+    async fn apply_change_yields_no_remote_event_for_a_delete() {
+        let (mock, remote) = test_remote();
+        mock.reply::<rpc::DeleteEvent>(());
+
+        let applied = remote
+            .apply_change(&EventChange::Delete(test_event().into()))
+            .await
+            .unwrap();
+
+        assert!(
+            applied.is_none(),
+            "a delete has no returned item; the push loop treats Some as impossible",
+        );
+    }
+
+    /// R70/R71, the delete arm at the `Remote` seam. Companion to
+    /// `a_task_change_aborts_instead_of_reaching_the_provider`, which covers
+    /// `Create`.
+    #[tokio::test]
+    async fn a_task_delete_aborts_instead_of_reaching_the_provider() {
+        let (mock, remote) = test_remote();
+        let todo = crate::todo::Todo::new("Hand in the assignment");
+
+        let err = remote
+            .apply_change(&EventChange::Delete(todo.into()))
+            .await
+            .expect_err("a task delete must never be pushed over the event-only wire");
+
+        assert_eq!(err.to_string(), "expected 1 event(s) in ICS, found 0");
+        assert!(!mock.received_a_request(), "nothing may reach the provider");
+    }
+
     #[tokio::test]
     async fn apply_change_sends_delete_event_for_outgoing_delete() {
         let (mock, remote) = test_remote();

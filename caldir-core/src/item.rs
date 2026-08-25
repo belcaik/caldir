@@ -139,11 +139,21 @@ impl CalendarItem {
     ///
     /// Not a drop: the `Err` is the arity error the wire already reports, so a
     /// task push aborts loudly instead of being pushed as something else.
-    /// `L6-01` owns turning this into a user-facing story.
+    ///
+    /// **This error text is a contract, not an accident (R71).** ADR-07, which
+    /// would have produced a friendlier message here, was cut by user
+    /// decision; the accepted price is that a task in a calendar backed by an
+    /// event-only provider fails that calendar's push, every sync, with exactly
+    /// `expected 1 event(s) in ICS, found 0`. Ugly, and deliberately so — a
+    /// prettier message reached by inspecting what the provider can carry *is*
+    /// ADR-07, and skipping the task instead would be a silent data drop
+    /// (R19). Locked by `remote::tests::a_task_change_aborts_instead_of_
+    /// reaching_the_provider`, its `_delete_` sibling, and
+    /// `connection::tests::pushing_a_task_to_a_task_less_provider_fails_that_
+    /// calendar_without_data_loss`. Do not soften it without moving those.
     pub(crate) fn into_event(self) -> Result<Event, EventError> {
         match self {
             CalendarItem::Event(event) => Ok(event),
-            // TODO(L6-01): pushing a task over an event-only seam.
             CalendarItem::Todo(_) => Err(EventError::UnexpectedEventCount {
                 expected: 1,
                 found: 0,

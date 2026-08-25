@@ -790,6 +790,7 @@ mod tests {
         let event = test_event();
         let todo = Todo::new("Hand in the assignment");
         let doomed = Event::new("Would be deleted remotely", test_event_time());
+        let doomed_id = doomed.event_instance_id();
 
         let event_path = connection
             .local()
@@ -817,14 +818,37 @@ mod tests {
             vec![],
         );
 
+        let todo_bytes_before = std::fs::read(&todo_path).unwrap();
+
         let result = connection.apply_outgoing_diff(&diff).await;
 
-        assert!(result.is_err(), "the task push must fail the calendar");
+        let err = result.expect_err("the task push must fail the calendar");
+
+        // `L6-01`/R71: the ugly message is a *contract*, not an accident. The
+        // ADR-07 cut was accepted on the basis that this text is what ships,
+        // so making it nicer here would silently re-open that decision.
+        let ConnectionError::Remote(remote_err) = &err else {
+            panic!("expected a remote error, got {err:?}");
+        };
+        assert_eq!(
+            remote_err.to_string(),
+            "expected 1 event(s) in ICS, found 0"
+        );
+        // What the user actually reads, via `caldir push`'s renderer.
+        assert_eq!(
+            err.to_string(),
+            "Remote error: expected 1 event(s) in ICS, found 0"
+        );
 
         // Not data loss: both files are still there, and still themselves.
         assert!(event_path.is_file());
         assert!(todo_path.is_file());
-        assert_eq!(CalendarItem::load(&todo_path).unwrap(), todo.into());
+        assert_eq!(CalendarItem::load(&todo_path).unwrap(), todo.clone().into());
+        assert_eq!(
+            std::fs::read(&todo_path).unwrap(),
+            todo_bytes_before,
+            "the failed item's file must be byte-identical to before the push",
+        );
 
         // The delete queued behind the task never happened. `captured_request`
         // asserts the method of the *last* request, so this is exactly "no
@@ -837,6 +861,15 @@ mod tests {
             reloaded.state().sync_base(&event.event_instance_id()),
             Some(&event),
         );
+
+        // ...but nothing was recorded for the item that failed, nor for the
+        // delete queued behind it. A base or known-id entry for either would
+        // make the *next* run read the failure as "already synced".
+        let todo_id = CalendarItem::Todo(todo).instance_id();
+        assert_eq!(reloaded.state().sync_bases().get(&todo_id), None);
+        assert!(!reloaded.state().synced_event_ids().contains(&todo_id));
+        assert_eq!(reloaded.state().sync_bases().get(&doomed_id), None);
+        assert!(!reloaded.state().synced_event_ids().contains(&doomed_id));
     }
 
     /// `T-51` — R57 (INVIOLABLE), the second accepted skew failure: **old core
@@ -1008,6 +1041,138 @@ END:VJOURNAL\r\nEND:VCALENDAR\r\n";
         assert!(!event_path.exists(), "the event's file is the one deleted");
         assert!(todo_path.is_file(), "the task's file must survive");
         assert_eq!(CalendarItem::load(&todo_path).unwrap(), todo.into());
+    }
+
+    // --- L6-01: the accepted ADR-07 consequences, pinned ---
+
+    /// **R71/R72/R49 at the `Connection` seam.** The webcal shape: a feed that
+    /// *does* answer — it returns events — but silently drops every `VTODO`
+    /// (`caldir-provider-webcal` filters them out before core ever sees them).
+    /// Absence there means "this provider cannot see tasks", never "the user
+    /// deleted them", so no local task may be deleted for it.
+    ///
+    /// Distinct from `T-52`, which drives an *empty* response and a same-UID
+    /// pair. Here the response is non-empty and the identities are unrelated,
+    /// which is the case a naive "the remote answered, so absence is a delete"
+    /// reading gets wrong.
+    ///
+    /// The event side is the control: an event with a known base that the feed
+    /// also omits **is** deleted, exactly as it is today (R1, R2).
+    #[tokio::test]
+    async fn a_task_less_feed_does_not_delete_local_tasks() {
+        let (_tmp, mock, mut connection) = writable_connection();
+
+        let task = Todo::new("Renew the parking permit");
+        let still_there = Event::new("Weekly standup", test_event_time());
+        let gone = Event::new("Cancelled offsite", test_event_time());
+
+        let task_path = connection
+            .local()
+            .create_event(task.clone())
+            .unwrap()
+            .path()
+            .to_path_buf();
+        let still_there_path = connection
+            .local()
+            .create_event(still_there.clone())
+            .unwrap()
+            .path()
+            .to_path_buf();
+        let gone_path = connection
+            .local()
+            .create_event(gone.clone())
+            .unwrap()
+            .path()
+            .to_path_buf();
+
+        // All three have synced before, so absence from the feed is the only
+        // thing that could authorise a delete.
+        connection
+            .local
+            .record_sync_bases(vec![
+                CalendarItem::Todo(task.clone()),
+                CalendarItem::Event(still_there.clone()),
+                CalendarItem::Event(gone.clone()),
+            ])
+            .unwrap();
+
+        // Events, and only events — the webcal feed shape.
+        mock.reply::<rpc::ListEvents>(vec![CalendarItem::Event(still_there.clone())]);
+        let diff = connection.diff(&DateRange::default()).await.unwrap();
+
+        assert_eq!(
+            diff.incoming(),
+            &[EventChange::Delete(CalendarItem::Event(gone.clone()))],
+            "the event side is diffed exactly as today; the task is withheld",
+        );
+        assert!(
+            !diff
+                .incoming()
+                .iter()
+                .chain(diff.outgoing())
+                .any(|c| matches!(c, EventChange::Delete(CalendarItem::Todo(_)))),
+            "no delete of any kind may target a task, got incoming {:?} outgoing {:?}",
+            diff.incoming(),
+            diff.outgoing(),
+        );
+        assert!(
+            diff.suppressed_task_deletes(),
+            "the belt actually cost a delete here, so the signal must be set",
+        );
+
+        connection.apply_incoming_diff(&diff).unwrap();
+
+        assert!(task_path.is_file(), "the task's file must survive the feed");
+        assert_eq!(CalendarItem::load(&task_path).unwrap(), task.into());
+        assert!(still_there_path.is_file());
+        assert!(
+            !gone_path.exists(),
+            "the event control must still be deleted"
+        );
+    }
+
+    /// **R71**, the delete arm. `L4-03` pinned the `Create` arm; `Update` and
+    /// `Delete` abort through the same `into_event()` on the way to an
+    /// event-only wire, but nothing pinned it — the ADJUDICATION records the
+    /// gap as this ticket's ("a pure task-only outgoing `Delete` has no lock").
+    ///
+    /// It matters because `push_outgoing_changes` carries
+    /// `unreachable!("apply_change returns None for Delete")`. That branch is
+    /// safe only while a `Delete` can never return `Some`, and a task-only
+    /// delete is the one shape that would otherwise walk into it. The other
+    /// half of that invariant — an *event* delete really does yield `None` —
+    /// is pinned in `remote::tests::apply_change_yields_no_remote_event_for_a_delete`.
+    #[tokio::test]
+    async fn a_task_only_delete_aborts_before_reaching_the_provider() {
+        let (_tmp, mock, mut connection) = writable_connection();
+
+        let task = Todo::new("Renew the parking permit");
+        let task_path = connection
+            .local()
+            .create_event(task.clone())
+            .unwrap()
+            .path()
+            .to_path_buf();
+
+        let err = connection
+            .apply_outgoing_diff(&outgoing_delete_diff(task.clone()))
+            .await
+            .expect_err("a task delete must never ride the event-only wire");
+
+        let ConnectionError::Remote(remote_err) = err else {
+            panic!("expected a remote error, got {err:?}");
+        };
+        assert_eq!(
+            remote_err.to_string(),
+            "expected 1 event(s) in ICS, found 0"
+        );
+
+        assert!(
+            !mock.received_a_request(),
+            "nothing may reach the transport for a task delete",
+        );
+        assert!(task_path.is_file(), "the local file must survive the abort");
+        assert_eq!(CalendarItem::load(&task_path).unwrap(), task.into());
     }
 
     /// **R65.** A same-UID event/task pair is a perfectly good *local*
