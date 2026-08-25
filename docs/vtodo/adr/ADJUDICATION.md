@@ -490,3 +490,31 @@ icloud-crate edit.
 - webcal list_events.rs:4 does NOT break; the real breaks are the
   CONSUMERS of the parse result, and 3 of the 6 are in the test module
   the ticket never mentions.
+
+## RULING — doctor's "same event" duplicate wording (raised by L2-08)
+The duplicate warning reads "same event saved as multiple files". Now
+that the check buckets tasks too, that is inaccurate for a task pair.
+RULING: C13 protects EXISTING text for EXISTING situations. An
+event-duplicate warning MUST stay byte-identical. A TASK duplicate is a
+NEW situation, so new phrasing there breaches nothing. L2-08 correctly
+declined to invent it unprompted.
+ASSIGNED to L7-05 (doctor surface), which owns doctor wording: give a
+task duplicate its own sentence, leave the event sentence untouched,
+and pin BOTH with byte-exact locks.
+
+## CARRY-FORWARD — duplicate_file_sets should bucket into a BTreeMap
+L2-08's M6 is only ~50% catchable because the MUTANT is
+nondeterministic: without the trailing sets.sort() the order comes from
+randomized HashMap iteration and lands correct about half the time. The
+honest fix is a BTreeMap so ordering is intrinsic and the sort
+disappears - but EventInstanceId is not Ord, so this needs a derive on
+a public type. Belongs in the 0.15.0 breaking window with the
+#[non_exhaustive] work already assigned to L8-05.
+
+## L2 COMPLETE
+L2-01..L2-08 all landed. 765 passed / 0 failed, all three zones.
+ALL FIVE IMMUTABLE ACCEPTANCE TESTS ARE GREEN, every one verified by the
+orchestrator against wip-snapshot rather than accepted from a report.
+Cumulative L1+L2 mutation testing: 120 applied, 113 caught, 6 locks
+found unable to fail and REPAIRED rather than banked, 1 residual
+reported honestly as probabilistic.
