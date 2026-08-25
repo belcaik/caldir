@@ -671,3 +671,42 @@ raw-wire escape hatch in the crate - the only way to stub a wire shape
 no typed response can express, i.e. a provider NEWER than this core.
 Document it in context/testing.md alongside the MockTransport FIFO and
 last-request traps.
+
+## ⚠ METHODOLOGICAL FINDING — MockProvider::reply blinds round-trip gates
+L4-04's most transferable result. `MockProvider::reply` encodes the
+expected value using `to_ics_string` - THE ENCODER UNDER TEST - so a
+lossy serialize cancels on both sides and the assertion goes blind.
+MEASURED: under a `reply`-based idempotence gate, 6 of 12 mutations that
+the raw-fixture version catches SURVIVED (dropped COMPLETED, stripped
+X-*, flattened TZID, coerced floating COMPLETED, synthesized DTSTART,
+DESCRIPTION drift).
+RULE for every future round-trip / idempotence / fidelity assertion:
+drive the remote from RAW ICS via `reply_raw_data`, never from domain
+values via `reply`. The remote must be an independent store, which is
+what a remote IS.
+L8 MUST add this to context/testing.md beside the FIFO and
+last-request traps, and spec §18's T-49 row must note the raw-fixture
+requirement - the ticket's literal "re-serialize the items caldir wrote"
+reading produces a gate six mutations walk straight through.
+
+## ANSWERED — open question Q-4
+`percent_complete: None` vs `Some(0)` is NOT a churn source today.
+`PERCENT-COMPLETE:0` parses to Some(0), re-serializes to
+`PERCENT-COMPLETE:0`, parses back to Some(0) - stable. `None != Some(0)`
+under Todo's PartialEq, but nothing in the pipeline converts one to the
+other, so the distinction never produces a diff. T-49's fixture carries
+PERCENT-COMPLETE:0 permanently, so an asymmetric future collapse is
+caught. Q-4 CLOSED.
+
+## OPEN — Connection has no "fresh process" seam
+T-49 and T-52 both reach into `connection.local` to reload the calendar,
+because a second `caldir pull` is a fresh process that reads bases from
+the state dir rather than an in-memory map. Two sites now touch a
+private field. A small `Connection::reload_local()` would keep future
+two-pass tests off it.
+
+## L4 COMPLETE
+L4-01..L4-04 landed. 807 passed / 0 failed, all three zones.
+Cumulative L1-L4: 227 mutations, 211 caught, 12 locks found unable to
+fail and REPAIRED, 3 acceptance criteria REFUSED with verification (one
+because the criterion would have asserted a falsehood).
