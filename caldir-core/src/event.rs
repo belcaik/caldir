@@ -1,6 +1,7 @@
 mod attachment;
 mod attendee;
 mod availability;
+pub(crate) mod equality;
 mod error;
 mod from_icalendar;
 mod instance_id;
@@ -20,6 +21,7 @@ pub use attachment::Attachment;
 pub use attendee::{Attendee, ParticipationStatus};
 pub use availability::Availability;
 use chrono::{DateTime, Utc};
+use equality::{attachments_eq, x_properties_eq};
 pub use error::EventError;
 pub use instance_id::{EventInstanceId, EventUid, RecurrenceId};
 pub use occurrences::expand_in_range;
@@ -273,22 +275,9 @@ impl Event {
     }
 }
 
-fn new_uid() -> EventUid {
+pub(crate) fn new_uid() -> EventUid {
     let uid = format!("{}@{}", uuid::Uuid::new_v4(), ICS_UID_DOMAIN);
     EventUid::new(uid)
-}
-
-// Order-independent compare: BTreeMap-parsed ICS files give alphabetical
-// order, but providers (e.g. Google) build x_properties in insertion order.
-fn x_properties_eq(a: &[XProperty], b: &[XProperty]) -> bool {
-    a.len() == b.len() && a.iter().all(|x| b.contains(x))
-}
-
-// The URI is the attachment's identity. Compare on it alone (order-independent)
-// so adding/removing/changing an attachment registers as a content change,
-// while volatile params (SIZE, MANAGED-ID) drifting doesn't cause sync churn.
-fn attachments_eq(a: &[Attachment], b: &[Attachment]) -> bool {
-    a.len() == b.len() && a.iter().all(|x| b.iter().any(|y| y.uri == x.uri))
 }
 
 #[cfg(test)]
@@ -1114,5 +1103,81 @@ END:VCALENDAR
             .collect::<Vec<_>>()
             .join("\r\n")
             + "\r\n"
+    }
+
+    // --- VTODO support (RED regression tests) ---
+
+    #[test]
+    fn from_ics_str_parses_a_vtodo_document() {
+        use crate::test_utils::VTODO_ICS;
+
+        let parsed = Event::from_ics_str(VTODO_ICS)
+            .unwrap_or_else(|err| panic!("VTODO document failed to parse: {err:?}"));
+
+        assert_eq!(
+            parsed.len(),
+            1,
+            "VTODO document yielded {} entries; icalendar::Calendar::events() \
+             (caldir-core/src/event.rs:101) filters to VEVENT only",
+            parsed.len()
+        );
+
+        let event = parsed
+            .into_iter()
+            .next()
+            .unwrap()
+            .unwrap_or_else(|err| panic!("VTODO could not be converted to an Event: {err:?}"));
+
+        assert_eq!(event.uid.as_str(), "assignment-123@u-crawler");
+        assert_eq!(
+            event.summary.as_deref(),
+            Some("Assignment 3 - Recursive descent parser")
+        );
+    }
+
+    #[test]
+    fn from_single_ics_str_parses_a_vtodo_document() {
+        use crate::test_utils::VTODO_ICS;
+
+        match Event::from_single_ics_str(VTODO_ICS) {
+            Ok(event) => assert_eq!(event.uid.as_str(), "assignment-123@u-crawler"),
+            Err(EventError::UnexpectedEventCount { expected, found }) => panic!(
+                "VTODO rejected by arity check at caldir-core/src/event.rs:116 \
+                 (expected {expected}, found {found})"
+            ),
+            Err(err) => panic!("VTODO rejected for an unexpected reason: {err:?}"),
+        }
+    }
+
+    /// Control: the VEVENT half of the same u_crawler output must keep working.
+    #[test]
+    fn from_single_ics_str_parses_the_vevent_control_document() {
+        use crate::test_utils::VEVENT_CONTROL_ICS;
+
+        let event = Event::from_single_ics_str(VEVENT_CONTROL_ICS).unwrap();
+
+        assert_eq!(event.uid.as_str(), "window-123@u-crawler");
+        assert_eq!(
+            event.summary.as_deref(),
+            Some("Assignment 3 - submission window")
+        );
+    }
+
+    /// Observed, and correct, behaviour for a component-less document: nothing
+    /// to parse. Documented so a VTODO fix does not accidentally change it.
+    #[test]
+    fn from_ics_str_yields_nothing_for_a_component_less_document() {
+        use crate::test_utils::EMPTY_VCALENDAR_ICS;
+
+        let parsed = Event::from_ics_str(EMPTY_VCALENDAR_ICS).unwrap();
+
+        assert!(parsed.is_empty());
+        assert!(matches!(
+            Event::from_single_ics_str(EMPTY_VCALENDAR_ICS),
+            Err(EventError::UnexpectedEventCount {
+                expected: 1,
+                found: 0
+            })
+        ));
     }
 }

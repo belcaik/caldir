@@ -6,6 +6,7 @@ mod event;
 pub mod provider;
 mod remote;
 pub mod rpc;
+mod todo;
 mod utils;
 
 #[cfg(test)]
@@ -23,4 +24,5 @@ pub use event::{
 };
 pub use provider::{Provider, ProviderRegistry, ProviderSlug};
 pub use remote::{Remote, RemoteConfig, RemoteConfigParams, RemoteEvent};
+pub use todo::{Todo, TodoStatus};
 pub use utils::{DateBounds, DateRange};

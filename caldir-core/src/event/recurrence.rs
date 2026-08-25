@@ -52,7 +52,7 @@ impl Recurrence {
         }
     }
 
-    pub(crate) fn from_ical_event(event: &icalendar::Event) -> Option<Self> {
+    pub(crate) fn from_ical_event<C: Component + ?Sized>(event: &C) -> Option<Self> {
         let rrule = event.property_value("RRULE")?;
 
         let exdates = parse_event_time_list(event, "EXDATE");
@@ -154,7 +154,7 @@ fn with_until(rrule: &str, until_value: &str) -> String {
     parts.join(";")
 }
 
-fn parse_event_time_list(event: &icalendar::Event, name: &str) -> Vec<EventTime> {
+fn parse_event_time_list<C: Component + ?Sized>(event: &C, name: &str) -> Vec<EventTime> {
     event
         .multi_properties()
         .get(name)
