@@ -569,3 +569,30 @@ honestly rather than padded into clean sweeps.
 Notable: L3-03's M14 would have been SILENT WIRE CORRUPTION - a task
 pushed to a remote as a synthesized meeting - and nothing asserted the
 abort until the lock was repaired.
+
+## RULING — L4-01's AC 1 and AC 2 are RE-HOMED to L4-02
+L4-01 refused AC 1 ("Ics wraps a CalendarItem") and verified why:
+1. `WireValue::from_wire` is INFALLIBLE (rpc/wire.rs). An item-typed Ics
+   forces CalendarItem -> Event with NO error channel => panic or silent
+   drop, breaching R19.
+2. It does not compile against `pub event: Event`.
+3. It makes `serde_json::from_str::<Ics>(VTODO)` SUCCEED, which kills the
+   tripwire `a_task_cannot_ride_the_event_only_wire` outright - no
+   accessor rename saves a test whose premise is inverted.
+RULING: correct refusal. AC 1/AC 2 move to L4-02, which already owns
+`provider/handler.rs` and `list_events.rs`. The structural reason is
+`WireValue::from_wire`'s infallibility - L4-02 must address that FIRST
+or it will hit the same wall.
+L4-01 left an item-typed `serde(with)`-compatible module so L4-02 flips
+the fields with a ONE-LINE attribute change.
+
+## NEW for the 0.15.0 breaking window (add to L8-05's list)
+`WireValue::from_wire` should return `Result`. It is infallible today,
+which is exactly why an item-typed response has nowhere to put a decode
+failure. Now FIVE items ride that window: #[non_exhaustive] on
+CalendarError / ComponentKind / CalendarItem, RemoteError::UnsupportedItem
+joining that list, and this signature change.
+
+## PINNED — the wire arity error text is now a byte-exact lock
+"expected 1 supported component(s) in ICS, found {n}"
+L8's docs must quote it; any rename must move the lock.
