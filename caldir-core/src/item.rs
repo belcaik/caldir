@@ -140,6 +140,25 @@ impl CalendarItem {
         }
     }
 
+    /// Whether this item falls inside `[from, to]` — the in-window predicate
+    /// the diff's delete/create decision hangs on (R44, R45).
+    ///
+    /// One predicate per kind, never one shared rule. Events keep
+    /// [`Event::has_occurrence_in_range`] byte for byte (R45, R2); tasks get
+    /// RFC 4791 §9.9's "core's rule" via [`Todo::occurs_in_range`].
+    ///
+    /// Polarity, because it is easy to state backwards (R47): `false` makes
+    /// the caller `continue` — **neither** a delete **nor** a create — while
+    /// `true` is what *authorizes* a delete. An undated task is unconditionally
+    /// `true`, so it is the CalDAV query being bare of `<C:time-range>`
+    /// (R51/R58), not this predicate, that keeps it from being deleted.
+    pub(crate) fn has_occurrence_in_range(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> bool {
+        match self {
+            CalendarItem::Event(event) => event.has_occurrence_in_range(from, to),
+            CalendarItem::Todo(todo) => todo.occurs_in_range(from, to),
+        }
+    }
+
     /// `LAST-MODIFIED`, which the writer pins the file mtime to so direction
     /// detection reflects when the item changed, not when bytes hit disk.
     pub(crate) fn last_modified(&self) -> Option<DateTime<Utc>> {

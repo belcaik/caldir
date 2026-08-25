@@ -102,6 +102,43 @@ impl Todo {
         }
     }
 
+    /// Whether this task falls inside `[from, to]` (R44).
+    ///
+    /// The "core's rule" column of RFC 4791 §9.9's VTODO time-range table,
+    /// with `start = from` and `end = to`:
+    ///
+    /// | DTSTART | DUE | rule |
+    /// |---|---|---|
+    /// | Y | Y | `(from < DUE OR from <= DTSTART) AND (to > DTSTART OR to >= DUE)` |
+    /// | Y | N | `from <= DTSTART AND to > DTSTART` |
+    /// | N | Y | `from < DUE AND to >= DUE` |
+    /// | N | N | TRUE, unconditionally |
+    ///
+    /// `COMPLETED` and `CREATED` are deliberately **not** consulted: core must
+    /// be *more* permissive than any server, never less, or an item a §9.9
+    /// server omitted would be read as absent-and-therefore-deleted (§10).
+    ///
+    /// No date is ever synthesized for an undated task (R46, INVIOLABLE): a
+    /// fabricated epoch `DTSTART` evaluates false here and would silently make
+    /// undated tasks unpushable rather than merely undeletable.
+    pub fn occurs_in_range(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> bool {
+        match (self.start.as_ref(), self.due.as_ref()) {
+            (Some(start), Some(due)) => {
+                let (start, due) = (start.to_utc(), due.to_utc());
+                (from < due || from <= start) && (to > start || to >= due)
+            }
+            (Some(start), None) => {
+                let start = start.to_utc();
+                from <= start && to > start
+            }
+            (None, Some(due)) => {
+                let due = due.to_utc();
+                from < due && to >= due
+            }
+            (None, None) => true,
+        }
+    }
+
     /// Serialize to a single-component `VCALENDAR` document (R27), CRLF
     /// throughout (R28). `DTSTAMP` is stamped by the crate at write time and
     /// is never a field (R25); no `DTEND` and no `DURATION` are ever emitted

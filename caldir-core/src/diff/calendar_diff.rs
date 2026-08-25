@@ -111,10 +111,15 @@ impl CalendarDiff {
                 continue;
             }
 
-            // Out-of-window events aren't in the remote response, so we
+            // Out-of-window items aren't in the remote response, so we
             // can't tell if they're deleted or just out of range. Skip.
+            //
+            // Component-aware (R44): events keep `has_occurrence_in_range`
+            // untouched, tasks get RFC 4791 §9.9's "core's rule". Polarity
+            // (R47): `false` here means `continue` — neither the delete below
+            // nor the create — and `true` is what authorizes the delete.
             if let (Some(from), Some(to)) = (range.from, range.to)
-                && !event.has_occurrence_in_range(from, to)
+                && !local_event.item().has_occurrence_in_range(from, to)
             {
                 continue;
             }
@@ -267,7 +272,8 @@ mod tests {
     use crate::calendar::{CalendarError, CalendarListing};
     use crate::event::{EventInstanceId, EventTime};
     use crate::test_utils::{test_calendar, test_calendar_event, test_event, test_event_time};
-    use chrono::{TimeZone, Utc};
+    use crate::todo::Todo;
+    use chrono::{DateTime, TimeZone, Utc};
     use pretty_assertions::assert_eq;
 
     // C4 downgrade half (ADJUDICATION B-4): an OLDER caldir reading a
@@ -1082,5 +1088,283 @@ mod tests {
 
         assert_eq!(diff.outgoing, vec![EventChange::Delete(remote_deleted)]);
         assert_eq!(diff.incoming, vec![EventChange::Delete(local_deleted)]);
+    }
+
+    // ========================================================================
+    // The RFC 4791 §9.9 window rule for tasks (R44–R47, R97)
+    // ========================================================================
+
+    /// Start of the bounded window every case below is measured against.
+    fn window_from() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap()
+    }
+
+    /// End of that window.
+    fn window_to() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap()
+    }
+
+    /// An absolute UTC `EventTime` `offset` seconds from `anchor`. UTC, not
+    /// floating: the edges below assert exact equality with the bound, which
+    /// only means something if the value does not move with `TZ`.
+    fn offset_from(anchor: DateTime<Utc>, offset: i64) -> EventTime {
+        EventTime::DateTimeUtc(anchor + chrono::Duration::seconds(offset))
+    }
+
+    fn task(start: Option<EventTime>, due: Option<EventTime>) -> CalendarItem {
+        let mut todo = Todo::new("Window task");
+        todo.start = start;
+        todo.due = due;
+        CalendarItem::Todo(todo)
+    }
+
+    /// T-24 (R44, R45, R46, R106). The four §9.9 "core's rule" rows, each at
+    /// **both** edges of both bounds, plus the VEVENT control that must not
+    /// move. TZ-marked: must pass under `TZ=UTC`, `TZ=Europe/Stockholm` and
+    /// `TZ=America/New_York`.
+    #[test]
+    fn task_window_rule_covers_all_four_date_combinations_at_both_edges_and_events_are_unchanged() {
+        let (from, to) = (window_from(), window_to());
+
+        // (name, DTSTART, DUE, expected in-window)
+        let cases: Vec<(&str, Option<EventTime>, Option<EventTime>, bool)> = vec![
+            // Row N/Y — DUE only: `from < DUE AND to >= DUE`.
+            (
+                "DUE == from (from < DUE is strict)",
+                None,
+                Some(offset_from(from, 0)),
+                false,
+            ),
+            (
+                "DUE one second after from",
+                None,
+                Some(offset_from(from, 1)),
+                true,
+            ),
+            (
+                "DUE == to (to >= DUE is inclusive)",
+                None,
+                Some(offset_from(to, 0)),
+                true,
+            ),
+            (
+                "DUE one second after to",
+                None,
+                Some(offset_from(to, 1)),
+                false,
+            ),
+            // Row Y/N — DTSTART only: `from <= DTSTART AND to > DTSTART`.
+            (
+                "DTSTART one second before from",
+                Some(offset_from(from, -1)),
+                None,
+                false,
+            ),
+            (
+                "DTSTART == from (from <= DTSTART is inclusive)",
+                Some(offset_from(from, 0)),
+                None,
+                true,
+            ),
+            (
+                "DTSTART one second before to",
+                Some(offset_from(to, -1)),
+                None,
+                true,
+            ),
+            (
+                "DTSTART == to (to > DTSTART is strict)",
+                Some(offset_from(to, 0)),
+                None,
+                false,
+            ),
+            // Row Y/Y — both:
+            // `(from < DUE OR from <= DTSTART) AND (to > DTSTART OR to >= DUE)`.
+            (
+                "both entirely before the window",
+                Some(offset_from(from, -2)),
+                Some(offset_from(from, -1)),
+                false,
+            ),
+            (
+                "DUE == from with DTSTART before it",
+                Some(offset_from(from, -2)),
+                Some(offset_from(from, 0)),
+                false,
+            ),
+            (
+                "DUE one second after from with DTSTART before it",
+                Some(offset_from(from, -2)),
+                Some(offset_from(from, 1)),
+                true,
+            ),
+            (
+                "DTSTART == from and DUE == from",
+                Some(offset_from(from, 0)),
+                Some(offset_from(from, 0)),
+                true,
+            ),
+            (
+                "DTSTART == to and DUE == to",
+                Some(offset_from(to, 0)),
+                Some(offset_from(to, 0)),
+                true,
+            ),
+            (
+                "DTSTART == to with DUE past it",
+                Some(offset_from(to, 0)),
+                Some(offset_from(to, 5)),
+                false,
+            ),
+            (
+                "DTSTART one second before to with DUE past it",
+                Some(offset_from(to, -1)),
+                Some(offset_from(to, 5)),
+                true,
+            ),
+            (
+                "both entirely after the window",
+                Some(offset_from(to, 1)),
+                Some(offset_from(to, 2)),
+                false,
+            ),
+            // Row N/N — neither: TRUE, unconditionally.
+            ("no dates at all", None, None, true),
+        ];
+
+        for (name, start, due, expected) in cases {
+            assert_eq!(
+                task(start, due).has_occurrence_in_range(from, to),
+                expected,
+                "RFC 4791 §9.9 core's rule (spec §10 R44), case: {name}"
+            );
+        }
+
+        // R44 row 4 says TRUE *unconditionally*: the same undated task is in
+        // window for a range that shares no instant with the one above.
+        assert!(
+            task(None, None).has_occurrence_in_range(
+                Utc.with_ymd_and_hms(1990, 1, 1, 0, 0, 0).unwrap(),
+                Utc.with_ymd_and_hms(1990, 2, 1, 0, 0, 0).unwrap(),
+            ),
+            "R44 row N/N is unconditional, not 'happens to overlap'"
+        );
+
+        // AC 2 / R44: COMPLETED and CREATED are never consulted. Both of these
+        // would be OUT under a server implementing §9.9 in full — core is
+        // deliberately more permissive, never less.
+        let mut completed_only = Todo::new("Completed long ago");
+        completed_only.completed = Some(EventTime::DateTimeUtc(
+            Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap(),
+        ));
+        assert!(
+            CalendarItem::Todo(completed_only).has_occurrence_in_range(from, to),
+            "COMPLETED must not be consulted by core (R44)"
+        );
+
+        for created in [
+            Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap(),
+            // After `to`, so even §9.9's `end > CREATED` rescue row is false.
+            Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
+        ] {
+            let mut created_only = Todo::new("Created outside the window");
+            created_only.created = Some(created);
+            assert!(
+                CalendarItem::Todo(created_only).has_occurrence_in_range(from, to),
+                "CREATED must not be consulted by core (R44), CREATED={created}"
+            );
+        }
+
+        // R45 control: the event path is untouched in both directions. Out of
+        // window, a known-base event is skipped — no delete, no create.
+        let (_tmp_a, calendar_a) = test_calendar();
+        let (_tmp_b, calendar_b) = test_calendar();
+        let event = test_event();
+        let mut sync_bases = SyncBases::new();
+        sync_bases.insert_event_base(event.event_instance_id(), event.clone());
+
+        let out_of_window = CalendarDiff::compute(
+            vec![CalendarEvent::create(&calendar_a, event.clone()).unwrap()],
+            vec![],
+            &sync_bases,
+            &DateRange {
+                from: Some(from),
+                to: Some(to),
+            },
+        );
+
+        assert_eq!(out_of_window.outgoing, vec![]);
+        assert_eq!(out_of_window.incoming, vec![]);
+
+        // R45 control, second half: the event arm still goes through
+        // `has_occurrence_in_range`, RRULE expansion included. This master
+        // starts before the window and has no occurrence *of its own* inside
+        // it — only expanded ones — so swapping the arm to the unexpanded
+        // `occurs_in_range` would wrongly skip it and lose the delete.
+        let (_tmp_c, calendar_c) = test_calendar();
+        let mut recurring = Event::new(
+            "Ongoing weekly",
+            EventTime::Date(chrono::NaiveDate::from_ymd_opt(2025, 1, 1).unwrap()),
+        );
+        recurring.recurrence = Some(crate::event::Recurrence::new("FREQ=WEEKLY"));
+        let mut recurring_bases = SyncBases::new();
+        recurring_bases.insert_event_base(recurring.event_instance_id(), recurring.clone());
+
+        let expanded = CalendarDiff::compute(
+            vec![CalendarEvent::create(&calendar_c, recurring.clone()).unwrap()],
+            vec![],
+            &recurring_bases,
+            &DateRange {
+                from: Some(from),
+                to: Some(to),
+            },
+        );
+
+        assert_eq!(expanded.outgoing, vec![]);
+        assert_eq!(expanded.incoming, vec![EventChange::Delete(recurring)]);
+
+        // In window, that same event still produces the incoming delete —
+        // the polarity R47 warns about, pinned on the event side.
+        let in_window = CalendarDiff::compute(
+            vec![CalendarEvent::create(&calendar_b, event.clone()).unwrap()],
+            vec![],
+            &sync_bases,
+            &DateRange {
+                from: Some(Utc.with_ymd_and_hms(2025, 12, 1, 0, 0, 0).unwrap()),
+                to: Some(Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, 0).unwrap()),
+            },
+        );
+
+        assert_eq!(in_window.outgoing, vec![]);
+        assert_eq!(in_window.incoming, vec![EventChange::Delete(event)]);
+    }
+
+    /// T-25 (R97, A-3). The exact shape of the data-loss bug: a previously
+    /// synced undated task, and a remote response that does not mention it.
+    /// The file must stay. `has_occurrence_in_range` says TRUE for an undated
+    /// task (R44 row 4), so nothing here is protected by the window check —
+    /// this is the lock that says absence alone never removes a task.
+    #[test]
+    fn an_undated_task_with_a_known_base_and_an_empty_remote_is_not_deleted() {
+        let (_tmp, calendar) = test_calendar();
+        let todo = Todo::new("Undated, already synced");
+        let calendar_event = CalendarEvent::create(&calendar, todo.clone()).unwrap();
+
+        let mut sync_bases = SyncBases::new();
+        let id = CalendarItem::from(todo).instance_id();
+        sync_bases.insert_event_base(id, calendar_event.item().clone());
+
+        let diff = CalendarDiff::compute(
+            vec![calendar_event],
+            vec![],
+            &sync_bases,
+            &DateRange {
+                from: Some(window_from()),
+                to: Some(window_to()),
+            },
+        );
+
+        assert_eq!(diff.incoming, vec![], "R97: no incoming delete");
+        assert_eq!(diff.outgoing, vec![], "R97: no outgoing delete either");
     }
 }
