@@ -710,3 +710,40 @@ L4-01..L4-04 landed. 807 passed / 0 failed, all three zones.
 Cumulative L1-L4: 227 mutations, 211 caught, 12 locks found unable to
 fail and REPAIRED, 3 acceptance criteria REFUSED with verification (one
 because the criterion would have asserted a falsehood).
+
+## RULING — wiremock 0.6 IS AUTHORIZED as a caldav dev-dependency
+Deferred three times as "a maintainer decision point". Deciding it now,
+because it is blocking coverage of a DATA-LOSS path.
+
+Evidence: L5-01's mutation M7 - making `fetch_events` consume only the
+FIRST of the two REPORTs - passes the ENTIRE 812-test suite. That is
+silent task loss re-created one layer above where L5-01 just fixed it.
+M8 (create_event read-back) and M9 (a Handler adapter returning an empty
+Vec, = L4-02's M12) slip for the same reason: no HTTP double exists.
+A provider adapter that returns an empty listing is a MASS DELETE.
+
+RULING: add `wiremock = "0.6"` to `caldir-provider-caldav`'s
+[dev-dependencies]. It is dev-only, never ships in a binary, and is the
+standard choice for this in the Rust ecosystem.
+Constraints:
+- dev-dependencies ONLY, in the caldav crate. Do not add it to core or
+  to any other provider without a fresh ruling.
+- Prefer a pure function over a double where one suffices - L5-01 showed
+  `decode_resources` needed none.
+- The PR description MUST disclose the new dev-dependency, with M7 as the
+  justification, so a maintainer can judge it on the evidence.
+If upstream rejects it, the fallback is a pure response-classifier unit
+test plus live-tier coverage, and the M7 gap returns - say so.
+
+## MUST-FIX before ship — the two-REPORT merge (L5-01 M7)
+`fetch_events` issues two REPORTs and merges the resources. Nothing locks
+the merge. Assign to L5-02 (now that wiremock is authorized) or L5-05's
+live tier. This is the highest-value remaining coverage gap in the
+provider layer.
+
+## L8 DOC DEBT, added
+- tickets/L5-02.md:64, context/system-map.md:55,105 and
+  context/local-parser.md:66 all cite `parse_event` / hazard A10 as a
+  LIVE defect. A10 is FIXED and the symbol is now `parse_item`.
+- caldir-provider-caldav/CLAUDE.md says shared ops live in `src/ops.rs`;
+  the real path is `src/caldav/ops.rs` (pre-existing drift).
