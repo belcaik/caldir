@@ -596,3 +596,50 @@ joining that list, and this signature change.
 ## PINNED — the wire arity error text is now a byte-exact lock
 "expected 1 supported component(s) in ICS, found {n}"
 L8's docs must quote it; any rename must move the lock.
+
+## STRIKE from the 0.15.0 window — WireValue::from_wire stays infallible
+L4-02 made the Result-returning change UNNECESSARY, not merely deferred.
+The inbound direction gets its own newtype (`ItemIcs`) whose
+`Deserialize` carries the fallible decode, so `from_wire` only ever
+unwraps an already-validated value. The invariant is documented ON THE
+TRAIT: *`Wire` must decode straight into the domain value; every fallible
+step belongs in `Wire`'s `Deserialize`.*
+L8-05's breaking-window list drops from five items to four:
+#[non_exhaustive] on CalendarError / ComponentKind / CalendarItem, plus
+RemoteError::UnsupportedItem joining that list.
+
+## R70 STATUS — breached, bounded, accepted
+L4-02 touched 5 provider files (one adapter each in
+caldir-provider-{caldav,google,icloud,outlook,webcal}/src/main.rs).
+This is the MINIMUM possible: Handler::list_events is a trait method and
+the only inbound channel, so any return-type change forces every
+implementor. No provider LOGIC changed; every
+commands::list_events::handle still returns Vec<Event>.
+The 25 cmd.event sites R70 primarily protects remain UNTOUCHED.
+A zero-breach alternative (defaulted `list_items` delegating to
+`list_events`) was considered and REJECTED: two overlapping methods where
+overriding the wrong one silently drops data is a worse trap than five
+identical adapter lines. Concur.
+The PR description must state this honestly rather than claiming zero
+provider edits.
+
+## OPEN, PRE-EXISTING, now a ticket — provider Handler adapters are untested
+L4-02's M12 slipped: replacing a provider's `list_events` body with
+`Ok(Vec::new())` passes that crate's suite. NO provider crate has any
+test over its Handler impl's adapter layer, and the pre-change one-line
+body was equally untested. A dropped listing is a MASS DELETE.
+Fix: one `process_request` round-trip test per provider (5 tests).
+Assign to L5/L8 QA.
+
+## L8 DOC DEBT — stale inbound contract in the context docs
+provider-contract.md (lines 15, 65, 173), system-map.md:58 and
+provider-matrix.md:128 all describe `Vec<Event>` as the inbound response
+type. That is now `Vec<CalendarItem>`. L8's doc pass must correct them.
+
+## PROCESS — commit after every ticket, without exception
+L4-02 ran `git checkout` on a path during a mutation revert and WIPED
+L4-01's uncommitted module. It caught this via its own scratchpad backup
+and restored byte-for-byte (verified by diff -rq plus the full suite),
+but the near-miss was only possible because a completed ticket's work sat
+uncommitted while the next ticket ran. Commit immediately on every
+ticket completion.
