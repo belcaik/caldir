@@ -90,8 +90,48 @@ fn is_hashed_filename(filename: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{EventBases, hash_filename, is_hashed_filename};
+    use super::{EventBases, EventInstanceId, hash_filename, is_hashed_filename};
     use crate::test_utils::test_event;
+
+    // Backward compatibility: an event id hashes the SAME string it always did,
+    // so existing `bases/<sha256>.ics` files keep their names after
+    // ComponentKind lands. The expected digests are independent literals
+    // (`printf '<id>' | sha256sum`), not recomputed the way the code does it.
+    #[test]
+    fn event_base_filenames_are_unchanged_and_a_task_never_shares_one() {
+        use crate::event::{EventUid, RecurrenceId};
+        use chrono::NaiveDate;
+
+        let uid = EventUid::new("abc123@hooli.com".to_string());
+        let event = EventInstanceId::new(uid.clone(), None);
+        assert_eq!(event.to_string(), "abc123@hooli.com");
+        assert_eq!(
+            hash_filename(&event.to_string()),
+            "8518494aec55573e30ac20f14d44bda8ef783c0768d9f944822017c69d602a4d"
+        );
+
+        let recurring = EventInstanceId::new(
+            uid.clone(),
+            Some(RecurrenceId::from_event_time(crate::EventTime::Date(
+                NaiveDate::from_ymd_opt(2026, 1, 9).unwrap(),
+            ))),
+        );
+        assert_eq!(
+            hash_filename(&recurring.to_string()),
+            "6684dfc8c510581b06cc8630ef17ffaa063608e8974f67010c1471c74816ca81"
+        );
+
+        // Hazard 4: a task sharing the UID must not land on the event's file.
+        let task = EventInstanceId::todo(uid, None);
+        assert_eq!(
+            hash_filename(&task.to_string()),
+            "0b807d9f854656c80035519669e0e13b402a44c3a392c3f5d10faedd11d2eb6a"
+        );
+        assert_ne!(
+            hash_filename(&task.to_string()),
+            hash_filename(&event.to_string())
+        );
+    }
 
     #[test]
     fn filename_hash_is_fixed_length_and_filesystem_safe() {

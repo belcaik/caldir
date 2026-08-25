@@ -23,7 +23,7 @@ pub use availability::Availability;
 use chrono::{DateTime, Utc};
 use equality::{attachments_eq, x_properties_eq};
 pub use error::EventError;
-pub use instance_id::{EventInstanceId, EventUid, RecurrenceId};
+pub use instance_id::{ComponentKind, EventInstanceId, EventUid, RecurrenceId};
 pub use occurrences::expand_in_range;
 pub use organizer::Organizer;
 pub use recurrence::Recurrence;

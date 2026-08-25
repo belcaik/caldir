@@ -253,10 +253,37 @@ mod tests {
     use super::*;
     use crate::Event;
     use crate::calendar::{CalendarError, CalendarListing};
-    use crate::event::EventTime;
+    use crate::event::{EventInstanceId, EventTime};
     use crate::test_utils::{test_calendar, test_calendar_event, test_event, test_event_time};
     use chrono::{TimeZone, Utc};
     use pretty_assertions::assert_eq;
+
+    // C4 downgrade half (ADJUDICATION B-4): an OLDER caldir reading a
+    // "VTODO:"-prefixed known-id line makes an id no VEVENT can ever produce.
+    // It is therefore present on neither live side, and both delete passes
+    // iterate the LIVE sides only — so it is inert, not a delete trigger.
+    #[test]
+    fn an_id_known_only_in_the_bases_triggers_no_delete() {
+        let (_tmp, calendar_event) = test_calendar_event();
+        let event = calendar_event.event().clone();
+
+        let mut sync_bases = SyncBases::new();
+        // What an older caldir parses a task line into: one opaque UID.
+        sync_bases.insert_known_event_id(EventInstanceId::new(
+            crate::event::EventUid::new("VTODO:assignment-123@u-crawler".to_string()),
+            None,
+        ));
+
+        let diff = CalendarDiff::compute(
+            vec![calendar_event],
+            vec![RemoteEvent::new(event)],
+            &sync_bases,
+            &DateRange::default(),
+        );
+
+        assert_eq!(diff.outgoing, vec![]);
+        assert_eq!(diff.incoming, vec![]);
+    }
 
     #[test]
     fn new_local_event_becomes_outgoing_create() {
