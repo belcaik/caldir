@@ -518,3 +518,31 @@ orchestrator against wip-snapshot rather than accepted from a report.
 Cumulative L1+L2 mutation testing: 120 applied, 113 caught, 6 locks
 found unable to fail and REPAIRED rather than banked, 1 residual
 reported honestly as probabilistic.
+
+## RULING — T-26 moves from L3-02 to L3-03
+L3-02 correctly REFUSED to implement T-26 and reported why rather than
+writing a test weaker than its name. `EventChange` is still
+Create(Event)/Update{from,to:Event}/Delete(Event), so a Todo cannot be
+placed in one - the test cannot compile, let alone pass. Retyping
+EventChange is L3-03's declared scope, and forcing it into L3-02 would
+have dragged in L6-01 (the RPC push abort, since the RPC field must stay
+Event) and L7-07 (a task diff currently renders "nothing changed").
+RULING: T-26 is REASSIGNED to L3-03, alongside T-27, as part of the
+EventChange retype. L3-03's brief must carry it.
+R98/A-4's predicate half is already locked by T-24's N/N => TRUE case
+plus its disjoint-1990-range assertion; mutation M11 proves it fails
+under epoch synthesis.
+
+## NOTE for L3-03's reviewer — T-25 cannot fail YET
+T-25 is written, named and green, but it passes because tasks `continue`
+at the pass-1 narrowing before any branch, so no mutation at the L3-02
+layer can make it emit a delete. It becomes a REAL lock the moment
+L3-03 lets tasks into the diff. L3-03's reviewer MUST re-run a mutation
+against it then.
+
+## NEW FAILURE SURFACE introduced by R58 - needs a decision
+fetch_events now issues a SECOND REPORT per sync against every
+CalDAV/iCloud calendar, and a failure on it propagates. Radicale accepts
+a bare VTODO query (probe Q-B), but a server that REJECTS VTODO queries
+would turn a previously-working VEVENT sync into an error.
+Decide fail-loud vs tolerate, alongside L5-01/L5-05.
