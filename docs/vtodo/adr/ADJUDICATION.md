@@ -923,3 +923,32 @@ MAJOR-2 is answered.
 consumer outside caldir-core can build one - which is what leaves
 L7-07's M14/M15 uncatchable and blocks EVERY future CLI-level lock over
 a whole diff, not just this one.
+
+## CORRECTION — C12's "byte-identical" is arithmetically impossible; the
+## honest guarantee is the DEL predicate
+L7-03 caught this rather than claiming the impossible. Adding five keys
+to every entry necessarily changes every line's bytes. What IS true, and
+is now proven against bytes captured from the pre-change tree in all
+three zones (1653 bytes each):
+  select(.kind == "event") | del(.kind,.due,.completed,.percent_complete,.task_status)
+  => byte-for-byte identical to the old stream, 26 keys, same order.
+The five additive keys are APPENDED at the end, so the pre-existing key
+ORDER is preserved.
+spec §15's C12 row and L8-02's docs MUST state this predicate rather
+than the word "byte-identical", which cannot be satisfied.
+
+## FLAGGED — `completed`'s encoding diverges from ADR-10 D6's wording
+ADR-10 D6 tabulates `completed` as "RFC3339 UTC". `Todo::completed` is an
+`EventTime` because a FLOATING COMPLETED is legal (R22), so L7-03 encodes
+it through the same `serialize_time` rule as every other timestamp: a UTC
+value serializes exactly as the ADR says; a floating one renders in the
+local zone rather than being coerced, because coercing would INVENT an
+offset. Correct call. L8-02's docs must state the actual rule.
+
+## OPEN — two properties have no --json surface
+`priority` and `created` are destructured as `_` in the task arm.
+ADR-10 D6 says PRIORITY "rides whatever surface ADR-04's property set
+gives it, or gains a key under the same rule" - it currently has none.
+`created` is unmodelled on Event, so a key would be non-uniform.
+Both were explicit ticket non-goals. Decide before ship; they are owed,
+not silently dropped.
