@@ -348,3 +348,38 @@ item-aware.
 The pre-L1-07 tree measured 720/5, not the 699 the earlier note stops at.
 Counts move as concurrent agents land tests. IMPLEMENTERS: measure the
 tree yourself and track DELTAS, never absolutes from a ticket AC.
+
+## RULING — mark the growable public enums #[non_exhaustive] IN THIS RELEASE
+Raised twice: by L0-05 (`CalendarError`) and by L1-06 (`ComponentKind`).
+Both are now PUBLIC, neither is `#[non_exhaustive]`, and both are KNOWN
+to be growable:
+- `CalendarError` gained `IncompleteListing` in L0-05, which is already
+  breaking for a downstream matching exhaustively without a wildcard.
+- `ComponentKind` gains `VJournal` under R93.
+Adding a variant to a non-exhaustive-less public enum is a breaking
+change EVERY TIME. Adding the attribute is itself breaking - so it must
+ride the breaking release we are ALREADY taking (0.14.1 -> 0.15.0),
+or we pay the same cost again later for no benefit.
+
+RULING: mark BOTH `#[non_exhaustive]` in this release cycle.
+- `CalendarError` -> on the PR-1 branch (it ships first).
+- `ComponentKind` -> on vtodo-support.
+Assigned to ticket L8-05 (release prep) if not done sooner; it must not
+be dropped, because after 0.15.0 ships the window closes.
+
+## CORRECTION — L1-06's parse-order note was WRONG (strike it)
+L1-06's "Notes for the implementer" claimed parse order matters because
+stripping the sigil after the rid split would mangle a UID containing
+`__`. FALSE: `rsplit_once` takes the LAST `__` and the sigil is a prefix
+containing none, so both orders yield identical (kind, uid, rid) for
+every input, including the empty-UID and `VTODO:__20260109` edges.
+It would matter only for `split_once`. Strike the claim from the ticket
+and from any downstream brief repeating it. The implemented order is
+sigil-first anyway, for clarity and future-proofing.
+
+## L1 COMPLETE
+L1-01..L1-08 all landed. 731 passed / 5 failed, all three zones.
+Cumulative mutation testing across L1: 55 applied, 54 caught, 1
+equivalent. TWO locks were found unable to fail and were REPAIRED
+rather than banked (L1-08's M7 superset hole in x_properties_eq;
+L1-06's M8 non-colliding task fixture).
