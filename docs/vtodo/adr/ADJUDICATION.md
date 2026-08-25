@@ -952,3 +952,23 @@ gives it, or gains a key under the same rule" - it currently has none.
 `created` is unmodelled on Event, so a key would be non-uniform.
 Both were explicit ticket non-goals. Decide before ship; they are owed,
 not silently dropped.
+
+## CORRECTION (mine) — the accessor is `event()`, not `as_event()`
+I have written `as_event()` in several briefs. WRONG since L2-06, which
+deleted the temporary infallible `event()` and gave its NAME to the
+narrowing accessor. The code is:
+    CalendarEvent::event() -> Option<&Event>
+`as_event()` survives only as `#[cfg(test)] pub(crate)` on CalendarItem
+in core. L7-04's body and ADR-10 D7 also say `ce.event()` - they were
+right and my briefs were stale. L8's doc pass should pick one name and
+use it everywhere.
+
+## CONSOLIDATE — three separate notes are one ticket
+The "no test seam" gaps recorded against output/diff.rs, output/agenda.rs
+and commands/rsvp.rs all have ONE root cause: `Caldir::new` is
+`#[cfg(test)] pub(crate)` in caldir-core, so no downstream crate can
+construct one. Same shape as the already-recorded `CalendarDiff`
+constructor gap.
+Fold all four into ONE 0.15.0-window ticket: "test constructors for
+downstream crates" (Caldir + CalendarDiff). This unblocks every future
+CLI-level lock, not just the ones found so far.
