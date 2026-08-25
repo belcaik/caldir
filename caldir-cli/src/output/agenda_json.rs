@@ -2,30 +2,19 @@
 
 use caldir_core::{
     Attachment, Attendee, Availability, CalendarItem, Event, EventTime, Organizer,
-    ParticipationStatus, Recurrence, Reminder, Status, Visibility, XProperty,
+    ParticipationStatus, Recurrence, Reminder, Status, Todo, TodoStatus, Visibility, XProperty,
 };
 use chrono::SecondsFormat;
 use serde::{Serialize, Serializer};
 
-use crate::output::agenda::{AgendaEntry, AgendaView};
+use crate::output::agenda::{AgendaEntry, AgendaView, anchor};
 
 impl Serialize for AgendaView {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        // TODO(L7-03): the `--json` stream stays event-only until the schema
-        // widens for tasks (ADR-10 D6 — `kind`, `due`, nullable `start`).
-        // Filtering here rather than fabricating an event shape for a task
-        // keeps every document a consumer can receive byte-identical to
-        // before. Display-only: nothing infers a deletion from this list.
-        let events: Vec<&AgendaEntry> = self
-            .entries
-            .iter()
-            .filter(|entry| matches!(entry.item, CalendarItem::Event(_)))
-            .collect();
-
-        events.serialize(serializer)
+        self.entries.serialize(serializer)
     }
 }
 
@@ -34,12 +23,7 @@ impl Serialize for AgendaEntry {
     where
         S: Serializer,
     {
-        match &self.item {
-            CalendarItem::Event(event) => AgendaJson::new(self, event).serialize(serializer),
-            // Unreachable through `AgendaView`, which filters tasks out above.
-            // TODO(L7-03): give a task its own shape rather than `null`.
-            CalendarItem::Todo(_) => serializer.serialize_none(),
-        }
+        AgendaJson::new(self).serialize(serializer)
     }
 }
 
@@ -53,34 +37,84 @@ struct AgendaJson<'a> {
     rsvp: Option<ParticipationStatus>,
     recurring: bool,
     #[serde(flatten)]
-    event: EventJson<'a>,
+    item: ItemJson<'a>,
 }
 
 impl<'a> AgendaJson<'a> {
-    fn new(entry: &'a AgendaEntry, event: &'a Event) -> Self {
+    fn new(entry: &'a AgendaEntry) -> Self {
+        let anchor = anchor(&entry.item);
+
         Self {
-            instance_id: event.event_instance_id().to_string(),
+            instance_id: entry.item.instance_id().to_string(),
             calendar: &entry.calendar,
-            title: &event.summary,
-            all_day: event.start.is_date(),
-            tzid: event_tzid(&event.start),
+            title: title(&entry.item),
+            // An undated task belongs to no day, so it is not all-day either.
+            all_day: anchor.is_some_and(EventTime::is_date),
+            tzid: anchor.and_then(event_tzid),
             rsvp: entry.rsvp,
-            recurring: event.recurrence_id.is_some(),
-            event: EventJson::from(event),
+            recurring: recurring(&entry.item),
+            item: ItemJson::from(&entry.item),
         }
     }
 }
 
+/// Whether this item is one instance of a recurrence, from whichever kind
+/// backs it.
+fn recurring(item: &CalendarItem) -> bool {
+    match item {
+        CalendarItem::Event(event) => event.recurrence_id.is_some(),
+        CalendarItem::Todo(todo) => todo.recurrence_id.is_some(),
+    }
+}
+
+/// The item's `SUMMARY`, borrowed. `CalendarItem::summary` hands back an
+/// `Option<&str>`, and the `title` key has always serialized the field itself.
+fn title(item: &CalendarItem) -> &Option<String> {
+    match item {
+        CalendarItem::Event(event) => &event.summary,
+        CalendarItem::Todo(todo) => &todo.summary,
+    }
+}
+
+/// The `kind` discriminator (ADR-10 D6). Additive: it is the one key a
+/// consumer needs to migrate, via `select(.kind == "event")`.
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+enum ItemKind {
+    Event,
+    Todo,
+}
+
+/// The flattened half of the agenda object — every key that is not the
+/// entry-level wrapper.
+///
+/// One struct for both kinds, so the object shape stays **uniform** (C12): every
+/// key is present on every entry, `null` where the kind has nothing to put
+/// there. No `skip_serializing_if` here, ever.
+///
+/// Field order is the wire order under `#[serde(flatten)]`, so the five
+/// additive keys sit at the end and an event entry's pre-existing keys keep
+/// their bytes and their positions.
 #[derive(Serialize)]
-struct EventJson<'a> {
+struct ItemJson<'a> {
     uid: &'a str,
     summary: &'a Option<String>,
     description: &'a Option<String>,
     location: &'a Option<String>,
-    start: String,
+    /// `DTSTART`. Widened to `T | null` for a task, which may legitimately have
+    /// none — synthesizing one from `DUE` is the forbidden fake event. `null`
+    /// can only ever appear here under `kind: "todo"`.
+    start: Option<String>,
+    /// Always `null` on a task: RFC 5545 forbids `DTEND` in a VTODO, and `Todo`
+    /// has no field to carry one.
     end: Option<String>,
+    /// **Not retyped.** The non-optional event `Status`, meaning "is this item
+    /// live" — the sense `is_visible` uses. `TodoStatus` maps on rather than
+    /// widening the value set, which would break every consumer matching on it
+    /// exhaustively; the task's real state lives in `task_status`.
     status: Status,
-    availability: Availability,
+    /// Widened to `T | null`: `TRANSP` is an event property, so a task has none.
+    availability: Option<Availability>,
     visibility: Option<Visibility>,
     recurrence: Option<RecurrenceJson<'a>>,
     recurrence_id: Option<String>,
@@ -92,10 +126,29 @@ struct EventJson<'a> {
     x_properties: Vec<XPropertyJson<'a>>,
     last_modified: Option<String>,
     sequence: i32,
+    kind: ItemKind,
+    /// `DUE`, same encoding as `start`. `null` on an event.
+    due: Option<String>,
+    /// `COMPLETED`. `null` on an event.
+    completed: Option<String>,
+    /// `PERCENT-COMPLETE`, 0–100. `null` on an event.
+    percent_complete: Option<u8>,
+    /// The task's own `STATUS`, which is where the truth lives once `status`
+    /// has been mapped onto the event value set. `null` on an event.
+    task_status: Option<TodoStatus>,
 }
 
-impl<'a> From<&'a Event> for EventJson<'a> {
-    fn from(event: &'a Event) -> Self {
+impl<'a> From<&'a CalendarItem> for ItemJson<'a> {
+    fn from(item: &'a CalendarItem) -> Self {
+        match item {
+            CalendarItem::Event(event) => Self::from_event(event),
+            CalendarItem::Todo(todo) => Self::from_todo(todo),
+        }
+    }
+}
+
+impl<'a> ItemJson<'a> {
+    fn from_event(event: &'a Event) -> Self {
         let Event {
             uid,
             summary,
@@ -123,10 +176,10 @@ impl<'a> From<&'a Event> for EventJson<'a> {
             summary,
             description,
             location,
-            start: serialize_time(start),
+            start: Some(serialize_time(start)),
             end: end.as_ref().map(serialize_time),
             status: *status,
-            availability: *availability,
+            availability: Some(*availability),
             visibility: *visibility,
             recurrence: recurrence.as_ref().map(RecurrenceJson::from),
             recurrence_id: recurrence_id
@@ -141,7 +194,86 @@ impl<'a> From<&'a Event> for EventJson<'a> {
             last_modified: last_modified
                 .map(|timestamp| timestamp.to_rfc3339_opts(SecondsFormat::AutoSi, true)),
             sequence: *sequence,
+            kind: ItemKind::Event,
+            due: None,
+            completed: None,
+            percent_complete: None,
+            task_status: None,
         }
+    }
+
+    /// The task arm, destructured exhaustively like the event arm above, so a
+    /// field added to `Todo` is a compile error here rather than a silent
+    /// omission from the public schema.
+    fn from_todo(todo: &'a Todo) -> Self {
+        let Todo {
+            uid,
+            summary,
+            description,
+            location,
+            start,
+            due,
+            status,
+            completed,
+            percent_complete,
+            // No key of its own yet: PRIORITY is not part of the schema ADR-10
+            // D6 tabulates. Adding one obeys the same additive rule.
+            priority: _,
+            url,
+            recurrence,
+            recurrence_id,
+            organizer,
+            attendees,
+            reminders,
+            attachments,
+            x_properties,
+            // `CREATED` has no key on either kind; `Event` does not model it.
+            created: _,
+            last_modified,
+            sequence,
+        } = todo;
+
+        Self {
+            uid: uid.as_str(),
+            summary,
+            description,
+            location,
+            start: start.as_ref().map(serialize_time),
+            end: None,
+            status: event_status_of(*status),
+            availability: None,
+            visibility: None,
+            recurrence: recurrence.as_ref().map(RecurrenceJson::from),
+            recurrence_id: recurrence_id
+                .as_ref()
+                .map(|id| serialize_time(id.as_event_time())),
+            organizer: organizer.as_ref().map(OrganizerJson::from),
+            attendees: attendees.iter().map(AttendeeJson::from).collect(),
+            reminders: reminders.iter().map(ReminderJson::from).collect(),
+            url,
+            attachments: attachments.iter().map(AttachmentJson::from).collect(),
+            x_properties: x_properties.iter().map(XPropertyJson::from).collect(),
+            last_modified: last_modified
+                .map(|timestamp| timestamp.to_rfc3339_opts(SecondsFormat::AutoSi, true)),
+            sequence: *sequence,
+            kind: ItemKind::Todo,
+            due: due.as_ref().map(serialize_time),
+            completed: completed.as_ref().map(serialize_time),
+            percent_complete: *percent_complete,
+            task_status: Some(*status),
+        }
+    }
+}
+
+/// `TodoStatus` projected onto the `status` key's existing value set (ADR-10
+/// D6). Only `CANCELLED` is not live; the other three are ordinary items that a
+/// consumer filtering on `status` must keep seeing.
+fn event_status_of(status: TodoStatus) -> Status {
+    match status {
+        TodoStatus::NeedsAction | TodoStatus::InProcess | TodoStatus::Completed => {
+            Status::Confirmed
+        }
+        TodoStatus::Cancelled => Status::Cancelled,
     }
 }
 
@@ -283,7 +415,7 @@ fn event_tzid(time: &EventTime) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::output::{Output, TextRender};
-    use caldir_core::{EventUid, RecurrenceId, TimeFormat};
+    use caldir_core::{EventUid, RecurrenceId, TimeFormat, TodoStatus};
     use chrono::{NaiveDate, NaiveDateTime, TimeZone, Utc};
     use pretty_assertions::assert_eq;
     use serde_json::json;
@@ -304,7 +436,7 @@ mod tests {
         }
     }
 
-    fn todo_entry(todo: caldir_core::Todo) -> AgendaEntry {
+    fn todo_entry(todo: Todo) -> AgendaEntry {
         AgendaEntry {
             calendar: Some("personal".to_string()),
             rsvp: None,
@@ -476,6 +608,11 @@ mod tests {
                 "sequence": 7,
                 "rsvp": "accepted",
                 "recurring": true,
+                "kind": "event",
+                "due": null,
+                "completed": null,
+                "percent_complete": null,
+                "task_status": null,
             })
         );
     }
@@ -546,6 +683,11 @@ END:VCALENDAR\r\n";
                 "sequence": 0,
                 "rsvp": null,
                 "recurring": false,
+                "kind": "event",
+                "due": null,
+                "completed": null,
+                "percent_complete": null,
+                "task_status": null,
             })
         );
     }
@@ -641,24 +783,279 @@ END:VCALENDAR\r\n";
         assert_eq!(json["tzid"], serde_json::Value::Null);
     }
 
-    /// C13 at the `--json` seam: tasks reach `AgendaView::entries` since
-    /// L7-01, but the public schema does not widen until L7-03 (ADR-10 D6).
-    /// Until it does, the stream a consumer receives is exactly the one it
-    /// received before tasks existed — no fabricated `start`, no new shape.
-    /// TODO(L7-03): replace this with the two-fixture schema assertion.
+    /// C12 as amended by ADR-10 D6: the public `--json` object shape is
+    /// **uniform across kinds**. Both fixtures live in one test because the
+    /// load-bearing property is that the objects share a key set — asserting
+    /// them apart lets a uniform-shape regression through.
+    ///
+    /// Replaces the interim event-only lock: the stream carries tasks now.
+    /// `start` and `availability` are the only two keys that widened, `null`
+    /// appears on them only under `kind: "todo"`, and `status` keeps its
+    /// existing value set with the task's own state in `task_status`.
     #[test]
-    fn the_json_stream_stays_event_only_until_the_schema_widens() {
+    fn schema_keys_are_stable_over_an_event_and_a_task_fixture() {
+        let mut event = Event::new("Standup", EventTime::Date(date(2026, 8, 14)));
+        event.uid = EventUid::new("standup@caldir");
+
+        let mut due_only = Todo::new("Ship crawler patch");
+        due_only.uid = EventUid::new("assignment-123@u-crawler");
+        due_only.due = Some(EventTime::Date(date(2026, 8, 15)));
+        due_only.status = TodoStatus::Completed;
+        due_only.completed = Some(EventTime::DateTimeUtc(
+            Utc.with_ymd_and_hms(2026, 8, 15, 9, 30, 0).unwrap(),
+        ));
+        due_only.percent_complete = Some(100);
+
+        let mut undated = Todo::new("Someday");
+        undated.uid = EventUid::new("someday@u-crawler");
+
+        let json = view(vec![
+            entry(event),
+            todo_entry(due_only),
+            todo_entry(undated),
+        ])
+        .to_json();
+
+        assert_eq!(
+            json[0],
+            json!({
+                "instance_id": "standup@caldir",
+                "calendar": "personal",
+                "title": "Standup",
+                "all_day": true,
+                "tzid": null,
+                "rsvp": null,
+                "recurring": false,
+                "uid": "standup@caldir",
+                "summary": "Standup",
+                "description": null,
+                "location": null,
+                "start": "2026-08-14",
+                "end": null,
+                "status": "confirmed",
+                "availability": "busy",
+                "visibility": null,
+                "recurrence": null,
+                "recurrence_id": null,
+                "organizer": null,
+                "attendees": [],
+                "reminders": [],
+                "url": null,
+                "attachments": [],
+                "x_properties": [],
+                "last_modified": null,
+                "sequence": 0,
+                "kind": "event",
+                "due": null,
+                "completed": null,
+                "percent_complete": null,
+                "task_status": null,
+            }),
+            "event entry"
+        );
+
+        assert_eq!(
+            json[1],
+            json!({
+                "instance_id": "VTODO:assignment-123@u-crawler",
+                "calendar": "personal",
+                "title": "Ship crawler patch",
+                "all_day": true,
+                "tzid": null,
+                "rsvp": null,
+                "recurring": false,
+                "uid": "assignment-123@u-crawler",
+                "summary": "Ship crawler patch",
+                "description": null,
+                "location": null,
+                "start": null,
+                "end": null,
+                "status": "confirmed",
+                "availability": null,
+                "visibility": null,
+                "recurrence": null,
+                "recurrence_id": null,
+                "organizer": null,
+                "attendees": [],
+                "reminders": [],
+                "url": null,
+                "attachments": [],
+                "x_properties": [],
+                "last_modified": null,
+                "sequence": 0,
+                "kind": "todo",
+                "due": "2026-08-15",
+                "completed": "2026-08-15T09:30:00Z",
+                "percent_complete": 100,
+                "task_status": "completed",
+            }),
+            "DUE-only task entry"
+        );
+
+        assert_eq!(
+            json[2],
+            json!({
+                "instance_id": "VTODO:someday@u-crawler",
+                "calendar": "personal",
+                "title": "Someday",
+                "all_day": false,
+                "tzid": null,
+                "rsvp": null,
+                "recurring": false,
+                "uid": "someday@u-crawler",
+                "summary": "Someday",
+                "description": null,
+                "location": null,
+                "start": null,
+                "end": null,
+                "status": "confirmed",
+                "availability": null,
+                "visibility": null,
+                "recurrence": null,
+                "recurrence_id": null,
+                "organizer": null,
+                "attendees": [],
+                "reminders": [],
+                "url": null,
+                "attachments": [],
+                "x_properties": [],
+                "last_modified": null,
+                "sequence": 0,
+                "kind": "todo",
+                "due": null,
+                "completed": null,
+                "percent_complete": null,
+                "task_status": "needs_action",
+            }),
+            "undated task entry"
+        );
+
+        let keys = |value: &serde_json::Value| -> Vec<String> {
+            value.as_object().unwrap().keys().cloned().collect()
+        };
+        assert_eq!(keys(&json[0]), keys(&json[1]), "event vs DUE-only task");
+        assert_eq!(keys(&json[0]), keys(&json[2]), "event vs undated task");
+    }
+
+    /// The task arm of the shared shape, populated everywhere a task can be
+    /// populated — the mirror of `serializes_fully_populated_event`, so a field
+    /// silently dropped from the task arm alone is caught.
+    #[test]
+    fn serializes_fully_populated_task() {
+        let due = EventTime::DateTimeZoned {
+            datetime: datetime(2026, 8, 15, 23, 59),
+            tzid: "Europe/Stockholm".to_string(),
+        };
         let mut todo = caldir_core::Todo::new("Ship crawler patch");
-        todo.due = Some(EventTime::Date(date(2026, 8, 15)));
-        let view = view(vec![
-            entry(Event::new("Standup", EventTime::Date(date(2026, 8, 14)))),
-            todo_entry(todo),
-        ]);
+        todo.uid = EventUid::new("assignment-123@u-crawler");
+        todo.description = Some("Land the VTODO branch".to_string());
+        todo.location = Some("Desk".to_string());
+        todo.start = Some(EventTime::DateTimeZoned {
+            datetime: datetime(2026, 8, 15, 9, 0),
+            tzid: "Europe/Stockholm".to_string(),
+        });
+        todo.due = Some(due.clone());
+        todo.status = TodoStatus::InProcess;
+        todo.completed = Some(EventTime::DateTimeUtc(
+            Utc.with_ymd_and_hms(2026, 8, 15, 20, 0, 0).unwrap(),
+        ));
+        todo.percent_complete = Some(60);
+        todo.priority = Some(1);
+        todo.url = Some("https://example.com/task".to_string());
+        todo.recurrence = Some(Recurrence {
+            rrule: "FREQ=WEEKLY".to_string(),
+            exdates: vec![EventTime::Date(date(2026, 8, 22))],
+            rdates: vec![],
+        });
+        todo.recurrence_id = Some(RecurrenceId::from_event_time(due));
+        todo.organizer = Some(Organizer {
+            email: "lead@example.com".to_string(),
+            name: None,
+        });
+        todo.attendees = vec![Attendee::new("helper@example.com")];
+        todo.reminders = vec![Reminder::from_minutes(15)];
+        todo.attachments = vec![Attachment::new("https://example.com/spec.pdf")];
+        todo.x_properties = vec![XProperty::new("X-APPLE-SORT-ORDER", "12")];
+        todo.created = Some(Utc.with_ymd_and_hms(2026, 8, 1, 8, 0, 0).unwrap());
+        todo.last_modified = Some(Utc.with_ymd_and_hms(2026, 8, 14, 7, 8, 9).unwrap());
+        todo.sequence = 3;
 
-        let json = view.to_json();
+        assert_eq!(
+            serde_json::to_value(todo_entry(todo)).unwrap(),
+            json!({
+                "instance_id": "VTODO:assignment-123@u-crawler__TZID=Europe/Stockholm:20260815T235900",
+                "calendar": "personal",
+                "title": "Ship crawler patch",
+                "all_day": false,
+                "tzid": "Europe/Stockholm",
+                "rsvp": null,
+                "recurring": true,
+                "uid": "assignment-123@u-crawler",
+                "summary": "Ship crawler patch",
+                "description": "Land the VTODO branch",
+                "location": "Desk",
+                "start": "2026-08-15T09:00:00+02:00",
+                "end": null,
+                "status": "confirmed",
+                "availability": null,
+                "visibility": null,
+                "recurrence": {
+                    "rrule": "FREQ=WEEKLY",
+                    "exdates": ["2026-08-22"],
+                    "rdates": [],
+                },
+                "recurrence_id": "2026-08-15T23:59:00+02:00",
+                "organizer": { "email": "lead@example.com", "name": null },
+                "attendees": [
+                    { "email": "helper@example.com", "name": null, "status": null },
+                ],
+                "reminders": [{ "minutes_before_start": 15 }],
+                "url": "https://example.com/task",
+                "attachments": [
+                    { "uri": "https://example.com/spec.pdf", "params": [] },
+                ],
+                "x_properties": [
+                    { "name": "X-APPLE-SORT-ORDER", "value": "12", "params": [] },
+                ],
+                "last_modified": "2026-08-14T07:08:09Z",
+                "sequence": 3,
+                "kind": "todo",
+                "due": "2026-08-15T23:59:00+02:00",
+                "completed": "2026-08-15T20:00:00Z",
+                "percent_complete": 60,
+                "task_status": "in_process",
+            })
+        );
+    }
 
-        assert_eq!(json.as_array().unwrap().len(), 1);
-        assert_eq!(json[0]["title"], "Standup");
+    /// `status` is NOT retyped (C12): every task lands on a value from the
+    /// existing `Status` set, and only CANCELLED is not live. The truth stays
+    /// in `task_status`.
+    #[test]
+    fn task_status_maps_onto_the_existing_status_value_set() {
+        let mapped = |status: TodoStatus| {
+            let mut todo = caldir_core::Todo::new("Task");
+            todo.status = status;
+            let json = serde_json::to_value(todo_entry(todo)).unwrap();
+            (json["status"].clone(), json["task_status"].clone())
+        };
+
+        assert_eq!(
+            mapped(TodoStatus::NeedsAction),
+            (json!("confirmed"), json!("needs_action"))
+        );
+        assert_eq!(
+            mapped(TodoStatus::InProcess),
+            (json!("confirmed"), json!("in_process"))
+        );
+        assert_eq!(
+            mapped(TodoStatus::Completed),
+            (json!("confirmed"), json!("completed"))
+        );
+        assert_eq!(
+            mapped(TodoStatus::Cancelled),
+            (json!("cancelled"), json!("cancelled"))
+        );
     }
 
     #[test]

@@ -351,9 +351,10 @@ mod tests {
     /// placed in a day group, never given an invented date — and **counted in
     /// one dimmed footer** so it is never a silent drop.
     ///
-    /// The `--json` half of the ticket's T-47 is refused here: the stream is
-    /// still event-only until L7-03 widens the schema, and that is locked by
-    /// `agenda_json::tests::the_json_stream_stays_event_only_until_the_schema_widens`.
+    /// The `--json` half of the ticket's T-47 lives in
+    /// `agenda_json::tests::schema_keys_are_stable_over_an_event_and_a_task_fixture`:
+    /// the stream carries the undated task since L7-03, with `start` and `due`
+    /// both `null`. `--undated` is a text concern and does not gate JSON.
     #[test]
     fn an_undated_task_is_absent_from_the_body_and_counted_in_the_footer() {
         let today = chrono::Local::now().date_naive();
