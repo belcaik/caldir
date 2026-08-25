@@ -857,3 +857,40 @@ AC 6 path was unreachable.
 839 passed / 0 failed, all three zones, plus 6 live Radicale gates.
 Cumulative L1-L6: 300 mutations, 278 caught, 16 locks found unable to
 fail and REPAIRED, 6 acceptance criteria REFUSED with verification.
+
+## CORRECTION (mine) — the two arity literals are DISTINCT, not one lock
+I recorded these as if they were the same byte-exact lock. They are two
+different errors on two different paths:
+  `expected 1 event(s) in ICS, found 0`
+      = EventError::UnexpectedEventCount
+      = the OUTBOUND task-push abort (asserted connection.rs:764)
+  `expected 1 supported component(s) in ICS, found {n}`
+      = EventError::UnexpectedComponentCount
+      = the INBOUND / local decode path (item.rs, rpc/ics.rs)
+Both are real locks. L8-01 documented them as two literals rather than
+conflating them. Any future brief must name WHICH.
+
+## CORRECTION (mine) — RELATED-TO is DROPPED, not "preserved verbatim"
+I instructed L8-01 to write that a single RELATED-TO value "is preserved
+verbatim". FALSE, and it correctly refused. `Todo` has no `related_to`
+field, `to_icalendar.rs` never emits one, and R15_DROPPED_PROPERTIES
+includes RELATED-TO with T-17 asserting the drop.
+The phrasing came from ADR-05's justification, which C-2 VOIDED when it
+widened the property set. I propagated it without re-tracing it to code.
+STILL OPEN: `docs/vtodo/spec.md` §6's RELATED-TO row says "A single value
+survives unmodelled", which contradicts R15, T-17 and the shipped codec.
+It must be corrected or explicitly scoped to "survives ON THE SERVER
+until caldir's first write". Assign to L8-02/L8-04.
+
+## CORRECTION (mine) — the reproduction.md staleness claim was itself stale
+I recorded that reproduction.md cites T-48/T-58. It does not - it covers
+only the five immutable RED tests, and grep finds no T-48/T-58/T-49
+reference. Only spec §18 and the ticket bodies needed fixing, and L8-01
+fixed those.
+
+## STILL OPEN after L8-01 (correctly out of its scope)
+- context/testing.md additions: `reply_raw_data`, `ops/test_dav.rs`, the
+  raw-ICS rule, MockTransport's FIFO/last-request traps, and Radicale
+  percent-encoding `@` in hrefs. Real debt; belongs to another L8 ticket.
+- Website task documentation (L8-02) and supported-calendar-component-set
+  (L8-06) - explicit non-goals of L8-01.
