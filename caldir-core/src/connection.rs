@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use crate::calendar::{CalendarError, SyncBases};
 use crate::diff::EventChange;
-use crate::event::EventInstanceId;
+use crate::event::{ComponentKind, EventInstanceId, EventUid};
 use crate::item::CalendarItem;
 use crate::{Calendar, CalendarDiff, CalendarEvent, DateRange, Remote, RemoteEvent};
 use error::ConnectionError;
@@ -230,12 +230,45 @@ fn pull_incoming_changes(
     Ok(())
 }
 
+/// The UID of an outgoing event/task pair, if the outgoing set holds one.
+///
+/// Keyed on `(uid, kind)`: two changes touching the same UID under *different*
+/// kinds are the pair. Same-UID, same-kind changes — a master and its
+/// recurrence override — are ordinary sync and must stay untouched (R1/R2).
+fn same_uid_pair(diff: &CalendarDiff) -> Option<EventUid> {
+    let mut kinds_by_uid: HashMap<&EventUid, ComponentKind> = HashMap::new();
+
+    for change in diff.outgoing() {
+        // The item the change *writes*: an update's `to`, never its `from`.
+        let item = match change {
+            EventChange::Create(item) | EventChange::Delete(item) => item,
+            EventChange::Update { to, .. } => to,
+        };
+        let kind = item.instance_id().kind();
+
+        match kinds_by_uid.insert(item.uid(), kind) {
+            Some(seen) if seen != kind => return Some(item.uid().clone()),
+            _ => {}
+        }
+    }
+
+    None
+}
+
 async fn push_outgoing_changes(
     remote: &Remote,
     diff: &CalendarDiff,
     events_by_instance_id: &mut HashMap<EventInstanceId, CalendarEvent>,
     sync_bases: &mut Vec<CalendarItem>,
 ) -> Result<(), ConnectionError> {
+    // Before *any* RPC (R65): one collection cannot hold a same-UID
+    // event/task pair, and a half-pushed pair is the destructive outcome —
+    // at the same href the server answers a silent `204` overwrite rather
+    // than an error, so it will not protect the user here.
+    if let Some(uid) = same_uid_pair(diff) {
+        return Err(ConnectionError::SameUidPair { uid });
+    }
+
     for change in diff.outgoing() {
         if let Some(remote_event) = remote.apply_change(change).await? {
             let returned_item = remote_event.item();
@@ -975,6 +1008,160 @@ END:VJOURNAL\r\nEND:VCALENDAR\r\n";
         assert!(!event_path.exists(), "the event's file is the one deleted");
         assert!(todo_path.is_file(), "the task's file must survive");
         assert_eq!(CalendarItem::load(&todo_path).unwrap(), todo.into());
+    }
+
+    /// **R65.** A same-UID event/task pair is a perfectly good *local*
+    /// directory (R4, and `T-52` above proves it works), but it cannot be
+    /// pushed into one CalDAV collection: Radicale enforces UID uniqueness per
+    /// collection component-agnostically — `409` across hrefs, `400` within one
+    /// resource, and, at the same href, a **silent `204` overwrite**. The
+    /// server will not protect the user here, so caldir stops before the wire.
+    ///
+    /// The destructive case this pins is the *partial* push: a reply is queued
+    /// for the event, so without the guard the event really is created
+    /// remotely and only the task then fails — leaving the pair half-pushed
+    /// into a collection that cannot hold both.
+    #[tokio::test]
+    async fn a_same_uid_event_task_pair_pushed_to_one_collection_is_an_error() {
+        let (_tmp, mock, mut connection) = writable_connection();
+
+        let uid = EventUid::new("shared-123@u-crawler");
+        let mut event = Event::new("Assignment 3 - submission window", test_event_time());
+        event.uid = uid.clone();
+        let mut todo = Todo::new("Assignment 3 - hand in");
+        todo.uid = uid.clone();
+
+        let event_path = connection
+            .local()
+            .create_event(event.clone())
+            .unwrap()
+            .path()
+            .to_path_buf();
+        let todo_path = connection
+            .local()
+            .create_event(todo.clone())
+            .unwrap()
+            .path()
+            .to_path_buf();
+        let before = (
+            std::fs::read(&event_path).unwrap(),
+            std::fs::read(&todo_path).unwrap(),
+        );
+
+        // Queued, and must go unused: without the guard the event's create
+        // succeeds and the pair ends up half-pushed.
+        mock.reply::<rpc::CreateEvent>(event.clone());
+
+        let diff = CalendarDiff::from_changes(
+            vec![
+                EventChange::Create(event.clone().into()),
+                EventChange::Create(todo.clone().into()),
+            ],
+            vec![],
+        );
+
+        let err = connection
+            .apply_outgoing_diff(&diff)
+            .await
+            .expect_err("a same-UID pair cannot be pushed to one collection");
+
+        assert!(
+            err.to_string().contains("shared-123@u-crawler"),
+            "the error must name the UID the user has to act on, got: {err}"
+        );
+
+        assert!(
+            !mock.received_a_request(),
+            "no RPC may be sent for ANY change in that push: a partial push is \
+             the destructive case Radicale's silent 204 overwrite produces",
+        );
+
+        assert!(event_path.is_file() && todo_path.is_file());
+        assert_eq!(
+            (
+                std::fs::read(&event_path).unwrap(),
+                std::fs::read(&todo_path).unwrap()
+            ),
+            before,
+            "both local files must survive byte-for-byte: the local mixed \
+             directory stays supported (R4), only the push is refused"
+        );
+    }
+
+    /// The pair is a property of the outgoing *set*, not of one change shape.
+    /// Deleting the event while creating the task still puts both kinds under
+    /// one UID into one collection, and the changes carry no guaranteed order:
+    /// create-first is a `409`/silent-`204` against the event's own resource,
+    /// delete-first destroys the event and then fails. Refused either way.
+    #[tokio::test]
+    async fn a_pair_split_across_a_delete_and_a_create_is_refused_too() {
+        let (_tmp, mock, mut connection) = writable_connection();
+
+        let uid = EventUid::new("shared-123@u-crawler");
+        let mut event = Event::new("Assignment 3 - submission window", test_event_time());
+        event.uid = uid.clone();
+        let mut todo = Todo::new("Assignment 3 - hand in");
+        todo.uid = uid.clone();
+
+        connection.local().create_event(todo.clone()).unwrap();
+
+        let diff = CalendarDiff::from_changes(
+            vec![
+                EventChange::Delete(event.into()),
+                EventChange::Create(todo.into()),
+            ],
+            vec![],
+        );
+
+        let err = connection
+            .apply_outgoing_diff(&diff)
+            .await
+            .expect_err("a delete/create pair under one UID is still a pair");
+
+        assert!(
+            err.to_string().contains("shared-123@u-crawler"),
+            "got: {err}"
+        );
+        assert!(
+            !mock.received_a_request(),
+            "the delete must not reach the wire either",
+        );
+    }
+
+    /// The guard is about a same-UID **pair across kinds**, and nothing wider.
+    /// A same-kind push of two unrelated items, and two same-UID items of the
+    /// *same* kind (a recurrence override and its master), must still push:
+    /// widening this predicate would break ordinary event sync (R1/R2).
+    #[tokio::test]
+    async fn two_outgoing_events_are_not_a_pair_and_still_push() {
+        let (_tmp, mock, mut connection) = writable_connection();
+
+        let first = test_event();
+        let mut second = Event::new("Same UID, same kind", test_event_time());
+        second.uid = first.uid.clone();
+
+        connection.local().create_event(first.clone()).unwrap();
+
+        mock.reply::<rpc::CreateEvent>(first.clone());
+        mock.reply::<rpc::CreateEvent>(second.clone());
+
+        let diff = CalendarDiff::from_changes(
+            vec![
+                EventChange::Create(first.clone().into()),
+                EventChange::Create(second.into()),
+            ],
+            vec![],
+        );
+
+        connection
+            .apply_outgoing_diff(&diff)
+            .await
+            .expect("two same-kind changes are not a pair and must still push");
+
+        assert!(
+            mock.received_a_request(),
+            "two same-kind changes must still reach the wire",
+        );
     }
 
     /// The u_crawler VTODO, widened to the properties that churn. `VALARM`

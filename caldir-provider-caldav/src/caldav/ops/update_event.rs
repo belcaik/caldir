@@ -46,8 +46,7 @@ pub async fn update_event(
         .header("If-Match", &location.etag)
         .body(ics_content)?;
 
-    let (parts, _body) = caldav
-        .request_raw(request)
+    let (parts, _body) = super::put_ics(&caldav, request)
         .await
         .context("Failed to update event")?;
 

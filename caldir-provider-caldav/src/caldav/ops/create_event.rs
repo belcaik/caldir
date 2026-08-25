@@ -61,8 +61,7 @@ pub async fn create_event(
         .header("If-None-Match", "*")
         .body(ics_content)?;
 
-    let (parts, response_body) = caldav
-        .request_raw(request)
+    let (parts, response_body) = super::put_ics(&caldav, request)
         .await
         .context("Failed to create event")?;
 

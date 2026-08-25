@@ -44,6 +44,80 @@ pub(super) fn parse_item(ics: &str) -> Result<CalendarItem> {
     Ok(CalendarItem::from_single_ics_str(ics)?)
 }
 
+/// Send a PUT, having first proved the body is a single-component document.
+///
+/// **The only place in this crate that sends a PUT** (R64, R80, INVIOLABLE).
+/// Both write paths hand their request here rather than to `request_raw`, so
+/// the guard cannot be bypassed by adding a third write site — it is reached
+/// structurally, not by remembering to call it.
+pub(super) async fn put_ics(
+    caldav: &CalDavClient_,
+    request: Request<String>,
+) -> Result<(http::response::Parts, Vec<u8>)> {
+    ensure_single_component(request.body())?;
+
+    let (parts, body) = caldav.request_raw(request).await?;
+    Ok((parts, body.to_vec()))
+}
+
+/// Reject a document that does not hold exactly one supported component.
+///
+/// R64/R80, INVIOLABLE: Radicale answers a multi-component `VCALENDAR` with
+/// `400 "Multiple component types in object: 'VEVENT', 'VTODO'"`, and a `400`
+/// behind a retry path spins forever. `to_ics_string` cannot emit that shape
+/// (R27), so this never fires in production — a structural guard is cheaper
+/// than a proof that it stays that way.
+///
+/// Counts **top-level** components only: `VALARM` is nested inside its
+/// `VTODO`, and counting `BEGIN:` lines would brick every task with a
+/// reminder (R24). `VTIMEZONE` is exempt (R18) — Radicale synthesizes one
+/// beside every zoned task.
+fn ensure_single_component(ics: &str) -> Result<()> {
+    let found = top_level_components(ics);
+
+    if found.len() == 1 {
+        return Ok(());
+    }
+
+    if found.is_empty() {
+        anyhow::bail!("Refusing to PUT: expected 1 component in object, found 0");
+    }
+
+    // Mirrors Radicale's own message shape, so the log is diagnosable without
+    // the server's.
+    let named = found
+        .iter()
+        .map(|name| format!("'{name}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    anyhow::bail!("Refusing to PUT multiple component types in object: {named}")
+}
+
+/// The data-bearing components directly inside the `VCALENDAR`, in document
+/// order. `VTIMEZONE` is not one (R18); anything nested deeper is not one
+/// either.
+fn top_level_components(ics: &str) -> Vec<&str> {
+    const IGNORED: [&str; 1] = ["VTIMEZONE"];
+
+    let mut depth = 0usize;
+    let mut found = Vec::new();
+
+    // `str::lines` already strips the CR of a CRLF pair.
+    for line in ics.lines() {
+        if let Some(name) = line.strip_prefix("BEGIN:") {
+            depth += 1;
+            // depth 1 is the VCALENDAR itself; depth 2 is a component in it.
+            if depth == 2 && !IGNORED.contains(&name) {
+                found.push(name);
+            }
+        } else if line.starts_with("END:") {
+            depth = depth.saturating_sub(1);
+        }
+    }
+
+    found
+}
+
 /// Result of looking up a CalDAV resource by UID.
 pub(super) struct EventLocation {
     pub href: String,
@@ -515,6 +589,206 @@ SUMMARY:File the tax return\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
             "R60: only the component name is parameterised"
         );
         assert!(!task.contains("time-range"), "got:\n{task}");
+    }
+
+    // ========================================================================
+    // T-41 — a multi-component `VCALENDAR` is never PUT (R64, R80)
+    // ========================================================================
+
+    /// The forbidden document: one `VEVENT` and one `VTODO` in one resource.
+    /// Radicale answers `400 "Multiple component types in object: 'VEVENT',
+    /// 'VTODO'"` (probe Q-E.4), and a `400`-answering server behind a retry
+    /// path spins forever (R80). Hand-built, never produced by
+    /// `to_ics_string`, because the encoder cannot emit this shape — which is
+    /// exactly why the guard has to be structural rather than a proof.
+    const EVENT_AND_TODO_IN_ONE_RESOURCE: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VEVENT\r\nUID:shared-123@u-crawler\r\nDTSTART:20260615T100000Z\r\nDTEND:20260615T110000Z\r\n\
+SUMMARY:Assignment 3 - submission window\r\nEND:VEVENT\r\n\
+BEGIN:VTODO\r\nUID:shared-123@u-crawler\r\nDTSTAMP:20260801T090000Z\r\n\
+SUMMARY:Assignment 3 - hand in\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
+
+    /// A single `VEVENT`, the R1/R2 control.
+    const ONE_VEVENT: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VEVENT\r\nUID:evt-1@caldir\r\nDTSTART:20260615T100000Z\r\nDTEND:20260615T110000Z\r\n\
+SUMMARY:Meeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+    /// A single `VTODO` carrying a `VALARM`. The nested component is the trap:
+    /// counting `BEGIN:` lines bricks every task with a reminder, and caldir
+    /// splices the alarm in by hand on `"END:VTODO\r\n"` (R24).
+    const ONE_VTODO_WITH_VALARM: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VTODO\r\nUID:task-1@u-crawler\r\nDTSTAMP:20260801T090000Z\r\n\
+SUMMARY:File the tax return\r\n\
+BEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:Reminder\r\nTRIGGER;RELATED=START:-PT30M\r\n\
+END:VALARM\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
+
+    /// Send `ics` through the crate's one PUT site against a double that
+    /// accepts every PUT, and report what the double actually received.
+    async fn put_through_the_guard(ics: &str) -> (Result<()>, Vec<String>) {
+        let server = MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("PUT"))
+            .respond_with(wiremock::ResponseTemplate::new(201))
+            .mount(&server)
+            .await;
+
+        let calendar_url = calendar_url(&server);
+        let caldav =
+            create_caldav_client(&calendar_url, "user", "pass").expect("a client is buildable");
+        let uri = caldav
+            .relative_uri("/cal/shared-123@u-crawler.ics")
+            .expect("a relative uri");
+        let request = Request::builder()
+            .method(Method::PUT)
+            .uri(&uri)
+            .header("Content-Type", "text/calendar")
+            .body(ics.to_string())
+            .expect("a buildable request");
+
+        let outcome = put_ics(&caldav, request).await.map(|_| ());
+
+        let methods = server
+            .received_requests()
+            .await
+            .expect("the double records requests")
+            .iter()
+            .map(|request| request.method.as_str().to_string())
+            .collect();
+
+        (outcome, methods)
+    }
+
+    /// **T-41** (R64, R80, INVIOLABLE). A multi-component `VCALENDAR` must
+    /// never reach the wire. Asserting only on the `Err` would be satisfied by
+    /// a guard that fires *after* the request went out; R64 is about the
+    /// request never being sent, so the double's own record is the assertion.
+    #[tokio::test]
+    async fn a_multi_component_vcalendar_is_never_put() {
+        let (outcome, methods) = put_through_the_guard(EVENT_AND_TODO_IN_ONE_RESOURCE).await;
+
+        let err = outcome.expect_err("a VEVENT + VTODO resource must not be PUT");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("VEVENT") && message.contains("VTODO"),
+            "the error must name both component types found, so the log is \
+             diagnosable without the server's: {message}"
+        );
+
+        assert!(
+            !methods.iter().any(|method| method == "PUT"),
+            "R64 is about the request never being sent, not the error type; \
+             the double received {methods:?}"
+        );
+
+        // The rule is arity, not variety (R27: one supported component per
+        // document). Two components of the *same* type is equally unsendable —
+        // a guard that only looks at distinct type names lets it through.
+        const TWO_VEVENTS: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VEVENT\r\nUID:evt-1@caldir\r\nDTSTART:20260615T100000Z\r\nEND:VEVENT\r\n\
+BEGIN:VEVENT\r\nUID:evt-2@caldir\r\nDTSTART:20260616T100000Z\r\nEND:VEVENT\r\n\
+END:VCALENDAR\r\n";
+
+        let (outcome, methods) = put_through_the_guard(TWO_VEVENTS).await;
+
+        outcome.expect_err("two VEVENTs in one resource must not be PUT");
+        assert!(
+            !methods.iter().any(|method| method == "PUT"),
+            "got {methods:?}"
+        );
+    }
+
+    /// The guard must not brick the shapes caldir legitimately writes: one
+    /// `VEVENT`, one `VTODO`, a `VTIMEZONE` sibling beside a zoned task (R18 —
+    /// Radicale returns exactly that, Q-3), and a `VALARM` nested in a task
+    /// (R24). Each is sent through the same PUT site and must reach the wire.
+    #[tokio::test]
+    async fn a_single_component_document_passes_the_guard() {
+        for (label, ics) in [
+            ("one VEVENT", ONE_VEVENT),
+            ("one VTODO with a VALARM", ONE_VTODO_WITH_VALARM),
+            (
+                "a zoned VTODO beside its VTIMEZONE",
+                RADICALE_ZONED_VTODO_ICS,
+            ),
+        ] {
+            let (outcome, methods) = put_through_the_guard(ics).await;
+
+            outcome.unwrap_or_else(|err| panic!("{label} must pass the guard: {err:#}"));
+            assert!(
+                methods.iter().any(|method| method == "PUT"),
+                "{label} must actually reach the wire, got {methods:?}"
+            );
+        }
+    }
+
+    /// A document with no supported component at all is equally unsendable:
+    /// the server would store a resource caldir can never read back, and the
+    /// arity rule is "exactly one", not "at most one".
+    #[tokio::test]
+    async fn a_component_less_vcalendar_is_never_put() {
+        let (outcome, methods) =
+            put_through_the_guard("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n").await;
+
+        let err = outcome.expect_err("an empty VCALENDAR must not be PUT");
+        assert!(
+            format!("{err:#}").contains('0'),
+            "the error must name the count it found, got: {err:#}"
+        );
+        assert!(
+            !methods.iter().any(|method| method == "PUT"),
+            "got {methods:?}"
+        );
+    }
+
+    /// **AC 3, mechanised.** The guard is only INVIOLABLE if it cannot be
+    /// walked around, and no unit test can prove that from the outside: an
+    /// `Event` cannot serialize to a multi-component document (R27), so a
+    /// write path that skips [`put_ics`] behaves identically under every
+    /// input a test can construct. What *is* checkable is the structure — the
+    /// crate must have exactly one place that puts bytes on the wire without
+    /// libdav's typed request layer, and that place is the guarded one.
+    #[test]
+    fn put_ics_is_the_only_raw_sender_in_the_crate() {
+        fn raw_send_sites(dir: &std::path::Path, sites: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).expect("the crate's src/ is readable") {
+                let path = entry.expect("a readable entry").path();
+
+                if path.is_dir() {
+                    raw_send_sites(&path, sites);
+                    continue;
+                }
+                if path.extension().is_none_or(|ext| ext != "rs") {
+                    continue;
+                }
+
+                // Split so the scanner cannot match its own needle.
+                let needle = concat!(".request", "_raw(");
+                let source = std::fs::read_to_string(&path).expect("a readable source file");
+                for line in source.lines() {
+                    let line = line.trim();
+                    if line.contains(needle) && !line.starts_with("//") {
+                        sites.push(format!("{}: {line}", path.display()));
+                    }
+                }
+            }
+        }
+
+        let mut sites = Vec::new();
+        raw_send_sites(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut sites,
+        );
+
+        assert_eq!(
+            sites.len(),
+            1,
+            "every write must go through `put_ics`, which is the only thing \
+             that inspects the body before it reaches the wire (R64, R80); \
+             found {sites:#?}"
+        );
+        assert!(
+            sites[0].contains("ops.rs"),
+            "the one raw sender must be `put_ics` itself, found {}",
+            sites[0]
+        );
     }
 
     /// A resource caldir cannot decode at `{uid}.ics` means **fall through**,
