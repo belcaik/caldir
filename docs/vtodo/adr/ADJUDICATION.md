@@ -773,3 +773,22 @@ HTTP-double seam. context/testing.md must list it beside the
 MockTransport FIFO/last-request traps, WITH the raw-ICS rule attached
 (drive the remote from raw ICS, never from domain values re-encoded by
 the code under test).
+
+## SPEC CORRECTION REQUIRED — R63/R103's rename premise is WRONG
+docs/vtodo/spec.md §12 and §17 still say a LOCAL FILE RENAME triggers
+`409 no-uid-conflict`. It cannot. The href is UID-derived (`event_url`)
+and used unconditionally, so a rename yields the SAME href - a 412 or a
+silent 204. The reachable trigger is a SERVER-ASSIGNED FILENAME.
+The requirement stands and the handler ships; only the explanation is
+wrong. L8-01 MUST fix both sections. Tests assert the OUTCOME, never the
+status code. (I introduced this error myself earlier in the effort; it
+has now been caught three times by three different agents.)
+
+## OPEN — no recovery path for 412
+A lost race on a conditional PUT surfaces as a raw error with no
+guidance. Explicitly a non-goal in L5-03. Needs a decision before ship.
+
+## OPEN — update_event has no direct test
+It is exercised only transitively via create_event's 409 fallback, so
+M10/M11 fail by proxy rather than for the right reason. A dedicated
+round-trip test would fix that. Cheap now that the wiremock seam exists.
