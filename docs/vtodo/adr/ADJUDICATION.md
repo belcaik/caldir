@@ -894,3 +894,32 @@ fixed those.
   percent-encoding `@` in hrefs. Real debt; belongs to another L8 ticket.
 - Website task documentation (L8-02) and supported-calendar-component-set
   (L8-06) - explicit non-goals of L8-01.
+
+## RESOLVED — the L3-03 / L7-07 disagreement on task field rows
+L3-03's TODO text named `due`, `status`, `percent-complete` and
+`completed` as the missing rows. L7-07's AC 2 and Non-goals scope only
+`summary`, `due` and `status`. L7-07 flagged the disagreement rather
+than assuming it handled.
+RULING: L7-07's narrower set IS the MVP. Rationale: `status` already
+carries the completion signal a user acts on (needs_action -> completed),
+and `completed` is only its timestamp. A task update touching ONLY an
+unrowed field renders a header line with no rows - under-described, not
+invisible, and not data loss.
+DEFERRED to a named follow-up, NOT silently dropped: rows for
+percent_complete, priority, completed, description, location, url,
+reminders, attendees, attachments, x_properties. This is the same defect
+class one field further out and must appear in the ship report's known
+limitations.
+
+## CLOSED — the highest-priority open thread
+`suppressed_task_deletes()` is consumed by caldir-cli/src/output/diff.rs
+(L7-07), per calendar, on incoming surfaces only, evaluated before the
+is_empty() early return. R49's "and warn" half is discharged and PR-1's
+MAJOR-2 is answered.
+
+## NEW for the 0.15.0 breaking window (add to L8-05's list)
+`CalendarDiff` needs a non-test-gated constructor for downstream crates.
+`compute`/`from_changes` are both `#[cfg(test)] pub(crate)`, so no
+consumer outside caldir-core can build one - which is what leaves
+L7-07's M14/M15 uncatchable and blocks EVERY future CLI-level lock over
+a whole diff, not just this one.
