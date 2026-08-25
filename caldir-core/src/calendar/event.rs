@@ -72,6 +72,11 @@ impl CalendarEvent {
         &self.item
     }
 
+    /// Take the stored item, dropping the path.
+    pub fn into_item(self) -> CalendarItem {
+        self.item
+    }
+
     /// Narrowing accessor: `Some` only when the stored item is an event.
     ///
     /// A `CalendarEvent` can now hold a task, so every VEVENT-only caller has

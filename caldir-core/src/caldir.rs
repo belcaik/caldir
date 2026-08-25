@@ -447,7 +447,7 @@ mod tests {
                         calendar.slug()
                     )
                 });
-            summaries.extend(events.into_iter().filter_map(|e| e.summary));
+            summaries.extend(events.iter().filter_map(|e| e.summary().map(String::from)));
         }
 
         summaries.sort();

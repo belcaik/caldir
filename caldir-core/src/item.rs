@@ -1,5 +1,5 @@
 use crate::calendar::CalendarEventError;
-use crate::event::{Event, EventError, EventUid};
+use crate::event::{Event, EventError, EventInstanceId, EventUid};
 use crate::todo::Todo;
 use chrono::{DateTime, Utc};
 use icalendar::{CalendarComponent, Component};
@@ -85,6 +85,17 @@ impl CalendarItem {
         match self {
             CalendarItem::Event(event) => &event.uid,
             CalendarItem::Todo(todo) => &todo.uid,
+        }
+    }
+
+    /// The item's identity: `(kind, uid, recurrence_id)`. The kind is part of
+    /// the key, so a VEVENT and a VTODO sharing a UID never collide (R3).
+    pub fn instance_id(&self) -> EventInstanceId {
+        match self {
+            CalendarItem::Event(event) => event.event_instance_id(),
+            CalendarItem::Todo(todo) => {
+                EventInstanceId::todo(todo.uid.clone(), todo.recurrence_id.clone())
+            }
         }
     }
 

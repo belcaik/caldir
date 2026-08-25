@@ -6,7 +6,7 @@ mod state;
 
 use crate::event::{EventInstanceId, EventTime, EventUid, Recurrence, expand_in_range};
 use crate::utils::slugify;
-use crate::{Event, RemoteConfig};
+use crate::{CalendarItem, Event, RemoteConfig};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -138,10 +138,11 @@ impl Calendar {
         &self,
         id: &EventInstanceId,
     ) -> Result<Option<CalendarEvent>, CalendarError> {
-        let found = self.events()?.into_events().into_iter().find(|ce| {
-            ce.event()
-                .is_some_and(|event| event.event_instance_id() == *id)
-        });
+        let found = self
+            .events()?
+            .into_events()
+            .into_iter()
+            .find(|ce| ce.item().instance_id() == *id);
 
         Ok(found)
     }
@@ -327,7 +328,8 @@ impl Calendar {
         match existing {
             // An override file already exists -> edit it in place
             Some(mut ce) => {
-                // Unreachable: `event_by_instance_id` only matches events.
+                // Unreachable for an event id: an event identity only ever
+                // matches an event.
                 // TODO(L3-03): tasks need their own instance-override path.
                 let Some(mut event) = ce.event().cloned() else {
                     return Err(CalendarError::MasterNotFound(id.uid().as_str().to_string()));
@@ -357,20 +359,38 @@ impl Calendar {
         }
     }
 
-    /// List all events occurring within time range
+    /// List every item to show for `[from, to)`: events expanded into their
+    /// occurrences, tasks as themselves.
+    ///
+    /// Tasks are **modelled, never expanded** (R89) and never dated (R46) — a
+    /// recurring task yields its master and nothing else, an undated one
+    /// passes through untouched. They are also not filtered by the range here:
+    /// listing is not window membership (the sync predicate is R44, and
+    /// suppressing a task from a view is the CLI's job, ADR-10), so this path
+    /// is deliberately permissive rather than dropping items it cannot place.
     pub fn expanded_events_in_range(
         &self,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
-    ) -> Result<Vec<Event>, CalendarError> {
-        let events = self
-            .events()?
-            .into_events()
+    ) -> Result<Vec<CalendarItem>, CalendarError> {
+        let mut events = Vec::new();
+        let mut tasks = Vec::new();
+
+        for calendar_event in self.events()?.into_events() {
+            match calendar_event.into_item() {
+                CalendarItem::Event(event) => events.push(event),
+                item => tasks.push(item),
+            }
+        }
+
+        let mut items: Vec<CalendarItem> = expand_in_range(events, from, to)
             .into_iter()
-            // TODO(L2-07): this yields `CalendarItem`, and tasks stop being
-            // dropped here.
-            .filter_map(|ce| ce.event().cloned());
-        Ok(expand_in_range(events, from, to))
+            .map(CalendarItem::Event)
+            .collect();
+
+        items.extend(tasks);
+
+        Ok(items)
     }
 
     /// Create new event in calendar
@@ -559,7 +579,7 @@ mod tests {
         assert!(!path.exists());
     }
 
-    use crate::event::RecurrenceId;
+    use crate::event::{ComponentKind, RecurrenceId};
     use chrono::TimeZone;
 
     fn make_master(uid: &str, start: DateTime<Utc>, rrule: &str) -> Event {
@@ -600,6 +620,19 @@ mod tests {
     fn t(year: i32, month: u32, day: u32, hour: u32, min: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(year, month, day, hour, min, 0)
             .unwrap()
+    }
+
+    /// The events of an expansion, for the event-only assertions below.
+    /// Panics rather than filtering, so a stray item can never quietly shorten
+    /// the list an assertion is checking.
+    fn expanded_events(items: Vec<CalendarItem>) -> Vec<Event> {
+        items
+            .into_iter()
+            .map(|item| match item {
+                CalendarItem::Event(event) => event,
+                other => panic!("expected an event, got {other:?}"),
+            })
+            .collect()
     }
 
     fn instance_id(uid: &str, occurrence: EventTime) -> EventInstanceId {
@@ -947,12 +980,13 @@ mod tests {
         cal.delete_recurring_instance(&instance_id(uid, occurrence.clone()))
             .unwrap();
 
-        let starts: Vec<_> = cal
-            .expanded_events_in_range(t(2026, 4, 1, 0, 0), t(2026, 4, 5, 0, 0))
-            .unwrap()
-            .into_iter()
-            .map(|e| e.start.to_utc())
-            .collect();
+        let starts: Vec<_> = expanded_events(
+            cal.expanded_events_in_range(t(2026, 4, 1, 0, 0), t(2026, 4, 5, 0, 0))
+                .unwrap(),
+        )
+        .into_iter()
+        .map(|e| e.start.to_utc())
+        .collect();
         assert_eq!(
             starts,
             vec![
@@ -1113,12 +1147,13 @@ mod tests {
         )
         .unwrap();
 
-        let summaries: Vec<_> = cal
-            .expanded_events_in_range(t(2026, 4, 1, 0, 0), t(2026, 4, 5, 0, 0))
-            .unwrap()
-            .into_iter()
-            .map(|e| e.summary.unwrap_or_default())
-            .collect();
+        let summaries: Vec<_> = expanded_events(
+            cal.expanded_events_in_range(t(2026, 4, 1, 0, 0), t(2026, 4, 5, 0, 0))
+                .unwrap(),
+        )
+        .into_iter()
+        .map(|e| e.summary.unwrap_or_default())
+        .collect();
         assert_eq!(
             summaries,
             vec!["Daily standup", "Daily standup", "Special", "Daily standup"]
@@ -1262,6 +1297,201 @@ mod tests {
         assert_eq!(
             events[0].event().unwrap().uid.as_str(),
             "window-123@u-crawler"
+        );
+    }
+
+    /// A task file is addressable by slug and by identity, like any other
+    /// item. The kind is part of the key, so an event id with the same UID
+    /// must not resolve to the task (R3, R4).
+    #[test]
+    fn event_and_event_by_instance_id_resolve_a_task_file() {
+        use crate::test_utils::{VTODO_ICS, write_ics};
+
+        let (_tmp, calendar) = test_calendar();
+        write_ics(calendar.path(), "assignment-123.ics", VTODO_ICS);
+
+        let by_slug = calendar.event("assignment-123").unwrap();
+        assert!(matches!(by_slug.item(), CalendarItem::Todo(_)));
+
+        let uid = EventUid::new("assignment-123@u-crawler");
+        let found = calendar
+            .event_by_instance_id(&EventInstanceId::todo(uid.clone(), None))
+            .unwrap()
+            .expect("the task is addressable by its own instance id");
+        assert_eq!(found.item().uid().as_str(), "assignment-123@u-crawler");
+
+        assert!(
+            calendar
+                .event_by_instance_id(&EventInstanceId::new(uid, None))
+                .unwrap()
+                .is_none(),
+            "an event identity must not resolve to a same-UID task"
+        );
+    }
+
+    /// The `RECURRENCE-ID` half of a task's identity is part of the key too: a
+    /// task override and its master share a UID and must stay distinguishable.
+    #[test]
+    fn a_task_override_resolves_separately_from_its_master() {
+        use crate::test_utils::write_ics;
+
+        let master = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VTODO\r\nUID:weekly@u-crawler\r\nDUE:20260401T235900Z\r\nRRULE:FREQ=WEEKLY\r\n\
+SUMMARY:Weekly reading\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
+        let override_task = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VTODO\r\nUID:weekly@u-crawler\r\nRECURRENCE-ID:20260408T235900Z\r\n\
+DUE:20260409T235900Z\r\nSUMMARY:Weekly reading (moved)\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
+
+        let (_tmp, calendar) = test_calendar();
+        write_ics(calendar.path(), "weekly.ics", master);
+        write_ics(calendar.path(), "weekly-override.ics", override_task);
+
+        let uid = EventUid::new("weekly@u-crawler");
+        let rid = RecurrenceId::from_event_time(EventTime::DateTimeUtc(t(2026, 4, 8, 23, 59)));
+
+        let found = calendar
+            .event_by_instance_id(&EventInstanceId::todo(uid.clone(), Some(rid)))
+            .unwrap()
+            .expect("the task override is addressable by its own recurrence id");
+        assert_eq!(found.item().summary(), Some("Weekly reading (moved)"));
+
+        let master = calendar
+            .event_by_instance_id(&EventInstanceId::todo(uid, None))
+            .unwrap()
+            .expect("the master is addressable by the un-instanced id");
+        assert_eq!(master.item().summary(), Some("Weekly reading"));
+    }
+
+    /// R4/R100: a VEVENT and a VTODO may legitimately share a UID inside one
+    /// directory. Supported, non-error local state — two items, nothing
+    /// skipped.
+    #[test]
+    fn a_same_uid_event_and_task_pair_lists_two_items() {
+        use crate::test_utils::{VTODO_ICS, write_ics};
+
+        let same_uid_event = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VEVENT\r\nUID:assignment-123@u-crawler\r\nDTSTART:20260815T100000Z\r\n\
+SUMMARY:Assignment 3 - submission window\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+        let (_tmp, calendar) = test_calendar();
+        write_ics(calendar.path(), "assignment-123.ics", VTODO_ICS);
+        write_ics(calendar.path(), "window-123.ics", same_uid_event);
+
+        let listing = calendar.events().unwrap();
+
+        assert_eq!(listing.len(), 2);
+        assert!(!listing.is_incomplete());
+
+        let mut kinds: Vec<ComponentKind> = listing
+            .events()
+            .iter()
+            .map(|ce| ce.item().instance_id().kind())
+            .collect();
+        kinds.sort_by_key(|kind| format!("{kind:?}"));
+        assert_eq!(kinds, vec![ComponentKind::Event, ComponentKind::Todo]);
+    }
+
+    /// R89: a task's RRULE is modelled, never expanded. Range expansion yields
+    /// the master and nothing else — contrast the recurring *event* above,
+    /// which yields four occurrences over the same window.
+    #[test]
+    fn a_recurring_task_yields_only_its_master_from_range_expansion() {
+        use crate::test_utils::write_ics;
+
+        let recurring_task = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VTODO\r\nUID:weekly@u-crawler\r\nDUE:20260401T235900Z\r\n\
+RRULE:FREQ=DAILY\r\nSUMMARY:Weekly reading\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
+
+        let (_tmp, cal) = test_calendar();
+        write_ics(cal.path(), "weekly.ics", recurring_task);
+
+        let items = cal
+            .expanded_events_in_range(t(2026, 4, 1, 0, 0), t(2026, 4, 5, 0, 0))
+            .unwrap();
+
+        assert_eq!(items.len(), 1);
+        match &items[0] {
+            CalendarItem::Todo(todo) => {
+                assert_eq!(todo.uid.as_str(), "weekly@u-crawler");
+                assert!(todo.recurrence.is_some(), "the RRULE must be preserved");
+                assert!(
+                    todo.recurrence_id.is_none(),
+                    "the master is not an instance"
+                );
+            }
+            other => panic!("expected the task master, got {other:?}"),
+        }
+    }
+
+    /// R46 (INVIOLABLE): an undated task is never given a fabricated date to
+    /// make it fit the range, and it is never dropped for lacking one.
+    #[test]
+    fn an_undated_task_survives_range_expansion_with_no_date_invented() {
+        use crate::test_utils::write_ics;
+
+        let undated_task = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VTODO\r\nUID:someday@u-crawler\r\nSUMMARY:Read the RFC\r\n\
+END:VTODO\r\nEND:VCALENDAR\r\n";
+
+        let (_tmp, cal) = test_calendar();
+        write_ics(cal.path(), "someday.ics", undated_task);
+
+        let items = cal
+            .expanded_events_in_range(t(2026, 4, 1, 0, 0), t(2026, 4, 5, 0, 0))
+            .unwrap();
+
+        assert_eq!(items.len(), 1);
+        match &items[0] {
+            CalendarItem::Todo(todo) => {
+                assert_eq!(todo.summary.as_deref(), Some("Read the RFC"));
+                assert!(todo.start.is_none(), "DTSTART must not be synthesized");
+                assert!(todo.due.is_none(), "DUE must not be synthesized");
+            }
+            other => panic!("expected the undated task, got {other:?}"),
+        }
+    }
+
+    /// Control (R1/R2): the expansion of an event-only calendar is unchanged —
+    /// a recurring master still yields one occurrence per day in the window,
+    /// and a task in the same calendar does not disturb them.
+    #[test]
+    fn task_presence_does_not_change_event_expansion() {
+        use crate::test_utils::{VTODO_ICS, write_ics};
+
+        let (_tmp, cal) = test_calendar();
+        cal.create_event(make_master(
+            "series@caldir",
+            t(2026, 4, 1, 10, 0),
+            "FREQ=DAILY",
+        ))
+        .unwrap();
+        write_ics(cal.path(), "assignment-123.ics", VTODO_ICS);
+
+        let items = cal
+            .expanded_events_in_range(t(2026, 4, 1, 0, 0), t(2026, 4, 4, 0, 0))
+            .unwrap();
+
+        let starts: Vec<DateTime<Utc>> = items
+            .iter()
+            .filter_map(|item| match item {
+                CalendarItem::Event(event) => Some(event.start.to_utc()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            starts,
+            vec![
+                t(2026, 4, 1, 10, 0),
+                t(2026, 4, 2, 10, 0),
+                t(2026, 4, 3, 10, 0)
+            ]
+        );
+        assert_eq!(items.len(), 4, "the task is listed, never expanded");
+        assert!(
+            matches!(items[3], CalendarItem::Todo(_)),
+            "tasks are appended after the expanded events, so a consumer that \
+             narrows to events never truncates the list it is walking"
         );
     }
 }

@@ -1,5 +1,5 @@
 use anyhow::Result as AnyhowResult;
-use caldir_core::{Caldir, Calendar, Event, ParticipationStatus, TimeFormat};
+use caldir_core::{Caldir, Calendar, CalendarItem, Event, ParticipationStatus, TimeFormat};
 use chrono::{DateTime, NaiveDate, Utc};
 
 use crate::output::event::is_visible;
@@ -67,11 +67,20 @@ fn collect_entries(
         let calendar_slug = calendar.slug().map(str::to_owned);
         let remote_email = calendar.remote_email().map(str::to_owned);
 
-        let Ok(events) = calendar.expanded_events_in_range(from, to) else {
+        let Ok(items) = calendar.expanded_events_in_range(from, to) else {
             continue;
         };
 
-        for event in events {
+        for item in items {
+            // TODO(L7-01): the agenda is still event-shaped, so tasks are
+            // narrowed out here. Anchoring them on DUE, the undated section
+            // and the JSON schema are ADR-10's design (L7-01..L7-03).
+            // Display-only: nothing infers a deletion from this list, so a
+            // task missing from the agenda is never read as an absence.
+            let CalendarItem::Event(event) = item else {
+                continue;
+            };
+
             if !is_visible(&event) {
                 continue;
             }
@@ -120,6 +129,33 @@ mod tests {
         let from = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
         let to = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
         let entries = collect_entries(vec![broken, healthy], from, to);
+
+        let summaries: Vec<_> = entries
+            .iter()
+            .filter_map(|entry| entry.event.summary.clone())
+            .collect();
+        assert_eq!(summaries, vec!["Healthy"]);
+    }
+
+    /// Level 3, at the CLI seam: a task sitting in the same calendar must not
+    /// cost the agenda its events. Tasks are narrowed out of the rendered
+    /// agenda until L7-01 gives them an anchor; that must stay a narrowing of
+    /// the *view*, never an abort.
+    #[test]
+    fn a_task_in_the_calendar_does_not_blank_the_agenda() {
+        const VTODO_ICS: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VTODO\r\nUID:assignment-123@u-crawler\r\nDUE:20260815T235900Z\r\n\
+SUMMARY:Assignment 3\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cal = calendar(tmp.path(), "deadlines");
+        let start = EventTime::Date(NaiveDate::from_ymd_opt(2026, 8, 14).unwrap());
+        cal.create_event(Event::new("Healthy", start)).unwrap();
+        std::fs::write(cal.path().join("assignment-123.ics"), VTODO_ICS).unwrap();
+
+        let from = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+        let to = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+        let entries = collect_entries(vec![cal], from, to);
 
         let summaries: Vec<_> = entries
             .iter()

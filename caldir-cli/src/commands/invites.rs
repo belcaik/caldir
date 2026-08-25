@@ -1,5 +1,5 @@
 use anyhow::Result;
-use caldir_core::{Caldir, DateBounds, ParticipationStatus};
+use caldir_core::{Caldir, CalendarItem, DateBounds, ParticipationStatus};
 use chrono::{Duration, Utc};
 use owo_colors::OwoColorize;
 
@@ -35,10 +35,17 @@ pub fn run(caldir: &Caldir, calendar: Option<String>, all: bool) -> Result<()> {
             continue;
         };
 
-        let events = cal.expanded_events_in_range(from, to)?;
+        let items = cal.expanded_events_in_range(from, to)?;
         let cal_slug = cal.slug().unwrap_or("(Unknown calendar)").to_string();
 
-        for event in events {
+        for item in items {
+            // An RSVP is meaningless on a task (R81): a VTODO carries no
+            // invite to answer, so this narrowing is permanent, not deferred.
+            // Display-only path; no deletion is inferred from it.
+            let CalendarItem::Event(event) = item else {
+                continue;
+            };
+
             if !is_visible(&event) {
                 continue;
             }
