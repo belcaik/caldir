@@ -546,3 +546,26 @@ CalDAV/iCloud calendar, and a failure on it propagates. Radicale accepts
 a bare VTODO query (probe Q-B), but a server that REJECTS VTODO queries
 would turn a previously-working VEVENT sync into an error.
 Decide fail-loud vs tolerate, alongside L5-01/L5-05.
+
+## ⚠ OPEN THREAD, HIGHEST PRIORITY FOR L7 — the belt is still silent
+L3-04 landed `CalendarDiff::suppressed_task_deletes()` but NOTHING READS
+IT. The accessor is public and marked TODO(L7). Until the CLI renders
+it, task-delete suppression is silent to the user in practice - which is
+EXACTLY the criticism PR-1's adversarial reviewer levelled at the
+delete-suppression guard (MAJOR-2: "invisible, permanent,
+self-perpetuating, and the discovery path is a command the user has no
+reason to run").
+R49's "and warn" is only HALF discharged. L7 MUST consume this signal.
+If L7 ships without it, the feature reintroduces the same defect the
+review already flagged once.
+ALSO for L7: Connection::diff returns one CalendarDiff PER CALENDAR.
+Decide warn-per-calendar vs warn-once BEFORE render time.
+
+## L3 COMPLETE
+L3-01..L3-04 landed. 786 passed / 0 failed, all three zones.
+Cumulative L1-L3 mutation testing: 184 applied, 173 caught, 11 locks
+found unable to fail and REPAIRED rather than banked, residuals reported
+honestly rather than padded into clean sweeps.
+Notable: L3-03's M14 would have been SILENT WIRE CORRUPTION - a task
+pushed to a remote as a synthesized meeting - and nothing asserted the
+abort until the lock was repaired.
