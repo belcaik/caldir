@@ -643,3 +643,31 @@ and restored byte-for-byte (verified by diff -rq plus the full suite),
 but the near-miss was only possible because a completed ticket's work sat
 uncommitted while the next ticket ran. Commit immediately on every
 ticket completion.
+
+## RULING — T-48's name: the truthful name wins, the spec citation is STALE
+L4-03 refused the ticket's test name `a_task_is_pushed_as_a_vtodo_and_
+never_as_a_vevent` because it asserts a FALSEHOOD. Nothing is pushed as
+a VTODO; nothing is pushed at all. R70 keeps the outbound field `Event`,
+so a task cannot ride `CreateEvent` by construction, and both the
+ticket's own R56 section and the cut-ADR-07 ruling say the push FAILS
+with `expected 1 event(s) in ICS, found 0`.
+RULING: correct refusal. The test on disk is
+`connection::tests::a_task_push_aborts_and_never_reaches_the_provider_as_a_vevent`
+and that name STANDS.
+spec §18 and reproduction.md still cite the old name. They are now
+STALE. L8-01 MUST update both citations - recorded here the same way
+T-26's reassignment was, so the doc set carries the refusal rather than
+silently disagreeing with the code.
+
+## OPEN — a pure task-only outgoing Delete has no lock
+`[Delete(todo)]` aborts inside `into_event()` before `apply_change` can
+return, so the `unreachable!("apply_change returns None for Delete")`
+invariant holds by luck of ordering, not by assertion. Cheap to add.
+L6-01 territory.
+
+## NOTE for L8's doc pass
+`mock_provider::reply_raw_data` (added by L4-03) is now the only
+raw-wire escape hatch in the crate - the only way to stub a wire shape
+no typed response can express, i.e. a provider NEWER than this core.
+Document it in context/testing.md alongside the MockTransport FIFO and
+last-request traps.
