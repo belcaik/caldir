@@ -8,6 +8,9 @@ use crate::{CalendarEvent, DateRange, RemoteEvent};
 pub struct CalendarDiff {
     outgoing: Vec<EventChange>,
     incoming: Vec<EventChange>,
+    /// Whether R49's version-skew belt actually suppressed a task delete on
+    /// this run. See [`CalendarDiff::suppressed_task_deletes`].
+    suppressed_task_deletes: bool,
 }
 
 impl CalendarDiff {
@@ -60,13 +63,16 @@ impl CalendarDiff {
         // not a delete. Scoped to *tasks*, so event deletes are untouched
         // (R1, R2), and to the *all-tasks-absent* case, so a task missing from
         // a task-carrying response is still a real delete (R99).
-        // TODO(L3-04): the accompanying warning (R49, R50) still has to land.
+        //
+        // Decided once, here, from the inputs: re-deriving it per branch is
+        // how the two suppression sites drift apart under a later edit.
         let remote_reports_tasks = remote_events
             .iter()
             .any(|e| matches!(e.item(), CalendarItem::Todo(_)));
 
         let mut outgoing = Vec::new();
         let mut incoming = Vec::new();
+        let mut suppressed_task_deletes = false;
 
         for local_event in &local_events {
             let item = local_event.item();
@@ -135,6 +141,12 @@ impl CalendarDiff {
                 let suppressed_by_version_skew =
                     matches!(item, CalendarItem::Todo(_)) && !remote_reports_tasks;
 
+                // Recorded only where a delete was actually withheld, so the
+                // signal means "the belt cost you something", not merely "the
+                // response held no tasks" — which is the ordinary state of
+                // every task-free calendar (R50).
+                suppressed_task_deletes |= suppressed_by_version_skew;
+
                 if deletes == Deletes::Allowed && !suppressed_by_version_skew {
                     incoming.push(EventChange::Delete(item.clone()));
                 }
@@ -175,7 +187,26 @@ impl CalendarDiff {
             }
         }
 
-        CalendarDiff { outgoing, incoming }
+        CalendarDiff {
+            outgoing,
+            incoming,
+            suppressed_task_deletes,
+        }
+    }
+
+    /// Whether R49's version-skew belt withheld at least one task delete.
+    ///
+    /// A remote response carrying **zero** tasks is indistinguishable from a
+    /// pre-VTODO provider or a server that cannot answer a VTODO query, so
+    /// core refuses to read it as "every task was deleted" and keeps the
+    /// files. R50 names the price: a genuine remote deletion of *every* task
+    /// goes unnoticed until something reports a task again.
+    ///
+    /// The suppression must not be silent — a self-perpetuating belt nobody
+    /// is told about is the failure mode this accessor exists to prevent.
+    /// TODO(L7): render it; the wording is deferred by R50, the signal is not.
+    pub fn suppressed_task_deletes(&self) -> bool {
+        self.suppressed_task_deletes
     }
 
     pub fn incoming(&self) -> &[EventChange] {
@@ -218,7 +249,11 @@ impl CalendarDiff {
     }
 
     pub(crate) fn from_changes(outgoing: Vec<EventChange>, incoming: Vec<EventChange>) -> Self {
-        Self { outgoing, incoming }
+        Self {
+            outgoing,
+            incoming,
+            suppressed_task_deletes: false,
+        }
     }
 }
 
@@ -1457,6 +1492,141 @@ mod tests {
             "R99: a task missing from a task-carrying remote list is deleted"
         );
         assert_eq!(diff.outgoing, vec![]);
+    }
+
+    /// T-30 (R49, R50, R72). The version-skew belt. A pre-VTODO provider
+    /// still filters on VEVENT, so its response carries events but **no
+    /// tasks at all**. That total absence is skew, not a delete.
+    ///
+    /// The remote list here is deliberately **non-empty** — it carries an
+    /// event — so a belt keyed on "the remote response is empty" instead of
+    /// on the *task* count would not fire and the tasks would be deleted.
+    ///
+    /// Pair-read with `T-27`: a remote list that *does* carry a task still
+    /// deletes the task missing from it. The two are each other's boundary.
+    #[test]
+    fn a_task_less_remote_response_suppresses_all_task_deletes() {
+        let (_tmp, calendar) = test_calendar();
+
+        // Two tracked tasks, neither mentioned by the remote.
+        let first_task = Todo::new("Hand in the assignment");
+        let second_task = Todo::new("Renew the parking permit");
+        let local_first = CalendarEvent::create(&calendar, first_task.clone()).unwrap();
+        let local_second = CalendarEvent::create(&calendar, second_task.clone()).unwrap();
+
+        // One tracked event, also unmentioned: its delete is real.
+        let deleted_event = test_event();
+        let local_event = calendar.create_event(deleted_event.clone()).unwrap();
+
+        // The response is not empty — it just holds no tasks.
+        let remote_event = Event::new("Still on the server", test_event_time());
+
+        let mut sync_bases = SyncBases::new();
+        sync_bases.insert_event_base(
+            CalendarItem::from(first_task.clone()).instance_id(),
+            first_task,
+        );
+        sync_bases.insert_event_base(
+            CalendarItem::from(second_task.clone()).instance_id(),
+            second_task,
+        );
+        sync_bases.insert_event_base(deleted_event.event_instance_id(), deleted_event.clone());
+
+        let diff = CalendarDiff::compute(
+            vec![local_first, local_second, local_event],
+            vec![RemoteEvent::new(remote_event.clone())],
+            &sync_bases,
+            &DateRange::default(),
+        );
+
+        // 1. The belt: not one task delete, in either direction.
+        let task_deletes: Vec<_> = diff
+            .incoming
+            .iter()
+            .chain(diff.outgoing.iter())
+            .filter(|change| matches!(change, EventChange::Delete(CalendarItem::Todo(_))))
+            .collect();
+        assert_eq!(
+            task_deletes,
+            Vec::<&EventChange>::new(),
+            "R49: a task-less remote response deletes no task"
+        );
+
+        // 2. Task-scoped, never a blanket suppression: the event's own delete
+        // still fires, and the remote's create still flows.
+        assert_eq!(
+            diff.incoming,
+            vec![
+                EventChange::Delete(deleted_event.into()),
+                EventChange::Create(remote_event.into()),
+            ],
+            "R1/R2: VEVENT delete detection is untouched by the belt"
+        );
+        assert_eq!(diff.outgoing, vec![]);
+
+        // R49/R50: the suppression must be observable, not silent. Wording is
+        // deferred to the CLI surface; the signal is not.
+        assert!(
+            diff.suppressed_task_deletes(),
+            "R49: the belt reports that it fired"
+        );
+    }
+
+    /// The belt's off-polarity, in both of AC 1's halves. If
+    /// `suppressed_task_deletes` could not be **false**, T-30's signal would
+    /// be a constant and the CLI would warn on every single sync — including
+    /// the overwhelmingly common one where the calendar simply has no tasks.
+    #[test]
+    fn the_version_skew_signal_is_off_unless_a_task_delete_was_actually_withheld() {
+        // Half 1: a calendar of events only. The remote reports no tasks
+        // because there are none — that is not skew.
+        let (_events_tmp, events_only) = test_calendar();
+        let tracked_event = test_event();
+        let local_event = events_only.create_event(tracked_event.clone()).unwrap();
+
+        let mut event_bases = SyncBases::new();
+        event_bases.insert_event_base(tracked_event.event_instance_id(), tracked_event.clone());
+
+        let no_tasks_at_all = CalendarDiff::compute(
+            vec![local_event],
+            vec![],
+            &event_bases,
+            &DateRange::default(),
+        );
+
+        assert!(
+            !no_tasks_at_all.suppressed_task_deletes(),
+            "R49: no local task with a known base means nothing was withheld"
+        );
+        assert_eq!(
+            no_tasks_at_all.incoming,
+            vec![EventChange::Delete(tracked_event.into())],
+            "R1/R2: the event delete is unaffected"
+        );
+
+        // Half 2: the remote does carry a task, so the belt is off outright.
+        let (_tmp, calendar) = test_calendar();
+
+        let gone = Todo::new("Deleted on the server");
+        let survivor = Todo::new("Still on the server");
+        let local_gone = CalendarEvent::create(&calendar, gone.clone()).unwrap();
+        let local_survivor = CalendarEvent::create(&calendar, survivor.clone()).unwrap();
+
+        let mut sync_bases = SyncBases::new();
+        sync_bases.insert_event_base(CalendarItem::from(gone.clone()).instance_id(), gone.clone());
+
+        let diff = CalendarDiff::compute(
+            vec![local_gone, local_survivor],
+            vec![RemoteEvent::new(survivor)],
+            &sync_bases,
+            &DateRange::default(),
+        );
+
+        assert!(
+            !diff.suppressed_task_deletes(),
+            "R49: the belt is off when the remote reports tasks"
+        );
+        assert_eq!(diff.incoming, vec![EventChange::Delete(gone.into())]);
     }
 
     /// T-28 (R42). Both skip-rules key on `CANCELLED` only. If `COMPLETED`
