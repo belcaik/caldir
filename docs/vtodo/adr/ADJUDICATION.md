@@ -829,3 +829,31 @@ L5-05's M4b: a CLOCK-DERIVED href still produced a correct-looking
 outcome, because the REPORT fallback rescues it. T-58 now has an outcome
 assertion on the href itself, but a dedicated unit lock on event_url
 being purely UID-derived would be stronger.
+
+## DOC-SET CORRECTION — L6-01's RED test 1 / AC 6 encode an unreachable path
+They specify driving the test from a provider ERROR ENVELOPE
+({"status":"error","error":"expected 1 event(s) in ICS, found 0"}) via a
+new MockProvider::reply_provider_error. Unreachable under R70: core
+aborts in into_event() BEFORE any RPC is serialized, so an old provider
+never receives the BEGIN:VTODO payload and never emits that envelope.
+Injecting it would test a fabricated path AND assert a request reached
+the wire, contradicting the locked !mock.received_a_request().
+Correct refusal. L8-01 fixes the ticket text, as it did for T-48's name
+and the 409 rename trigger.
+
+## L8 DOC DEBT — the website has no task documentation at all
+Before L6-01, `grep -rn "VTODO\|task" website/src/content/docs/`
+returned NOTHING. The Google/Outlook notes it added are now the site's
+ONLY mention of tasks, which reads oddly. L8's doc pass must introduce
+tasks properly and state the push limitation ONCE, globally (R69),
+rather than leaving it implied by two provider footnotes.
+
+## OPEN, unrelated to tasks — ProviderError::Provider is untested
+The provider error envelope is genuinely reachable in production and has
+no test anywhere in core. Found by L6-01 while establishing that its own
+AC 6 path was unreachable.
+
+## L6 COMPLETE
+839 passed / 0 failed, all three zones, plus 6 live Radicale gates.
+Cumulative L1-L6: 300 mutations, 278 caught, 16 locks found unable to
+fail and REPAIRED, 6 acceptance criteria REFUSED with verification.
