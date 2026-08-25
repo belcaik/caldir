@@ -1526,4 +1526,48 @@ END:VCALENDAR
         retitled.summary = Some("Something else".to_string());
         assert_ne!(base, retitled, "a changed summary is a content change");
     }
+
+    // --- R19: an unsupported component is a hard error that names it ---
+
+    #[test]
+    fn an_unsupported_component_errors_and_names_it() {
+        use crate::item::CalendarItem;
+
+        let vjournal = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+BEGIN:VTODO\r\n\
+UID:task@caldir\r\n\
+SUMMARY:A task\r\n\
+END:VTODO\r\n\
+BEGIN:VJOURNAL\r\n\
+UID:journal@caldir\r\n\
+SUMMARY:A journal entry\r\n\
+END:VJOURNAL\r\n\
+END:VCALENDAR\r\n";
+
+        let err = CalendarItem::from_ics_str(vjournal)
+            .expect_err("a VJOURNAL sibling must be a hard error, never a silent drop");
+        assert!(
+            err.to_string().contains("VJOURNAL"),
+            "error must name the component, got: {err}"
+        );
+
+        let x_foo = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+BEGIN:VEVENT\r\n\
+UID:event@caldir\r\n\
+DTSTART:20260301T100000Z\r\n\
+END:VEVENT\r\n\
+BEGIN:X-FOO\r\n\
+UID:foo@caldir\r\n\
+END:X-FOO\r\n\
+END:VCALENDAR\r\n";
+
+        let err = CalendarItem::from_ics_str(x_foo)
+            .expect_err("an X-FOO sibling must be a hard error, never a silent drop");
+        assert!(
+            err.to_string().contains("X-FOO"),
+            "error must name the component, got: {err}"
+        );
+    }
 }

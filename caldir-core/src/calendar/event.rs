@@ -570,4 +570,147 @@ mod tests {
             Some("Assignment 3 - submission window")
         );
     }
+
+    // --- R32/R75: the eight-row arity table, against the item loader ---
+
+    const ONE_VEVENT: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VEVENT\r\nUID:one@caldir\r\nDTSTART:20260301T100000Z\r\nSUMMARY:One\r\n\
+END:VEVENT\r\nEND:VCALENDAR\r\n";
+
+    const ONE_VTODO: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VTODO\r\nUID:one-task@caldir\r\nSUMMARY:One task\r\n\
+END:VTODO\r\nEND:VCALENDAR\r\n";
+
+    const TWO_VEVENTS: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VEVENT\r\nUID:a@caldir\r\nDTSTART:20260301T100000Z\r\nEND:VEVENT\r\n\
+BEGIN:VEVENT\r\nUID:b@caldir\r\nDTSTART:20260302T100000Z\r\nEND:VEVENT\r\n\
+END:VCALENDAR\r\n";
+
+    const TWO_VTODOS: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VTODO\r\nUID:a@caldir\r\nEND:VTODO\r\n\
+BEGIN:VTODO\r\nUID:b@caldir\r\nEND:VTODO\r\n\
+END:VCALENDAR\r\n";
+
+    const VEVENT_AND_VTODO: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VEVENT\r\nUID:a@caldir\r\nDTSTART:20260301T100000Z\r\nEND:VEVENT\r\n\
+BEGIN:VTODO\r\nUID:b@caldir\r\nEND:VTODO\r\n\
+END:VCALENDAR\r\n";
+
+    const VTODO_AND_VJOURNAL: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VTODO\r\nUID:a@caldir\r\nEND:VTODO\r\n\
+BEGIN:VJOURNAL\r\nUID:b@caldir\r\nEND:VJOURNAL\r\n\
+END:VCALENDAR\r\n";
+
+    const VEVENT_AND_VTIMEZONE: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VTIMEZONE\r\nTZID:Europe/Stockholm\r\n\
+BEGIN:STANDARD\r\nDTSTART:19701025T030000\r\nTZOFFSETFROM:+0200\r\n\
+TZOFFSETTO:+0100\r\nTZNAME:CET\r\nEND:STANDARD\r\nEND:VTIMEZONE\r\n\
+BEGIN:VEVENT\r\nUID:zoned@caldir\r\nDTSTART;TZID=Europe/Stockholm:20260615T100000\r\n\
+SUMMARY:Zoned\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+    #[test]
+    fn arity_table_all_eight_rows() {
+        use crate::CalendarItem;
+        use crate::test_utils::{EMPTY_VCALENDAR_ICS, write_ics};
+
+        let (_tmp, calendar) = test_calendar();
+        let dir = calendar.path();
+
+        let load = |name: &str, ics: &str| CalendarItem::load(write_ics(dir, name, ics));
+
+        // Row 1 — 1 VEVENT: loads as an event.
+        assert!(matches!(
+            load("one-vevent.ics", ONE_VEVENT),
+            Ok(CalendarItem::Event(ref event)) if event.uid.as_str() == "one@caldir"
+        ));
+
+        // Row 2 — 1 VTODO: loads as a task.
+        assert!(matches!(
+            load("one-vtodo.ics", ONE_VTODO),
+            Ok(CalendarItem::Todo(ref todo)) if todo.uid.as_str() == "one-task@caldir"
+        ));
+
+        // Row 3 — 0 components: "none", distinguishable from "too many".
+        let err = load("empty.ics", EMPTY_VCALENDAR_ICS).unwrap_err();
+        assert!(
+            matches!(err, CalendarEventError::NoSupportedComponent { ref found, .. } if found == "nothing"),
+            "expected NoSupportedComponent {{ found: \"nothing\" }}, got {err:?}"
+        );
+        assert!(
+            err.to_string().starts_with("no VEVENT or VTODO in ")
+                && err.to_string().ends_with(" (found: nothing)"),
+            "R75 wording, got: {err}"
+        );
+
+        // Row 4 — 2 VEVENTs: too many.
+        let err = load("two-vevents.ics", TWO_VEVENTS).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CalendarEventError::ExpectedSingleComponent { found: 2, .. }
+            ),
+            "expected ExpectedSingleComponent {{ found: 2 }}, got {err:?}"
+        );
+        assert!(
+            err.to_string()
+                .starts_with("expected exactly one VEVENT or VTODO in ")
+                && err
+                    .to_string()
+                    .ends_with(", found 2; split it into one file per item"),
+            "R75 wording, got: {err}"
+        );
+
+        // Row 5 — 2 VTODOs: too many (today this reports found: 0).
+        assert!(
+            matches!(
+                load("two-vtodos.ics", TWO_VTODOS),
+                Err(CalendarEventError::ExpectedSingleComponent { found: 2, .. })
+            ),
+            "two VTODOs must count as two"
+        );
+
+        // Row 6 — 1 VEVENT + 1 VTODO: too many. Today this loads and silently
+        // drops the VTODO, which a rewrite then deletes (R101).
+        assert!(
+            matches!(
+                load("mixed.ics", VEVENT_AND_VTODO),
+                Err(CalendarEventError::ExpectedSingleComponent { found: 2, .. })
+            ),
+            "a mixed file must error on the count, never drop the VTODO"
+        );
+
+        // Row 7 — 1 VTODO + VJOURNAL: errors naming the unsupported component.
+        let err = load("journal.ics", VTODO_AND_VJOURNAL).unwrap_err();
+        assert!(
+            err.to_string().contains("VJOURNAL"),
+            "the error must name the unsupported component, got: {err}"
+        );
+
+        // Row 8 — 1 VEVENT + VTIMEZONE: unchanged; VTIMEZONE is not counted
+        // and is not unsupported.
+        assert!(matches!(
+            load("zoned.ics", VEVENT_AND_VTIMEZONE),
+            Ok(CalendarItem::Event(ref event)) if event.uid.as_str() == "zoned@caldir"
+        ));
+    }
+
+    /// A VTIMEZONE-only file has no supported component, but VTIMEZONE is not
+    /// an *unsupported* one — the "none" error names what was actually there.
+    #[test]
+    fn a_vtimezone_only_file_is_none_not_unsupported() {
+        use crate::CalendarItem;
+        use crate::test_utils::write_ics;
+
+        let (_tmp, calendar) = test_calendar();
+        let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VTIMEZONE\r\nTZID:Europe/Stockholm\r\nEND:VTIMEZONE\r\nEND:VCALENDAR\r\n";
+        let path = write_ics(calendar.path(), "tz-only.ics", ics);
+
+        let err = CalendarItem::load(path).unwrap_err();
+
+        assert!(
+            matches!(err, CalendarEventError::NoSupportedComponent { ref found, .. } if found == "VTIMEZONE"),
+            "expected NoSupportedComponent {{ found: \"VTIMEZONE\" }}, got {err:?}"
+        );
+    }
 }

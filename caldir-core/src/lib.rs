@@ -3,6 +3,7 @@ mod calendar;
 mod connection;
 mod diff;
 mod event;
+mod item;
 pub mod provider;
 mod remote;
 pub mod rpc;
@@ -22,6 +23,7 @@ pub use event::{
     Organizer, ParticipationStatus, Recurrence, RecurrenceId, Reminder, Status, Visibility,
     XProperty, expand_in_range, tz_normalize,
 };
+pub use item::CalendarItem;
 pub use provider::{Provider, ProviderRegistry, ProviderSlug};
 pub use remote::{Remote, RemoteConfig, RemoteConfigParams, RemoteEvent};
 pub use todo::{Todo, TodoStatus};

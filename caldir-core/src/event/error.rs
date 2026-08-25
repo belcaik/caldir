@@ -11,6 +11,12 @@ pub enum EventError {
     #[error("expected {expected} event(s) in ICS, found {found}")]
     UnexpectedEventCount { expected: usize, found: usize },
 
+    #[error("expected {expected} supported component(s) in ICS, found {found}")]
+    UnexpectedComponentCount { expected: usize, found: usize },
+
+    #[error("unsupported component {0} in ICS; caldir supports VEVENT and VTODO only")]
+    UnsupportedComponent(String),
+
     #[error("event is missing a start time (DTSTART)")]
     MissingStart,
 

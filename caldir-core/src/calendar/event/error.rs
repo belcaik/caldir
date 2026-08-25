@@ -10,6 +10,15 @@ pub enum CalendarEventError {
     #[error("expected exactly one event in {path}, found {found}")]
     ExpectedSingleEvent { path: PathBuf, found: usize },
 
+    #[error(
+        "expected exactly one VEVENT or VTODO in {path}, found {found}; \
+         split it into one file per item"
+    )]
+    ExpectedSingleComponent { path: PathBuf, found: usize },
+
+    #[error("no VEVENT or VTODO in {path} (found: {found})")]
+    NoSupportedComponent { path: PathBuf, found: String },
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
