@@ -11,6 +11,10 @@ pub struct AgendaView {
     pub(crate) range_start: NaiveDate,
     pub(crate) range_end: NaiveDate,
     pub(crate) time_format: TimeFormat,
+    /// `--undated`: list the undated tasks in a trailing `No date` section
+    /// instead of counting them in the footer (ADR-10 D3). A **text-view**
+    /// concern only — `--json` always emits whatever the schema covers.
+    pub(crate) undated: bool,
 }
 
 pub struct AgendaEntry {
@@ -25,19 +29,37 @@ impl AgendaView {
         calendars: Vec<Calendar>,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
+        undated: bool,
     ) -> AnyhowResult<Self> {
-        let range_start = from.with_timezone(&chrono::Local).date_naive();
-        let range_end = to.with_timezone(&chrono::Local).date_naive();
-        let mut entries = collect_entries(calendars, from, to);
+        Ok(Self::assemble(
+            collect_entries(calendars, from, to),
+            from,
+            to,
+            caldir.config().time_format(),
+            undated,
+        ))
+    }
 
+    /// Everything `collect` does that does not need a `Caldir`: the local
+    /// window, the total order, and the view's own flags. Split out so the
+    /// assembly is reachable from a test — `Caldir`'s test constructor is
+    /// crate-private to `caldir-core`, so `collect` itself is not.
+    fn assemble(
+        mut entries: Vec<AgendaEntry>,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        time_format: TimeFormat,
+        undated: bool,
+    ) -> Self {
         sort_entries(&mut entries);
 
-        Ok(Self {
-            time_format: caldir.config().time_format(),
+        Self {
+            time_format,
             entries,
-            range_start,
-            range_end,
-        })
+            range_start: from.with_timezone(&chrono::Local).date_naive(),
+            range_end: to.with_timezone(&chrono::Local).date_naive(),
+            undated,
+        }
     }
 }
 
@@ -519,6 +541,73 @@ SUMMARY:Draft Q3 report\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
             vec!["Standup", "Someday: rewrite installer"]
         );
         assert_eq!(anchor(&entries[1].item), None);
+    }
+
+    /// AC 7: the `undated` flag has to survive assembly — a view built with it
+    /// set lists its undated tasks, one built without it counts them. The flag
+    /// being dropped on the floor here would look exactly like the feature
+    /// working in every renderer test, because those build the view by hand.
+    ///
+    /// Also assembly's other two jobs, neither of which had a test: the local
+    /// window (which decides whether a dated task is in range at all) and the
+    /// sort. Midday UTC on two different days, so the two window dates differ
+    /// — and are those two calendar days — in each of the three CI zones.
+    #[test]
+    fn assemble_sorts_and_carries_the_window_and_the_undated_flag() {
+        use crate::output::TextRender;
+
+        let from = Utc.with_ymd_and_hms(2026, 8, 14, 12, 0, 0).unwrap();
+        let to = Utc.with_ymd_and_hms(2026, 8, 16, 12, 0, 0).unwrap();
+        let timed = |day, hour| {
+            EventTime::DateTimeFloating(
+                NaiveDate::from_ymd_opt(2026, 8, day)
+                    .unwrap()
+                    .and_hms_opt(hour, 0, 0)
+                    .unwrap(),
+            )
+        };
+        let build = |undated| {
+            AgendaView::assemble(
+                // Deliberately out of order: assembly has to sort.
+                vec![
+                    entry(Event::new("Retro", timed(16, 9))),
+                    todo_entry(Todo::new("Someday: rewrite installer")),
+                    entry(Event::new("Standup", timed(14, 9))),
+                ],
+                from,
+                to,
+                TimeFormat::H24,
+                undated,
+            )
+        };
+
+        let view = build(false);
+        assert_eq!(
+            view.entries
+                .iter()
+                .filter_map(|e| e.item.summary())
+                .collect::<Vec<_>>(),
+            vec!["Standup", "Retro", "Someday: rewrite installer"]
+        );
+        assert_eq!(
+            view.range_start,
+            NaiveDate::from_ymd_opt(2026, 8, 14).unwrap()
+        );
+        assert_eq!(
+            view.range_end,
+            NaiveDate::from_ymd_opt(2026, 8, 16).unwrap()
+        );
+        assert!(
+            view.to_text()
+                .ends_with("+ 1 undated task (caldir events --undated)\u{1b}[0m"),
+            "{:?}",
+            view.to_text()
+        );
+        assert!(
+            build(true).to_text().contains("Someday: rewrite installer"),
+            "{:?}",
+            build(true).to_text()
+        );
     }
 
     /// The `Event` arm of `anchor` is the event's own `start`. That identity is

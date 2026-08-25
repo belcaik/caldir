@@ -314,6 +314,7 @@ mod tests {
 
     fn view(entries: Vec<AgendaEntry>) -> AgendaView {
         AgendaView {
+            undated: false,
             time_format: TimeFormat::H24,
             entries,
             range_start: date(2026, 8, 14),

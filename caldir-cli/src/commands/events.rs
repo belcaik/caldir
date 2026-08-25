@@ -12,6 +12,7 @@ pub fn run(
     calendar: Option<String>,
     from: Option<String>,
     to: Option<String>,
+    undated: bool,
 ) -> Result<AgendaView> {
     require_calendars(caldir)?;
 
@@ -25,7 +26,7 @@ pub fn run(
         to.as_deref(),
     )?;
 
-    AgendaView::collect(caldir, calendars, from, to)
+    AgendaView::collect(caldir, calendars, from, to, undated)
 }
 
 fn resolve_range<Tz: TimeZone>(
