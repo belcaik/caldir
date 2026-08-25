@@ -314,3 +314,37 @@ Branch `pr1-graceful-degradation`, 2 commits off main:
 695 passed / 0 failed. clippy -D warnings clean. fmt clean.
 Zero VTODO bytes. Description at docs/vtodo/PR1-DESCRIPTION.md.
 Ready to open upstream.
+
+## RULING — filename for a RECURRING TASK INSTANCE (raised by L1-07)
+R34's filename table has rows for: recurring task, dated task, undated
+task. It has NO row for a recurring task INSTANCE (an override:
+`recurrence_id` is Some, `recurrence` is None). The spec is silent and
+L1-07 correctly refused to invent one.
+
+RULING: follow the EVENT convention exactly, which is already the
+implemented behaviour — so no code change is needed.
+`Event::base_slug` keys the `_recurring__` prefix on `recurrence.is_some()`,
+NOT on `recurrence_id`. An event override therefore gets the DATED form,
+named by its own instance time. Tasks mirror this: a task override falls
+into the dated row (`_task__{time_slug}__{summary}`), or the undated row
+if it has neither DUE nor DTSTART.
+Rationale: the `_recurring__` prefix marks "this file is the MASTER of a
+series". An override is not a master; it is one dated occurrence, and
+naming it by its instance time is what lets a human find it. Diverging
+from the event convention here would also break the symmetry L1-08's
+control locks depend on.
+This is R34's missing row; L8-01 MUST add it to specs/caldir.md.
+
+## CARRY-FORWARD from L1-07 (own ticket, before or during L2-02/L2-06)
+Slug-collision surface for UNDATED tasks. `write_best_event_file`
+disambiguates with a `-{suffix}`. Two undated tasks sharing a summary
+collide on `_task__{summary}.ics` far more readily than events ever do,
+because an event always carries a date or the `_recurring__` prefix.
+The suffix path presumably handles it, but nothing proves it for the
+`_task__` shape. Needs an explicit test when the writer becomes
+item-aware.
+
+## NOTE — stale baselines, continued
+The pre-L1-07 tree measured 720/5, not the 699 the earlier note stops at.
+Counts move as concurrent agents land tests. IMPLEMENTERS: measure the
+tree yourself and track DELTAS, never absolutes from a ticket AC.

@@ -9,7 +9,7 @@ mod occurrences;
 mod organizer;
 mod recurrence;
 mod reminder;
-mod slugify;
+pub(crate) mod slugify;
 mod status;
 mod time;
 mod to_icalendar;
@@ -1179,5 +1179,351 @@ END:VCALENDAR
                 found: 0
             })
         ));
+    }
+
+    // --- VEVENT no-regression control lock (T-5, R2/R45/R104, C2) ---
+
+    /// One corpus entry: the bytes on disk, the bytes caldir must write back,
+    /// and the answers the two range predicates must keep giving.
+    struct VeventControlCase {
+        name: &'static str,
+        /// The document as it exists on disk.
+        input: String,
+        /// The exact bytes `to_ics_string` must emit for it (DTSTAMP aside).
+        expected_ics: String,
+        /// `(from, to, expected)` for `occurs_in_range`.
+        occurs_probes: Vec<(DateTime<Utc>, DateTime<Utc>, bool)>,
+        /// `(from, to, expected)` for `has_occurrence_in_range`.
+        occurrence_probes: Vec<(DateTime<Utc>, DateTime<Utc>, bool)>,
+    }
+
+    fn crlf(ics: &str) -> String {
+        ics.replace('\n', "\r\n")
+    }
+
+    fn utc(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(y, m, d, h, min, 0).unwrap()
+    }
+
+    /// Local midnight, as an instant. All-day events anchor to the system zone
+    /// (`EventTime::to_utc` goes through `chrono::Local`), so the edges of an
+    /// all-day event's range are only sharp when expressed this way — which is
+    /// what makes this case meaningful in all three CI zones (R106).
+    fn local_midnight(y: i32, m: u32, d: u32) -> DateTime<Utc> {
+        chrono::Local
+            .with_ymd_and_hms(y, m, d, 0, 0, 0)
+            .single()
+            .expect("local midnight should be unambiguous on these dates")
+            .with_timezone(&Utc)
+    }
+
+    /// The canonical form of `VEVENT_CONTROL_ICS`: caldir rewrites the
+    /// VCALENDAR headers (its own PRODID, no CALSCALE) but must not touch
+    /// anything inside the VEVENT.
+    const VEVENT_CONTROL_CANONICAL_ICS: &str = "BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:CALDIR
+BEGIN:VEVENT
+DTSTAMP:20260801T090000Z
+DESCRIPTION:Submission window for assignment 3.
+DTEND:20260815T120000Z
+DTSTART:20260815T100000Z
+SUMMARY:Assignment 3 - submission window
+UID:window-123@u-crawler
+URL:https://example.edu/courses/cs101/assignments/123
+END:VEVENT
+END:VCALENDAR
+";
+
+    const ALL_DAY_ICS: &str = "BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:CALDIR
+BEGIN:VEVENT
+DTSTAMP:20260801T090000Z
+DTEND;VALUE=DATE:20260816
+DTSTART;VALUE=DATE:20260815
+SUMMARY:Study day
+UID:all-day-1@caldir
+END:VEVENT
+END:VCALENDAR
+";
+
+    const RECURRING_MASTER_ICS: &str = "BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:CALDIR
+BEGIN:VEVENT
+DTSTAMP:20260801T090000Z
+DTEND;TZID=Europe/Oslo:20260515T164500
+DTSTART;TZID=Europe/Oslo:20260515T160000
+RRULE:FREQ=WEEKLY;BYDAY=FR;UNTIL=20260605T140000Z
+SUMMARY:Friday retro
+UID:recurring-1@caldir
+EXDATE;TZID=Europe/Oslo:20260522T160000
+END:VEVENT
+END:VCALENDAR
+";
+
+    /// The fields `L1-02` moved out of `event.rs`: `x_properties` (compared
+    /// order-independently, parameters ignored) and `attachments` (compared by
+    /// URI alone). A corpus without them cannot see that regression.
+    const X_PROPS_AND_ATTACHMENT_ICS: &str = "BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:CALDIR
+BEGIN:VEVENT
+DTSTAMP:20260801T090000Z
+DTEND:20260515T144500Z
+DTSTART:20260515T140000Z
+SUMMARY:Design review
+UID:x-props-1@caldir
+X-ALT-DESC;FMTTYPE=text/html:<html>agenda</html>
+X-HOOLI-EVENT-ID:hooli-abc123
+ATTACH;FILENAME=agenda.pdf;FMTTYPE=application/pdf:https://drive.example.co
+ m/f/abc
+END:VEVENT
+END:VCALENDAR
+";
+
+    fn vevent_control_corpus() -> Vec<VeventControlCase> {
+        vec![
+            VeventControlCase {
+                name: "VEVENT_CONTROL_ICS",
+                input: crate::test_utils::VEVENT_CONTROL_ICS.to_string(),
+                expected_ics: crlf(VEVENT_CONTROL_CANONICAL_ICS),
+                occurs_probes: vec![
+                    // Range ending exactly at DTSTART does not overlap.
+                    (utc(2026, 8, 15, 8, 0), utc(2026, 8, 15, 10, 0), false),
+                    (utc(2026, 8, 15, 8, 0), utc(2026, 8, 15, 10, 1), true),
+                    (utc(2026, 8, 15, 10, 30), utc(2026, 8, 15, 11, 0), true),
+                    (utc(2026, 8, 15, 11, 59), utc(2026, 8, 15, 14, 0), true),
+                    // Range starting exactly at DTEND does not overlap.
+                    (utc(2026, 8, 15, 12, 0), utc(2026, 8, 15, 14, 0), false),
+                ],
+                occurrence_probes: vec![
+                    (utc(2026, 8, 15, 8, 0), utc(2026, 8, 15, 10, 0), false),
+                    (utc(2026, 8, 15, 8, 0), utc(2026, 8, 15, 10, 1), true),
+                    (utc(2026, 8, 15, 12, 0), utc(2026, 8, 15, 14, 0), false),
+                ],
+            },
+            VeventControlCase {
+                name: "all-day event",
+                input: crlf(ALL_DAY_ICS),
+                expected_ics: crlf(ALL_DAY_ICS),
+                occurs_probes: vec![
+                    (
+                        local_midnight(2026, 8, 14),
+                        local_midnight(2026, 8, 15),
+                        false,
+                    ),
+                    (
+                        local_midnight(2026, 8, 15),
+                        local_midnight(2026, 8, 16),
+                        true,
+                    ),
+                    (
+                        local_midnight(2026, 8, 16),
+                        local_midnight(2026, 8, 17),
+                        false,
+                    ),
+                    (local_midnight(2026, 8, 1), local_midnight(2026, 9, 1), true),
+                ],
+                occurrence_probes: vec![
+                    (
+                        local_midnight(2026, 8, 14),
+                        local_midnight(2026, 8, 15),
+                        false,
+                    ),
+                    (
+                        local_midnight(2026, 8, 15),
+                        local_midnight(2026, 8, 16),
+                        true,
+                    ),
+                    (
+                        local_midnight(2026, 8, 16),
+                        local_midnight(2026, 8, 17),
+                        false,
+                    ),
+                ],
+            },
+            VeventControlCase {
+                name: "recurring master",
+                input: crlf(RECURRING_MASTER_ICS),
+                expected_ics: crlf(RECURRING_MASTER_ICS),
+                // occurs_in_range looks at the master's own DTSTART/DTEND only:
+                // it deliberately does NOT expand the RRULE.
+                occurs_probes: vec![
+                    (utc(2026, 5, 15, 14, 0), utc(2026, 5, 15, 14, 45), true),
+                    (utc(2026, 5, 15, 14, 45), utc(2026, 5, 16, 0, 0), false),
+                    (utc(2026, 5, 29, 0, 0), utc(2026, 5, 30, 0, 0), false),
+                ],
+                // has_occurrence_in_range does expand it, and honours EXDATE
+                // and UNTIL.
+                occurrence_probes: vec![
+                    (utc(2026, 5, 15, 0, 0), utc(2026, 5, 16, 0, 0), true),
+                    // Excluded by EXDATE.
+                    (utc(2026, 5, 22, 0, 0), utc(2026, 5, 23, 0, 0), false),
+                    (utc(2026, 5, 29, 0, 0), utc(2026, 5, 30, 0, 0), true),
+                    // Past UNTIL.
+                    (utc(2026, 6, 19, 0, 0), utc(2026, 6, 26, 0, 0), false),
+                ],
+            },
+            VeventControlCase {
+                name: "x-properties and attachment",
+                input: crlf(X_PROPS_AND_ATTACHMENT_ICS),
+                expected_ics: crlf(X_PROPS_AND_ATTACHMENT_ICS),
+                occurs_probes: vec![
+                    (utc(2026, 5, 15, 13, 0), utc(2026, 5, 15, 14, 0), false),
+                    (utc(2026, 5, 15, 14, 0), utc(2026, 5, 15, 14, 45), true),
+                    (utc(2026, 5, 15, 14, 45), utc(2026, 5, 15, 15, 0), false),
+                ],
+                occurrence_probes: vec![
+                    (utc(2026, 5, 15, 13, 0), utc(2026, 5, 15, 14, 0), false),
+                    (utc(2026, 5, 15, 14, 0), utc(2026, 5, 15, 14, 45), true),
+                    (utc(2026, 5, 15, 14, 45), utc(2026, 5, 15, 15, 0), false),
+                ],
+            },
+        ]
+    }
+
+    /// T-5 (R2, R45, R104, C2). VTODO support must leave VEVENT behaviour
+    /// observably untouched. Each of the three properties below fails silently
+    /// and separately: equality drift changes sync *direction*, serialization
+    /// drift rewrites every user's files on the next write, and predicate drift
+    /// changes what gets deleted. So each is asserted on its own.
+    #[test]
+    fn vevent_control_round_trips_identically_after_vtodo_support() {
+        for case in vevent_control_corpus() {
+            let name = case.name;
+            let event = Event::parse_single_ics(&case.input);
+            let serialized = event.to_ics_string();
+            let reparsed = Event::parse_single_ics(&serialized);
+
+            // 1. Structural equality survives a full disk round trip (C2).
+            assert_eq!(event, reparsed, "{name}: structural equality drifted");
+
+            // 2. The bytes caldir writes back are the bytes it wrote before
+            //    (DTSTAMP is re-stamped on every serialize, R25).
+            assert_eq!(
+                strip_dtstamp(&case.expected_ics),
+                strip_dtstamp(&serialized),
+                "{name}: serialized bytes drifted"
+            );
+
+            // 3. Both range predicates still answer the same at the edges (R45).
+            for (from, to, expected) in case.occurs_probes {
+                assert_eq!(
+                    event.occurs_in_range(from, to),
+                    expected,
+                    "{name}: occurs_in_range({from}, {to})"
+                );
+            }
+
+            for (from, to, expected) in case.occurrence_probes {
+                assert_eq!(
+                    event.has_occurrence_in_range(from, to),
+                    expected,
+                    "{name}: has_occurrence_in_range({from}, {to})"
+                );
+            }
+        }
+    }
+
+    /// C2 companion lock: `Event`'s `==` answers "has the content changed?",
+    /// and that answer decides sync direction. `L1-02` moved the two custom
+    /// comparators out of this file, so pin what they mean here.
+    #[test]
+    fn event_equality_semantics_are_unchanged_after_vtodo_support() {
+        let base = Event::parse_single_ics(&crlf(X_PROPS_AND_ATTACHMENT_ICS));
+        assert_eq!(
+            base.x_properties.len(),
+            2,
+            "fixture must carry X- properties"
+        );
+        assert_eq!(
+            base.attachments.len(),
+            1,
+            "fixture must carry an attachment"
+        );
+        assert!(
+            base.x_properties.iter().any(|x| !x.params.is_empty()),
+            "fixture must carry an X- property with parameters"
+        );
+        assert!(
+            !base.attachments[0].params.is_empty(),
+            "fixture must carry an attachment with parameters"
+        );
+
+        // Sync bookkeeping, not content: ignored by ==.
+        let mut volatile = base.clone();
+        volatile.last_modified = Some(utc(2099, 1, 1, 0, 0));
+        volatile.sequence = base.sequence + 41;
+        assert_eq!(base, volatile, "last_modified/sequence must not affect ==");
+
+        // X- properties: order-independent, parameters ignored.
+        let mut reshuffled = base.clone();
+        reshuffled.x_properties.reverse();
+        for x in &mut reshuffled.x_properties {
+            x.params.clear();
+        }
+        assert_eq!(
+            base, reshuffled,
+            "x_properties order/params must not affect =="
+        );
+
+        // ...but a changed or dropped X- property IS a content change.
+        let mut changed_x = base.clone();
+        changed_x.x_properties[0].value = "drifted".to_string();
+        assert_ne!(
+            base, changed_x,
+            "a changed X- property value is a content change"
+        );
+
+        let mut dropped_x = base.clone();
+        dropped_x.x_properties.pop();
+        assert_ne!(base, dropped_x, "a dropped X- property is a content change");
+
+        // The other direction: a superset must not compare equal either.
+        let mut added_x = base.clone();
+        added_x
+            .x_properties
+            .push(XProperty::new("X-CALDIR-EXTRA", "1"));
+        assert_ne!(base, added_x, "an added X- property is a content change");
+
+        // Attachments: compared by URI alone, so volatile params don't churn.
+        let mut attachment_params = base.clone();
+        attachment_params.attachments[0].params.clear();
+        assert_eq!(
+            base, attachment_params,
+            "attachment params must not affect =="
+        );
+
+        // ...but a changed or dropped attachment IS a content change.
+        let mut changed_attachment = base.clone();
+        changed_attachment.attachments[0].uri = "https://drive.example.com/f/other".to_string();
+        assert_ne!(
+            base, changed_attachment,
+            "a changed attachment URI is a content change"
+        );
+
+        let mut dropped_attachment = base.clone();
+        dropped_attachment.attachments.pop();
+        assert_ne!(
+            base, dropped_attachment,
+            "a dropped attachment is a content change"
+        );
+
+        // The other direction: a superset must not compare equal either.
+        let mut added_attachment = base.clone();
+        added_attachment
+            .attachments
+            .push(Attachment::new("https://drive.example.com/f/extra"));
+        assert_ne!(
+            base, added_attachment,
+            "an added attachment is a content change"
+        );
+
+        // Guard against == degenerating into "always equal".
+        let mut retitled = base.clone();
+        retitled.summary = Some("Something else".to_string());
+        assert_ne!(base, retitled, "a changed summary is a content change");
     }
 }

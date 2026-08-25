@@ -1,4 +1,5 @@
 mod from_icalendar;
+mod slugify;
 mod status;
 mod to_icalendar;
 
@@ -463,5 +464,285 @@ END:VCALENDAR\r\n";
         assert_eq!(todo.completed, None);
         assert_eq!(todo.status, TodoStatus::NeedsAction);
         assert!(!todo.uid.as_str().is_empty());
+    }
+    // --- L1-05: the documented loss set, pinned ---
+    //
+    // These two tests assert CURRENT behaviour on the pinned crate
+    // (`icalendar = 0.17.10`). They exist so that a change in either
+    // direction — a property we start preserving, or one we start losing —
+    // fails loudly instead of drifting. Neither is a bug report: both losses
+    // are ruled OUT by ADJUDICATION C-2 and MUST NOT be "fixed" here.
+
+    /// R15's user guarantee, verbatim: the properties caldir promises to drop.
+    /// Spelled out as a literal list so `specs/caldir.md`'s amendment (L8-01)
+    /// can be diffed against it.
+    const R15_DROPPED_PROPERTIES: &[&str] = &[
+        "CATEGORIES",
+        "GEO",
+        "RELATED-TO",
+        "RESOURCES",
+        "COMMENT",
+        "CONTACT",
+    ];
+
+    /// The open half of R15 — *"any other IANA or vendor property caldir does
+    /// not model"*. `CLASS` is here rather than in the list above because
+    /// spec §6 records it as "MAY be inherited"; the ADJUDICATION ruling
+    /// ("CLASS is not a modelled field on Todo") settles that in practice it
+    /// is dropped on the first caldir write, and this is where that is pinned.
+    /// `DURATION` is spec §6's own OUT row; `REQUEST-STATUS` stands in for an
+    /// arbitrary unmodelled IANA property.
+    const OTHER_UNMODELLED_PROPERTIES: &[&str] = &["CLASS", "DURATION", "REQUEST-STATUS"];
+
+    /// Every modelled property (spec §6's IN set) that a serialized task must
+    /// still carry. `DTSTAMP` is here because it is emitted though not
+    /// modelled (R25); `VALARM` is a component, not a property, and is
+    /// asserted separately.
+    const MODELLED_PROPERTIES: &[&str] = &[
+        "UID",
+        "DTSTAMP",
+        "DTSTART",
+        "DUE",
+        "COMPLETED",
+        "SUMMARY",
+        "DESCRIPTION",
+        "LOCATION",
+        "URL",
+        "STATUS",
+        "PRIORITY",
+        "PERCENT-COMPLETE",
+        "CREATED",
+        "LAST-MODIFIED",
+        "SEQUENCE",
+        "RECURRENCE-ID",
+        "ORGANIZER",
+        "ATTENDEE",
+        "ATTACH",
+        "RRULE",
+        "EXDATE",
+        "RDATE",
+        "X-GOOGLE-ID",
+    ];
+
+    /// One instance of every modelled property, every OUT property, and an
+    /// `X-` property carrying a parameter.
+    const LOSS_SET_ICS: &str = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+PRODID:-//u_crawler//EN\r\n\
+BEGIN:VTODO\r\n\
+UID:loss@caldir\r\n\
+DTSTAMP:20260801T090000Z\r\n\
+DTSTART;TZID=Europe/Stockholm:20260810T090000\r\n\
+DUE;TZID=Europe/Stockholm:20260815T235900\r\n\
+COMPLETED:20260814T120000\r\n\
+SUMMARY:Everything\r\n\
+DESCRIPTION:All the rows\r\n\
+LOCATION:Room 3\r\n\
+URL:https://example.edu/a/1\r\n\
+STATUS:IN-PROCESS\r\n\
+PRIORITY:42\r\n\
+PERCENT-COMPLETE:25\r\n\
+CREATED:20260701T080000Z\r\n\
+LAST-MODIFIED:20260802T101500Z\r\n\
+SEQUENCE:4\r\n\
+RECURRENCE-ID:20260815T235900Z\r\n\
+ORGANIZER;CN=Boss:mailto:boss@example.com\r\n\
+ATTENDEE;CN=Ann:mailto:ann@example.com\r\n\
+ATTACH:https://example.com/a.pdf\r\n\
+RRULE:FREQ=WEEKLY\r\n\
+EXDATE:20260822T235900Z\r\n\
+RDATE:20260829T235900Z\r\n\
+X-GOOGLE-ID;X-SOURCE=api:abc123\r\n\
+CATEGORIES:WORK,URGENT\r\n\
+GEO:37.386013;-122.082932\r\n\
+RELATED-TO;RELTYPE=PARENT:parent@caldir\r\n\
+RESOURCES:PROJECTOR\r\n\
+COMMENT:A comment\r\n\
+CONTACT:Jim Dolittle\r\n\
+CLASS:PRIVATE\r\n\
+DURATION:PT2H\r\n\
+REQUEST-STATUS:2.0;Success\r\n\
+BEGIN:VALARM\r\n\
+ACTION:DISPLAY\r\n\
+DESCRIPTION:Reminder\r\n\
+TRIGGER;RELATED=START:-PT15M\r\n\
+END:VALARM\r\n\
+END:VTODO\r\n\
+END:VCALENDAR\r\n";
+
+    /// Property names on the VTODO itself, excluding the nested VALARM block.
+    /// Names, not bytes: `DTSTAMP` is re-stamped on every serialize (R25), so
+    /// a byte comparison is permanently red.
+    fn vtodo_property_names(ics: &str) -> std::collections::BTreeSet<String> {
+        let body = ics
+            .split_once("BEGIN:VTODO\r\n")
+            .expect("document holds a VTODO")
+            .1
+            .split_once("END:VTODO\r\n")
+            .expect("document holds a VTODO")
+            .0;
+
+        let mut names = std::collections::BTreeSet::new();
+        let mut in_valarm = false;
+        for line in body.lines() {
+            assert!(
+                !line.starts_with(' ') && !line.starts_with('\t'),
+                "folded line would defeat name extraction: {line}"
+            );
+            match line {
+                "BEGIN:VALARM" => in_valarm = true,
+                "END:VALARM" => in_valarm = false,
+                _ if in_valarm => {}
+                _ => {
+                    let name = line.split([';', ':']).next().unwrap();
+                    names.insert(name.to_string());
+                }
+            }
+        }
+        names
+    }
+
+    // T-17 (R15, R23). R15 is a promise to users about a *set*, so the only
+    // checkable form is set equality in both directions: no surprise drop, and
+    // no property we believe is dropped that is really being mangled instead.
+    // A containment spot-check would pass while an eleventh property quietly
+    // vanished.
+    //
+    // Mechanism note for whoever revisits R88: `CATEGORIES` reaches the crate
+    // via `multi_properties()`, not `properties()`, so widening the parser's
+    // `X-` filter is not what would start preserving it — and re-emitting it
+    // corrupts it (`WORK,URGENT` -> `WORK\,URGENT`, re-verified on 0.17.10).
+    #[test]
+    fn dropped_property_names_are_exactly_the_documented_list() {
+        let input_names = vtodo_property_names(LOSS_SET_ICS);
+        let expected_dropped: std::collections::BTreeSet<String> = R15_DROPPED_PROPERTIES
+            .iter()
+            .chain(OTHER_UNMODELLED_PROPERTIES)
+            .map(|name| name.to_string())
+            .collect();
+
+        // Non-vacuity, both halves: the fixture really carries every property
+        // the assertion is about. Without this the set equality below would
+        // pass trivially for any property the fixture forgot.
+        let must_be_in_fixture = expected_dropped
+            .iter()
+            .cloned()
+            .chain(MODELLED_PROPERTIES.iter().map(|name| name.to_string()));
+        for name in must_be_in_fixture {
+            assert!(
+                input_names.contains(&name),
+                "fixture must carry {name} for this pin to mean anything"
+            );
+        }
+
+        let todo = Todo::try_from(&parse_icalendar_todo(LOSS_SET_ICS)).unwrap();
+        let output = todo.to_ics_string();
+        let output_names = vtodo_property_names(&output);
+
+        // 1. Exactly R15's list is dropped — no more, no fewer.
+        let dropped: std::collections::BTreeSet<String> =
+            input_names.difference(&output_names).cloned().collect();
+        assert_eq!(dropped, expected_dropped);
+
+        // 2. And nothing is invented on the way out: the surviving set is the
+        //    input minus the dropped set, exactly.
+        let survivors: std::collections::BTreeSet<String> =
+            input_names.difference(&dropped).cloned().collect();
+        assert_eq!(output_names, survivors);
+
+        // 3. Every modelled property survives (2 says the *names* balance;
+        //    this says the balance is the one spec §6 promises).
+        for name in MODELLED_PROPERTIES {
+            assert!(
+                output_names.contains(*name),
+                "modelled property {name} must survive"
+            );
+        }
+
+        // 4. R23: the `X-` property survives verbatim, parameters included —
+        //    the one thing R15 promises beyond the modelled set.
+        assert!(
+            output.contains("X-GOOGLE-ID;X-SOURCE=api:abc123\r\n"),
+            "X- property must survive with its parameters: {output}"
+        );
+
+        // 5. Names surviving is not values surviving: compare domain values.
+        assert_eq!(
+            todo,
+            Todo::try_from(&parse_icalendar_todo(&output)).unwrap()
+        );
+        assert_eq!(todo.reminders.len(), 1, "the VALARM survives too");
+    }
+
+    // T-16 (R87). A PINNED KNOWN LOSS, not a bug under repair. Probe Q-F2
+    // shows Radicale stores both values with their `RELTYPE` parameters
+    // intact, so the loss is 100% caldir's parser: `MULTIS` lists the ABNF
+    // placeholder "RELATED", not "RELATED-TO", so the crate files the property
+    // in its single-valued map and the second line overwrites the first —
+    // `RELTYPE=PARENT` is gone before caldir sees the document. caldir then
+    // drops the survivor as well, because `RELATED-TO` is not modelled
+    // (ADJUDICATION C-2, STAYS OUT). Re-encoding as `X-CALDIR-RELATED-TO`
+    // inherits the identical defect (R87) — do not attempt it.
+    #[test]
+    fn two_related_to_lines_collapse_to_one() {
+        use icalendar::Component;
+
+        const TWO_RELATED_TO_ICS: &str = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+PRODID:-//u_crawler//EN\r\n\
+BEGIN:VTODO\r\n\
+UID:subtask@caldir\r\n\
+DTSTAMP:20260801T090000Z\r\n\
+SUMMARY:Chapter 3\r\n\
+RELATED-TO;RELTYPE=PARENT:parent@caldir\r\n\
+RELATED-TO;RELTYPE=SIBLING:sibling@caldir\r\n\
+END:VTODO\r\n\
+END:VCALENDAR\r\n";
+
+        // Non-vacuity: two distinct lines really do go in.
+        assert_eq!(TWO_RELATED_TO_ICS.matches("RELATED-TO;").count(), 2);
+        assert!(TWO_RELATED_TO_ICS.contains("RELTYPE=PARENT"));
+
+        let ical = parse_icalendar_todo(TWO_RELATED_TO_ICS);
+
+        // The mechanism: not a multi-property, so the map holds one value.
+        assert!(
+            ical.multi_properties().get("RELATED-TO").is_none(),
+            "RELATED-TO is absent from MULTIS — that is the whole bug"
+        );
+        let survivor = ical
+            .properties()
+            .get("RELATED-TO")
+            .expect("one value survives the crate's parser");
+        assert_eq!(survivor.value(), "sibling@caldir");
+
+        // Two in, one out at the crate layer, with PARENT gone.
+        let crate_output = Component::to_string(&ical);
+        assert_eq!(crate_output.matches("RELATED-TO;").count(), 1);
+        assert!(
+            !crate_output.contains("RELTYPE=PARENT"),
+            "the first line's RELTYPE is destroyed by the crate: {crate_output}"
+        );
+
+        // And at caldir's own layer the survivor goes too: RELATED-TO is not
+        // a modelled field and the passthrough bag is `X-` only (R23).
+        let todo = Todo::try_from(&ical).unwrap();
+        assert!(
+            !todo
+                .x_properties
+                .iter()
+                .any(|x| x.name.contains("RELATED") || x.value.contains("@caldir")),
+            "RELATED-TO must not be smuggled through the X- bag"
+        );
+
+        let output = todo.to_ics_string();
+        assert_eq!(output.matches("RELATED-TO").count(), 0);
+        assert!(!output.contains("parent@caldir"));
+        assert!(!output.contains("sibling@caldir"));
+
+        // Non-vacuity: the rest of the task really did round-trip, so the
+        // absence above is a dropped property and not a failed parse.
+        assert_eq!(todo.summary.as_deref(), Some("Chapter 3"));
+        assert!(output.contains("SUMMARY:Chapter 3\r\n"));
     }
 }
