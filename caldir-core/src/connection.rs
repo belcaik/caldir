@@ -69,7 +69,12 @@ impl Connection {
             .events()?
             .into_events()
             .into_iter()
-            .map(|e| (e.event().event_instance_id(), e))
+            // VEVENT-only map: a task has no event identity, so it cannot be
+            // a key here. TODO(L3-01): key this map by item identity.
+            .filter_map(|e| {
+                let id = e.as_event()?.event_instance_id();
+                Some((id, e))
+            })
             .collect();
 
         let mut sync_bases = Vec::new();
@@ -100,7 +105,12 @@ impl Connection {
             .events()?
             .into_events()
             .into_iter()
-            .map(|e| (e.event().event_instance_id(), e))
+            // VEVENT-only map: a task has no event identity, so it cannot be
+            // a key here. TODO(L3-01): key this map by item identity.
+            .filter_map(|e| {
+                let id = e.as_event()?.event_instance_id();
+                Some((id, e))
+            })
             .collect();
 
         let mut sync_bases = Vec::new();
@@ -128,7 +138,12 @@ impl Connection {
             .events()?
             .into_events()
             .into_iter()
-            .map(|e| (e.event().event_instance_id(), e))
+            // VEVENT-only map: a task has no event identity, so it cannot be
+            // a key here. TODO(L3-01): key this map by item identity.
+            .filter_map(|e| {
+                let id = e.as_event()?.event_instance_id();
+                Some((id, e))
+            })
             .collect();
 
         for change in diff.outgoing() {
@@ -150,7 +165,7 @@ impl Connection {
                 }
                 EventChange::Delete(event) => {
                     let cal_event = self.local.create_event(event.clone())?;
-                    events_by_instance_id.insert(cal_event.event().event_instance_id(), cal_event);
+                    events_by_instance_id.insert(event.event_instance_id(), cal_event);
                 }
             }
         }
@@ -170,7 +185,11 @@ fn bases_to_backfill(
 ) -> Vec<Event> {
     let local_by_id: HashMap<_, _> = local_events
         .iter()
-        .map(|e| (e.event().event_instance_id(), e.event()))
+        // VEVENT-only map: remote lookups below are all by event identity.
+        .filter_map(|e| {
+            let event = e.as_event()?;
+            Some((event.event_instance_id(), event))
+        })
         .collect();
 
     let mut backfill = Vec::new();
@@ -205,7 +224,7 @@ fn pull_incoming_changes(
         match change {
             EventChange::Create(event) => {
                 let cal_event = local.create_event(event.clone())?;
-                let id = cal_event.event().event_instance_id();
+                let id = event.event_instance_id();
                 events_by_instance_id.insert(id, cal_event);
                 sync_bases.push(event.clone());
             }

@@ -44,7 +44,9 @@ impl CalendarDiff {
     ) -> Self {
         let local_event_ids: HashSet<_> = local_events
             .iter()
-            .map(|e| e.event().event_instance_id())
+            // VEVENT-only: this set is compared against remote *event* ids, and
+            // pass 2 below only ever looks up an event identity.
+            .filter_map(|e| Some(e.as_event()?.event_instance_id()))
             .collect();
 
         let remote_by_id: HashMap<_, &RemoteEvent> = remote_events
@@ -56,7 +58,12 @@ impl CalendarDiff {
         let mut incoming = Vec::new();
 
         for local_event in &local_events {
-            let event = local_event.event();
+            // Narrowing, not a filter: a task simply produces no change here.
+            // It is never treated as absent-and-therefore-deleted, because the
+            // delete branches below are inside this same `Some` arm.
+            let Some(event) = local_event.as_event() else {
+                continue;
+            };
             let id = event.event_instance_id();
 
             // In both local and remote: skip if equal, otherwise update
@@ -83,7 +90,7 @@ impl CalendarDiff {
                 let direction = if &to_push == remote_event.event() {
                     Some(UpdateDirection::Pull)
                 } else {
-                    update_direction(local_event, remote_event, base)
+                    update_direction(local_event, event, remote_event, base)
                 };
 
                 match direction {
@@ -210,12 +217,13 @@ enum UpdateDirection {
 
 fn update_direction(
     local: &CalendarEvent,
+    local_event: &crate::Event,
     remote: &RemoteEvent,
     base: Option<&crate::Event>,
 ) -> Option<UpdateDirection> {
     // If base exists, use that for determining direction:
     if let Some(base) = base {
-        let local_has_changes = local.event() != base;
+        let local_has_changes = local_event != base;
         let remote_has_changes = remote.event() != base;
 
         match (local_has_changes, remote_has_changes) {
@@ -228,16 +236,16 @@ fn update_direction(
 
     // Both sides changed, or no base exists for this legacy sync state (TODO: resolve conflicts?),
     // use mtime / LAST-MODIFIED to determine direction. If both are equal, default to pull.
-    if local_is_newer(local, remote) {
+    if local_is_newer(local, local_event, remote) {
         Some(UpdateDirection::Push)
     } else {
         Some(UpdateDirection::Pull)
     }
 }
 
-fn local_is_newer(local: &CalendarEvent, remote: &RemoteEvent) -> bool {
-    if remote.modified_at().is_none() && local.event().sequence != remote.event().sequence {
-        return local.event().sequence > remote.event().sequence;
+fn local_is_newer(local: &CalendarEvent, local_event: &crate::Event, remote: &RemoteEvent) -> bool {
+    if remote.modified_at().is_none() && local_event.sequence != remote.event().sequence {
+        return local_event.sequence > remote.event().sequence;
     }
 
     match (local.modified_at(), remote.modified_at()) {
@@ -572,6 +580,43 @@ mod tests {
 
         let mut remote = base.clone();
         remote.summary = Some("Edited remotely".to_string());
+        remote.last_modified = None;
+
+        let mut sync_bases = SyncBases::new();
+        sync_bases.insert_event_base(base.event_instance_id(), base.clone());
+
+        let diff = CalendarDiff::compute(
+            vec![calendar_event],
+            vec![RemoteEvent::new(remote.clone())],
+            &sync_bases,
+            &DateRange::default(),
+        );
+
+        assert_eq!(diff.outgoing, vec![]);
+        assert_eq!(
+            diff.incoming,
+            vec![EventChange::Update {
+                from: base,
+                to: remote,
+            }]
+        );
+    }
+
+    /// The base comparison must read the local event as stored, never the
+    /// visibility-patched copy assembled for the push. Patching it first makes
+    /// an untouched local file look edited, flipping an incoming update into an
+    /// outgoing one that overwrites the remote's real change.
+    #[test]
+    fn base_comparison_ignores_the_visibility_patched_push_copy() {
+        let (_tmp, calendar) = test_calendar();
+        let base = test_event();
+        assert_eq!(base.visibility, None);
+        let calendar_event = calendar.create_event(base.clone()).unwrap();
+        assert!(calendar_event.modified_at().is_some());
+
+        let mut remote = base.clone();
+        remote.summary = Some("Edited remotely".to_string());
+        remote.visibility = Some(crate::event::Visibility::Private);
         remote.last_modified = None;
 
         let mut sync_bases = SyncBases::new();

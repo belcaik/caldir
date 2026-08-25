@@ -138,11 +138,10 @@ impl Calendar {
         &self,
         id: &EventInstanceId,
     ) -> Result<Option<CalendarEvent>, CalendarError> {
-        let found = self
-            .events()?
-            .into_events()
-            .into_iter()
-            .find(|ce| ce.event().event_instance_id() == *id);
+        let found = self.events()?.into_events().into_iter().find(|ce| {
+            ce.as_event()
+                .is_some_and(|event| event.event_instance_id() == *id)
+        });
 
         Ok(found)
     }
@@ -155,8 +154,11 @@ impl Calendar {
             .events()?
             .into_events()
             .into_iter()
-            .find(|ce| ce.event().uid.as_str() == uid && ce.event().recurrence.is_some())
-            .map(|ce| ce.event().clone());
+            .find(|ce| {
+                ce.as_event()
+                    .is_some_and(|event| event.uid.as_str() == uid && event.recurrence.is_some())
+            })
+            .and_then(|ce| ce.as_event().cloned());
         Ok(master)
     }
 
@@ -201,11 +203,18 @@ impl Calendar {
 
         let master_idx = all_events
             .iter()
-            .position(|ce| ce.event().uid == *master_uid && ce.event().recurrence.is_some())
+            .position(|ce| {
+                ce.as_event()
+                    .is_some_and(|event| event.uid == *master_uid && event.recurrence.is_some())
+            })
             .ok_or_else(|| CalendarError::MasterNotFound(master_uid.as_str().to_string()))?;
 
         let mut master_ce = all_events.swap_remove(master_idx);
-        let master_event = master_ce.event().clone();
+        // Unreachable: `master_idx` was found through `as_event` above.
+        let master_event = master_ce
+            .as_event()
+            .ok_or_else(|| CalendarError::MasterNotFound(master_uid.as_str().to_string()))?
+            .clone();
         let master_recurrence = master_event
             .recurrence
             .as_ref()
@@ -231,23 +240,28 @@ impl Calendar {
             sequence: 0,
             ..master_event.with_new_uid()
         };
-        let new_master_ce = self.create_event(new_master)?;
-        let new_master_event = new_master_ce.event().clone();
+        // `create_event` stores the item unchanged, so the written event is
+        // `new_master` itself.
+        self.create_event(new_master.clone())?;
 
         let split_start_utc = split_start.to_utc();
         for ce in all_events.into_iter() {
-            if ce.event().uid != *master_uid {
-                continue;
-            }
-            let Some(rid) = ce.event().recurrence_id.as_ref() else {
+            let Some(event) = ce.as_event() else {
                 continue;
             };
-            if rid.as_event_time().to_utc() >= split_start_utc {
+            if event.uid != *master_uid {
+                continue;
+            }
+            let Some(rid) = event.recurrence_id.as_ref() else {
+                continue;
+            };
+            let after_split = rid.as_event_time().to_utc() >= split_start_utc;
+            if after_split {
                 ce.delete()?;
             }
         }
 
-        Ok(new_master_event)
+        Ok(new_master)
     }
 
     /// Exclude a single occurrence from a recurring series
@@ -264,13 +278,17 @@ impl Calendar {
 
         // Find master event (+ potential override event)
         for ce in self.events()?.into_events() {
-            if ce.event().uid != *uid {
+            let Some(event) = ce.as_event() else {
+                continue;
+            };
+            if event.uid != *uid {
                 continue;
             }
 
-            let is_override_for_occurrence = ce.event().event_instance_id() == *id;
+            let is_override_for_occurrence = event.event_instance_id() == *id;
+            let is_master = event.recurrence.is_some();
 
-            if ce.event().recurrence.is_some() {
+            if is_master {
                 master = Some(ce);
             } else if is_override_for_occurrence {
                 override_event = Some(ce);
@@ -309,7 +327,11 @@ impl Calendar {
         match existing {
             // An override file already exists -> edit it in place
             Some(mut ce) => {
-                let mut event = ce.event().clone();
+                // Unreachable: `event_by_instance_id` only matches events.
+                // TODO(L3-03): tasks need their own instance-override path.
+                let Some(mut event) = ce.as_event().cloned() else {
+                    return Err(CalendarError::MasterNotFound(id.uid().as_str().to_string()));
+                };
                 apply(&mut event);
 
                 event.last_modified = Some(Utc::now());
@@ -345,7 +367,9 @@ impl Calendar {
             .events()?
             .into_events()
             .into_iter()
-            .map(|ce| ce.event().clone());
+            // TODO(L2-07): this yields `CalendarItem`, and tasks stop being
+            // dropped here.
+            .filter_map(|ce| ce.as_event().cloned());
         Ok(expand_in_range(events, from, to))
     }
 
