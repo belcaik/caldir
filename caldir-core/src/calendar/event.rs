@@ -915,4 +915,13 @@ SUMMARY:Planning Session\r\nUID:byte-identity@caldir\r\nEND:VEVENT\r\nEND:VCALEN
 
         assert_eq!(std::fs::read(task.path()).unwrap(), bytes_before);
     }
+
+    /// The refusal has to name the cause, not just be an error.
+    #[test]
+    fn not_an_event_names_the_task_as_the_cause() {
+        assert_eq!(
+            CalendarEventError::NotAnEvent.to_string(),
+            "this item is a task, not an event"
+        );
+    }
 }

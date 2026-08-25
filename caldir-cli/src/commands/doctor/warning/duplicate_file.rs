@@ -1,16 +1,21 @@
 use crate::commands::doctor::warning::DoctorWarning;
-use caldir_core::{CalendarEvent, EventInstanceId};
+use caldir_core::{CalendarEvent, ComponentKind, EventInstanceId};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 pub(crate) fn duplicate_file_warnings(events: &[CalendarEvent]) -> Vec<DoctorWarning> {
     duplicate_file_sets(events)
         .into_iter()
-        .map(DoctorWarning::DuplicateFiles)
+        .map(|(kind, paths)| match kind {
+            ComponentKind::Event => DoctorWarning::DuplicateFiles(paths),
+            ComponentKind::Todo => DoctorWarning::DuplicateTaskFiles(paths),
+        })
         .collect()
 }
 
-fn duplicate_file_sets(events: &[CalendarEvent]) -> Vec<Vec<PathBuf>> {
+/// Each set is tagged with the kind it came from, so the warning can name a
+/// task a task without touching the event sentence.
+fn duplicate_file_sets(events: &[CalendarEvent]) -> Vec<(ComponentKind, Vec<PathBuf>)> {
     let mut by_id: HashMap<EventInstanceId, Vec<PathBuf>> = HashMap::new();
     for ce in events {
         // Bucket the item, never a narrowed event: the identity carries the
@@ -22,15 +27,16 @@ fn duplicate_file_sets(events: &[CalendarEvent]) -> Vec<Vec<PathBuf>> {
             .push(ce.path().to_path_buf());
     }
 
-    let mut sets: Vec<Vec<PathBuf>> = by_id
-        .into_values()
-        .filter(|paths| paths.len() > 1)
+    let mut sets: Vec<(ComponentKind, Vec<PathBuf>)> = by_id
+        .into_iter()
+        .filter(|(_, paths)| paths.len() > 1)
+        .map(|(id, paths)| (id.kind(), paths))
         .collect();
 
-    for paths in &mut sets {
+    for (_, paths) in &mut sets {
         paths.sort();
     }
-    sets.sort();
+    sets.sort_by(|(_, left), (_, right)| left.cmp(right));
     sets
 }
 
@@ -163,7 +169,7 @@ mod tests {
         let warnings = duplicate_file_warnings(calendar.events().unwrap().events());
 
         assert_eq!(warnings.len(), 1);
-        let DoctorWarning::DuplicateFiles(paths) = &warnings[0] else {
+        let DoctorWarning::DuplicateTaskFiles(paths) = &warnings[0] else {
             panic!("expected duplicate file warning");
         };
         assert_eq!(paths.len(), 2);
@@ -188,7 +194,7 @@ mod tests {
         let names: Vec<Vec<&str>> = warnings
             .iter()
             .map(|warning| {
-                let DoctorWarning::DuplicateFiles(paths) = warning else {
+                let DoctorWarning::DuplicateTaskFiles(paths) = warning else {
                     panic!("expected duplicate file warning");
                 };
                 paths
@@ -250,6 +256,36 @@ mod tests {
                 first = names[0],
                 second = names[1],
             )
+        );
+    }
+
+    /// The task counterpart of the C13 control: a duplicate task renders its
+    /// own sentence, byte for byte (ANSI codes included). Locked separately
+    /// from the event sentence so neither can drift into the other.
+    #[test]
+    fn a_task_duplicate_renders_its_own_sentence() {
+        let (_tmp, calendar) = test_calendar();
+        let uid = "assignment-123@u-crawler";
+
+        write_ics(&calendar, "_task__one.ics", &vtodo_ics(uid));
+        write_ics(&calendar, "_task__two.ics", &vtodo_ics(uid));
+
+        let warnings = duplicate_file_warnings(calendar.events().unwrap().events());
+
+        assert_eq!(warnings.len(), 1);
+        let DoctorWarning::DuplicateTaskFiles(paths) = &warnings[0] else {
+            panic!("expected duplicate task file warning");
+        };
+        assert_eq!(paths.len(), 2);
+
+        let mut rendered = Vec::new();
+        warnings[0].render(&mut rendered).unwrap();
+
+        assert_eq!(
+            String::from_utf8(rendered).unwrap(),
+            "   \u{1b}[33m\u{26a0}\u{1b}[39m same task saved as multiple files; \
+             delete all but one:\n       \u{1b}[2m_task__one.ics\u{1b}[0m\n       \
+             \u{1b}[2m_task__two.ics\u{1b}[0m\n"
         );
     }
 }

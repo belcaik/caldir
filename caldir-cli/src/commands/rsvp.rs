@@ -1,5 +1,5 @@
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use caldir_core::{Caldir, CalendarEvent, DateBounds, Event, ParticipationStatus};
@@ -43,11 +43,22 @@ fn run_direct(caldir: &Caldir, path_str: &str, response_str: &str) -> Result<()>
         .remote_email()
         .context("No account email configured for this calendar")?;
 
-    let mut cal_event = CalendarEvent::load(&path).context("Failed to load event")?;
-    // An RSVP is meaningless on a task (R81). Fail before anything is written;
-    // `L7-04` owns the final wording.
+    rsvp_file(&path, email, response_str)
+}
+
+/// Answer the invite held by a single file. Split out of `run_direct` so the
+/// narrowing, the write and the failure paths are reachable from a test
+/// without a `Caldir` (which has no constructor outside `caldir-core`).
+fn rsvp_file(path: &Path, email: &str, response_str: &str) -> Result<()> {
+    let mut cal_event = CalendarEvent::load(path).context("Failed to load event")?;
+    // An RSVP is meaningless on a task (R81). Bail here, before `update`, so a
+    // task file is never rewritten — and never silently no-ops: the user named
+    // this file explicitly.
     let Some(event) = cal_event.event() else {
-        anyhow::bail!("Cannot RSVP to a task: {}", path.display());
+        anyhow::bail!(
+            "{} is a task, not an event; tasks cannot be RSVP'd",
+            path.display()
+        );
     };
 
     if !event.is_invite_for(email) {
@@ -226,6 +237,78 @@ mod tests {
     use super::*;
     use caldir_core::{Attendee, EventTime};
     use chrono::NaiveDate;
+
+    /// A VTODO carrying an ATTENDEE — permitted by C-2, but still not an
+    /// invitation (R81).
+    const TASK_WITH_ATTENDEE_ICS: &str = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+PRODID:-//caldir//EN\r\n\
+BEGIN:VTODO\r\n\
+UID:assignment-123@u-crawler\r\n\
+DTSTAMP:20260801T090000Z\r\n\
+DUE:20260815T235900Z\r\n\
+SUMMARY:Assignment 3\r\n\
+ORGANIZER:mailto:alice@example.com\r\n\
+ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:bob@example.com\r\n\
+END:VTODO\r\n\
+END:VCALENDAR\r\n";
+
+    /// The VEVENT control: same shape, genuinely an invite.
+    const EVENT_INVITE_ICS: &str = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+PRODID:-//caldir//EN\r\n\
+BEGIN:VEVENT\r\n\
+UID:window-123@u-crawler\r\n\
+DTSTAMP:20260801T090000Z\r\n\
+DTSTART:20260815T100000Z\r\n\
+DTEND:20260815T120000Z\r\n\
+SUMMARY:Assignment 3 - submission window\r\n\
+ORGANIZER:mailto:alice@example.com\r\n\
+ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:bob@example.com\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n";
+
+    #[test]
+    fn rsvp_on_a_task_exits_non_zero_and_leaves_the_file_unmodified() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("assignment-3.ics");
+        std::fs::write(&path, TASK_WITH_ATTENDEE_ICS).unwrap();
+        let bytes_before = std::fs::read(&path).unwrap();
+
+        let err = rsvp_file(&path, "bob@example.com", "accept")
+            .expect_err("an RSVP on a task must fail, not silently no-op");
+
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "{} is a task, not an event; tasks cannot be RSVP'd",
+                path.display()
+            )
+        );
+        // The load-bearing assertion: the bail must happen before the write.
+        let bytes_after = std::fs::read(&path).expect("the task file must still be there");
+        assert_eq!(bytes_after, bytes_before);
+        // No renamed copy and no temp file left behind either.
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn rsvp_on_an_event_invite_still_records_the_response() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("submission-window.ics");
+        std::fs::write(&path, EVENT_INVITE_ICS).unwrap();
+
+        rsvp_file(&path, "bob@example.com", "accept").unwrap();
+
+        let written: String = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+            .collect();
+        assert!(
+            written.contains("PARTSTAT=ACCEPTED"),
+            "event RSVP must still be written: {written}"
+        );
+    }
 
     #[test]
     fn apply_response_preserves_sequence() {

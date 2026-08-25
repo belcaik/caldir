@@ -97,6 +97,38 @@ mod tests {
         ));
     }
 
+    /// R77 control: degradation must not become a swallow in the other
+    /// direction either. A well-formed VTODO beside a well-formed VEVENT is
+    /// two first-class items, so `calendar_report` reports nothing at all —
+    /// neither a skip nor a duplicate.
+    #[test]
+    fn a_valid_vtodo_sibling_is_not_a_warning() {
+        let (_tmp, calendar) = test_calendar();
+        let uid = "assignment-123@u-crawler";
+        std::fs::write(
+            calendar.path().join("window.ics"),
+            format!(
+                "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:{uid}\r\n\
+                 SUMMARY:Assignment window\r\nDTSTART:20260301T100000\r\n\
+                 DTEND:20260301T110000\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            calendar.path().join("_task__hand-in-assignment.ics"),
+            format!(
+                "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VTODO\r\nUID:{uid}\r\n\
+                 SUMMARY:Hand in assignment\r\nDUE:20260301T235900\r\n\
+                 END:VTODO\r\nEND:VCALENDAR\r\n"
+            ),
+        )
+        .unwrap();
+
+        let report = calendar_report(calendar);
+
+        assert!(report.warnings.is_empty(), "got {:?}", report.warnings);
+    }
+
     #[test]
     fn treats_unreadable_events_as_warnings() {
         let (_tmp, calendar) = test_calendar();

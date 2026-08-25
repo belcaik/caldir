@@ -10,6 +10,10 @@ use std::path::PathBuf;
 #[derive(Debug)]
 pub(crate) enum DoctorWarning {
     DuplicateFiles(Vec<PathBuf>),
+    /// A task duplicate is a distinct situation from an event duplicate, and
+    /// says so: the event sentence is a pinned literal that must not drift
+    /// into talking about tasks.
+    DuplicateTaskFiles(Vec<PathBuf>),
     UnreadableEvents(String),
 }
 
@@ -22,10 +26,15 @@ impl DoctorWarning {
                     "   {} same event saved as multiple files; delete all but one:",
                     "⚠".yellow()
                 )?;
-                for path in paths {
-                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
-                    writeln!(out, "       {}", name.dimmed())?;
-                }
+                render_paths(out, paths)?;
+            }
+            DoctorWarning::DuplicateTaskFiles(paths) => {
+                writeln!(
+                    out,
+                    "   {} same task saved as multiple files; delete all but one:",
+                    "⚠".yellow()
+                )?;
+                render_paths(out, paths)?;
             }
             DoctorWarning::UnreadableEvents(error) => {
                 writeln!(out, "   {}", error.red())?;
@@ -34,6 +43,14 @@ impl DoctorWarning {
 
         Ok(())
     }
+}
+
+fn render_paths(out: &mut impl Write, paths: &[PathBuf]) -> Result<()> {
+    for path in paths {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+        writeln!(out, "       {}", name.dimmed())?;
+    }
+    Ok(())
 }
 
 /// One warning per `.ics` file the listing had to skip.
