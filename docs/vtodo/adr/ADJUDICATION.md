@@ -437,3 +437,56 @@ Two unreachable narrowings in calendar.rs fall back to `MasterNotFound`,
 which is semantically wrong if it ever fires. When L3-03 gives tasks
 real paths this wants a proper variant - and it should ride the same
 0.15.0 window as the `#[non_exhaustive]` change.
+
+## L2-05 = NO-OP, but its probe is BINDING INPUT for L2-06
+L2-05 changed zero bytes. It proved insulation by RUNNING the L2-06
+retype in an isolated probe tree and collecting real compiler errors.
+
+### Exactly what breaks at L2-06 (compiler-verified, 6 errors, 2 crates)
+caldir-provider-caldav (1, lib only):
+  ops.rs:33  E0308 expected Option<Event>, found Option<CalendarItem>
+    Narrow with: .find_map(|r| match r { Ok(CalendarItem::Event(e)) => Some(e), _ => None })
+    This WIDENS the existing silent drop from "malformed" to "malformed
+    or non-event". L2-06 MUST leave a TODO(L5-01) there, not pretend it
+    is clean. Its 3 callers keep compiling once parse_event still
+    returns Option<Event>.
+caldir-provider-webcal (5; 3 production + 3 in #[cfg(test)]):
+  commands/list_events.rs:27,28  E0609 no field last_modified
+  commands/list_events.rs:32     E0277 Vec<Event> from Iterator<CalendarItem>
+  commands/list_events.rs:87,88,92 same, in the test helper
+    Narrow at the existing filter_map :20-26 with an
+    Ok(CalendarItem::Event(event)) => Some(event) arm plus Ok(_) => None.
+    THAT Ok(_) => None IS A SILENT VTODO DROP. It is R49/L3-04's to fix,
+    but L2-06 physically cannot avoid writing the arm, so L2-06 MUST
+    mark it TODO(L3-04) or the drop lands unannotated.
+google / outlook / icloud: ZERO errors, compiler-confirmed.
+
+### HARD CONSTRAINT L2-06 must not breach — keep the RPC field type Event
+Providers are insulated ONLY because the Rust-side RPC struct field
+stays `Event`: rpc/methods/create_event.rs:10 `pub event: Event`,
+decoded at rpc/ics.rs:32 via the crate-private
+Event::from_single_ics_str. There are 25 `cmd.event` sites across all
+five provider crates (google 8, outlook 10, caldav 3, icloud 3).
+Retyping that field to CalendarItem takes the provider blast radius
+from 6 errors to ~25 sites and kills R70 ("no provider-crate edits ship
+in this feature").
+=> L2-06 retypes ics::deserialize INTERNALLY and narrows back to Event
+at that boundary, keeping `expected 1 event(s) in ICS, found 0`
+(EventError::UnexpectedEventCount) as the accepted task-push abort per
+R71/L6-01. Worth a standalone lock asserting the field type.
+
+### iCloud delegation — VERIFIED
+All four ops are pure pass-throughs to caldav::ops with NO mapping layer
+(icloud commands/{list,create,update,delete}_event.rs:19-22; the crate
+is 686 lines, all session/credential handling). Both hard-coded
+<C:comp-filter name="VEVENT"> literals live in caldav
+(ops/list_events.rs:103, ops.rs:107) and iCloud reaches them via
+ops::fetch_events. L3-02/L5-02 therefore light up iCloud tasks with NO
+icloud-crate edit.
+
+### Ticket factual corrections from L2-05
+- caldav ops.rs:7 (`use caldir_core::Event;`) does NOT break and must not
+  be removed - parse_event's return type still names Event.
+- webcal list_events.rs:4 does NOT break; the real breaks are the
+  CONSUMERS of the parse result, and 3 of the 6 are in the test module
+  the ticket never mentions.
