@@ -1,6 +1,6 @@
 mod error;
 
-use crate::{Calendar, Event, EventTime, ParticipationStatus};
+use crate::{Calendar, CalendarItem, Event, EventTime, ParticipationStatus};
 use std::fs::OpenOptions;
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -10,19 +10,23 @@ pub use error::CalendarEventError;
 
 #[derive(Debug)]
 pub struct CalendarEvent {
-    event: Event,
+    item: CalendarItem,
     path: PathBuf,
 }
 
 impl CalendarEvent {
-    pub fn create(calendar: &Calendar, event: Event) -> Result<Self, CalendarEventError> {
-        let base_slug = event.base_slug();
-        let contents = event.to_ics_string();
+    pub fn create(
+        calendar: &Calendar,
+        item: impl Into<CalendarItem>,
+    ) -> Result<Self, CalendarEventError> {
+        let item = item.into();
+        let base_slug = item.base_slug();
+        let contents = item.to_ics_string();
 
         let path = write_best_event_file(calendar.path(), &base_slug, None, contents.as_bytes())?;
-        sync_file_mtime(&path, event.last_modified)?;
+        sync_file_mtime(&path, item.last_modified())?;
 
-        Ok(CalendarEvent { event, path })
+        Ok(CalendarEvent { item, path })
     }
 
     pub fn load(path: impl Into<PathBuf>) -> Result<Self, CalendarEventError> {
@@ -49,20 +53,24 @@ impl CalendarEvent {
             }
         };
 
-        Ok(CalendarEvent { event, path })
+        Ok(CalendarEvent {
+            item: CalendarItem::Event(event),
+            path,
+        })
     }
 
-    pub fn update(&mut self, event: Event) -> Result<(), CalendarEventError> {
-        let base_slug = event.base_slug();
-        let contents = event.to_ics_string();
+    pub fn update(&mut self, item: impl Into<CalendarItem>) -> Result<(), CalendarEventError> {
+        let item = item.into();
+        let base_slug = item.base_slug();
+        let contents = item.to_ics_string();
         let dir = self.path.parent().unwrap_or_else(|| Path::new("."));
 
         let new_path =
             write_best_event_file(dir, &base_slug, Some(&self.path), contents.as_bytes())?;
-        sync_file_mtime(&new_path, event.last_modified)?;
+        sync_file_mtime(&new_path, item.last_modified())?;
 
         if new_path == self.path {
-            self.event = event;
+            self.item = item;
             return Ok(());
         }
 
@@ -71,7 +79,7 @@ impl CalendarEvent {
             return Err(err.into());
         }
 
-        self.event = event;
+        self.item = item;
         self.path = new_path;
 
         Ok(())
@@ -81,8 +89,26 @@ impl CalendarEvent {
         std::fs::remove_file(self.path).map_err(Into::into)
     }
 
+    /// The stored item, whatever its kind.
+    pub fn item(&self) -> &CalendarItem {
+        &self.item
+    }
+
+    /// Narrowing accessor: `Some` only when the stored item is an event.
+    pub fn as_event(&self) -> Option<&Event> {
+        match &self.item {
+            CalendarItem::Event(event) => Some(event),
+            CalendarItem::Todo(_) => None,
+        }
+    }
+
+    /// TEMPORARY, removed in L2-06: the VEVENT-only accessor the ~70 existing
+    /// call sites still use. Unreachable for tasks today — `load` still
+    /// rejects a VTODO, so only `create`/`update` can store one, and no
+    /// caller does yet.
     pub fn event(&self) -> &Event {
-        &self.event
+        self.as_event()
+            .expect("CalendarEvent::event() on a task; migrate the caller to as_event() (L2-06)")
     }
 
     pub fn path(&self) -> &Path {
@@ -106,7 +132,7 @@ impl CalendarEvent {
         email: &str,
         status: ParticipationStatus,
     ) -> Result<(), CalendarEventError> {
-        let mut event = self.event.clone();
+        let mut event = self.event().clone();
 
         event.set_attendee_status(email, status)?;
 
@@ -118,11 +144,11 @@ impl CalendarEvent {
 
     /// Add an EXDATE to a recurring master
     pub(crate) fn add_exdate(&mut self, exdate: EventTime) -> Result<(), CalendarEventError> {
-        let mut event = self.event.clone();
+        let mut event = self.event().clone();
 
         let Some(recurrence) = event.recurrence.as_mut() else {
             return Err(CalendarEventError::NotRecurring(
-                self.event.uid.as_str().to_string(),
+                event.uid.as_str().to_string(),
             ));
         };
 
@@ -208,6 +234,7 @@ mod tests {
     use crate::test_utils::test_calendar;
     use crate::test_utils::test_calendar_event;
     use crate::test_utils::test_event;
+    use crate::test_utils::test_event_time;
     use chrono::TimeZone;
     use std::fs;
 
@@ -712,5 +739,158 @@ BEGIN:VTIMEZONE\r\nTZID:Europe/Stockholm\r\nEND:VTIMEZONE\r\nEND:VCALENDAR\r\n";
             matches!(err, CalendarEventError::NoSupportedComponent { ref found, .. } if found == "VTIMEZONE"),
             "expected NoSupportedComponent {{ found: \"VTIMEZONE\" }}, got {err:?}"
         );
+    }
+
+    // --- L2-02: the retype to `CalendarItem` must not move an event's bytes ---
+
+    /// The event corpus for the byte-identity lock: a fixed UID so the file is
+    /// reproducible, plus two properties either side of `SUMMARY`
+    /// alphabetically so a reordering regression would show.
+    fn byte_identity_event() -> Event {
+        let mut event = Event::new("Test Event", test_event_time());
+        event.uid = crate::EventUid::new("byte-identity@caldir");
+        event.description = Some("Line one".to_string());
+        event.location = Some("Room 1".to_string());
+        event
+    }
+
+    /// The written file, with the one line that cannot be a literal (`DTSTAMP`
+    /// is stamped at write time, R25) removed.
+    fn bytes_without_dtstamp(path: &Path) -> String {
+        let raw = fs::read_to_string(path).unwrap();
+        assert!(raw.contains("DTSTAMP:"), "DTSTAMP must still be written");
+
+        raw.lines()
+            .filter(|line| !line.starts_with("DTSTAMP"))
+            .map(|line| format!("{line}\r\n"))
+            .collect()
+    }
+
+    /// C1/C2 (INVIOLABLE). Storing a `CalendarItem` instead of an `Event` is
+    /// the change most likely to move an event's filename or file body without
+    /// any existing test noticing, because every event test reaches its value
+    /// through the legacy accessor and would keep passing.
+    ///
+    /// The expected strings are literals captured from the pre-retype writer,
+    /// never a re-invocation of `base_slug()` / `to_ics_string()`.
+    #[test]
+    fn an_item_backed_calendar_event_is_still_byte_identical_for_events() {
+        const CREATED_ICS: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:CALDIR\r\n\
+BEGIN:VEVENT\r\nDESCRIPTION:Line one\r\nDTSTART:20260101T120000\r\nLOCATION:Room 1\r\n\
+SUMMARY:Test Event\r\nUID:byte-identity@caldir\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+        const UPDATED_ICS: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:CALDIR\r\n\
+BEGIN:VEVENT\r\nDESCRIPTION:Line one\r\nDTSTART:20260101T120000\r\nLOCATION:Room 1\r\n\
+SUMMARY:Planning Session\r\nUID:byte-identity@caldir\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+        let (_tmp, calendar) = test_calendar();
+
+        // create
+        let mut cal_event = CalendarEvent::create(&calendar, byte_identity_event()).unwrap();
+        assert_eq!(
+            cal_event.filename(),
+            Some("2026-01-01T1200__test-event.ics")
+        );
+        assert_eq!(bytes_without_dtstamp(cal_event.path()), CREATED_ICS);
+
+        // update
+        let mut updated = cal_event.event().clone();
+        updated.summary = Some("Planning Session".to_string());
+        cal_event.update(updated).unwrap();
+        assert_eq!(
+            cal_event.filename(),
+            Some("2026-01-01T1200__planning-session.ics")
+        );
+        assert_eq!(bytes_without_dtstamp(cal_event.path()), UPDATED_ICS);
+
+        // load
+        let reloaded = CalendarEvent::load(cal_event.path()).unwrap();
+        assert_eq!(reloaded.event().uid.as_str(), "byte-identity@caldir");
+        assert_eq!(
+            reloaded.event().summary.as_deref(),
+            Some("Planning Session")
+        );
+    }
+
+    /// The write path takes the filename from the item's own kind, not from
+    /// the event slug rule (R33, R34). Without this, a task would be filed
+    /// under an event-shaped name.
+    #[test]
+    fn create_files_a_task_under_the_task_slug_with_a_vtodo_body() {
+        use crate::Todo;
+
+        let (_tmp, calendar) = test_calendar();
+
+        let mut todo = Todo::new("File taxes");
+        todo.uid = crate::EventUid::new("task-write@caldir");
+        todo.due = Some(test_event_time());
+
+        let cal_event = CalendarEvent::create(&calendar, todo).unwrap();
+
+        assert_eq!(
+            cal_event.filename(),
+            Some("_task__2026-01-01T1200__file-taxes.ics")
+        );
+
+        let contents = fs::read_to_string(cal_event.path()).unwrap();
+        assert!(contents.contains("BEGIN:VTODO"), "got: {contents}");
+        assert!(!contents.contains("BEGIN:VEVENT"), "got: {contents}");
+        assert!(contents.contains("DUE:20260101T120000"), "got: {contents}");
+    }
+
+    /// `sync_file_mtime` must see the *item's* `LAST-MODIFIED`, not `None`:
+    /// a task whose mtime is not pinned reads as locally-edited on every pull.
+    #[test]
+    fn create_pins_file_mtime_to_a_tasks_last_modified() {
+        use crate::Todo;
+
+        let (_tmp, calendar) = test_calendar();
+        let when = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+
+        let mut todo = Todo::new("Pinned task");
+        todo.last_modified = Some(when);
+
+        let cal_event = CalendarEvent::create(&calendar, todo).unwrap();
+
+        assert_eq!(cal_event.modified_at(), Some(when));
+    }
+
+    /// L1-07 carry-forward. Two undated tasks sharing a summary collide on
+    /// `_task__{summary}.ics` far more readily than events ever do, because an
+    /// event always carries a date or the `_recurring__` prefix. Nothing
+    /// proved the writer's suffix loop for the `_task__` shape until the
+    /// writer became item-aware.
+    #[test]
+    fn two_undated_tasks_sharing_a_summary_get_distinct_files() {
+        use crate::Todo;
+
+        let (_tmp, calendar) = test_calendar();
+
+        let first = CalendarEvent::create(&calendar, Todo::new("Someday maybe")).unwrap();
+        let second = CalendarEvent::create(&calendar, Todo::new("Someday maybe")).unwrap();
+
+        assert_eq!(first.filename(), Some("_task__someday-maybe.ics"));
+        assert_eq!(second.filename(), Some("_task__someday-maybe-2.ics"));
+        assert!(first.path().is_file() && second.path().is_file());
+    }
+
+    /// The narrowing accessor: `as_event()` answers the kind question that
+    /// `event()` cannot, and `item()` exposes the stored item itself.
+    #[test]
+    fn as_event_narrows_only_for_events() {
+        use crate::{CalendarItem, Todo};
+
+        let (_tmp, calendar) = test_calendar();
+
+        let event_backed = CalendarEvent::create(&calendar, test_event()).unwrap();
+        assert!(matches!(event_backed.item(), CalendarItem::Event(_)));
+        assert_eq!(
+            event_backed.as_event().map(|event| event.uid.as_str()),
+            Some(event_backed.event().uid.as_str())
+        );
+
+        let task_backed = CalendarEvent::create(&calendar, Todo::new("A task")).unwrap();
+        assert!(matches!(task_backed.item(), CalendarItem::Todo(_)));
+        assert!(task_backed.as_event().is_none());
     }
 }

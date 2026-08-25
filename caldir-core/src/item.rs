@@ -1,6 +1,7 @@
 use crate::calendar::CalendarEventError;
 use crate::event::{Event, EventError};
 use crate::todo::Todo;
+use chrono::{DateTime, Utc};
 use icalendar::{CalendarComponent, Component};
 use std::path::PathBuf;
 
@@ -79,6 +80,34 @@ impl CalendarItem {
         }
     }
 
+    /// The filename stem for this item, from the kind's own slug rule (R33,
+    /// R34). Never a shared rule: an event's stem must stay byte-identical
+    /// (C1) while a task takes the reserved `_task__` prefix.
+    pub(crate) fn base_slug(&self) -> String {
+        match self {
+            CalendarItem::Event(event) => event.base_slug(),
+            CalendarItem::Todo(todo) => todo.base_slug(),
+        }
+    }
+
+    /// Serialize to a single-component `VCALENDAR` document (R27, R32), from
+    /// the kind's own serializer.
+    pub(crate) fn to_ics_string(&self) -> String {
+        match self {
+            CalendarItem::Event(event) => event.to_ics_string(),
+            CalendarItem::Todo(todo) => todo.to_ics_string(),
+        }
+    }
+
+    /// `LAST-MODIFIED`, which the writer pins the file mtime to so direction
+    /// detection reflects when the item changed, not when bytes hit disk.
+    pub(crate) fn last_modified(&self) -> Option<DateTime<Utc>> {
+        match self {
+            CalendarItem::Event(event) => event.last_modified,
+            CalendarItem::Todo(todo) => todo.last_modified,
+        }
+    }
+
     fn parse_document(contents: &str) -> Result<ParsedDocument, EventError> {
         let icalendar: icalendar::Calendar = contents
             .parse()
@@ -112,6 +141,18 @@ impl CalendarItem {
         }
 
         Ok(parsed)
+    }
+}
+
+impl From<Event> for CalendarItem {
+    fn from(event: Event) -> Self {
+        CalendarItem::Event(event)
+    }
+}
+
+impl From<Todo> for CalendarItem {
+    fn from(todo: Todo) -> Self {
+        CalendarItem::Todo(todo)
     }
 }
 
