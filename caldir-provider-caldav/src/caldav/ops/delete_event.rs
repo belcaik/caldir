@@ -1,26 +1,30 @@
 //! Delete an event from a CalDAV calendar.
 
 use anyhow::Result;
+use caldir_core::ComponentKind;
 
 use crate::caldav::{create_caldav_client, url_to_href};
 
 use super::find_event_location;
 
-/// Delete an event from a CalDAV calendar.
+/// Delete an item from a CalDAV calendar.
 ///
 /// Tries the standard `{uid}.ics` URL first, falls back to UID-based REPORT query.
-/// Treats "not found" (event already deleted) as success.
+/// Treats "not found" (already deleted) as success — and after `L5-02` a resource
+/// of the *wrong kind* at `{uid}.ics` reaches that same branch, which is the
+/// correct outcome here: never delete somebody else's resource (R61).
 pub async fn delete_event(
     username: &str,
     password: &str,
     calendar_url: &str,
     event_id: &str,
+    kind: ComponentKind,
 ) -> Result<()> {
     let caldav = create_caldav_client(calendar_url, username, password)?;
     let calendar_href = url_to_href(calendar_url);
 
     // Find the event's actual href (try {uid}.ics first, then UID-based REPORT)
-    let location = find_event_location(&caldav, &calendar_href, calendar_url, event_id).await;
+    let location = find_event_location(&caldav, &calendar_href, calendar_url, event_id, kind).await;
 
     let href = match location {
         Ok(loc) => loc.href,

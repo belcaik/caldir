@@ -64,3 +64,68 @@ pub async fn create_event(
 
     Ok(event)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::caldav::ops::test_dav::{calendar_url, mount_report, multistatus};
+    use caldir_core::{EventTime, EventUid};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// What the *server* holds after the PUT: a different SUMMARY and an
+    /// `X-` property caldir never sent. Raw ICS, so the remote is an
+    /// independent store rather than the encoder under test replaying itself.
+    const SERVER_HELD_ICS: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VEVENT\r\nUID:evt-1@caldir\r\nDTSTART:20260615T100000Z\r\nDTEND:20260615T110000Z\r\n\
+SUMMARY:Renamed by the server\r\nX-RADICALE-NAME:9f2c.ics\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+    /// **M8.** `create_event` reads the resource back and returns the
+    /// *server's* version, not the one it sent. Until this test the read-back
+    /// branch was dead weight: `&& false` on it passed the whole suite, and
+    /// server-assigned values were silently lost on every create.
+    #[tokio::test]
+    async fn create_returns_the_resource_the_server_holds_not_the_one_sent() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PUT"))
+            .and(path("/cal/evt-1@caldir.ics"))
+            .respond_with(ResponseTemplate::new(201))
+            .mount(&server)
+            .await;
+        mount_report(
+            &server,
+            "calendar-multiget",
+            multistatus("/cal/evt-1@caldir.ics", "\"e-1\"", SERVER_HELD_ICS),
+        )
+        .await;
+
+        let mut local = Event::new(
+            "Sent by caldir",
+            EventTime::DateTimeUtc(
+                "2026-06-15T10:00:00Z"
+                    .parse::<chrono::DateTime<chrono::Utc>>()
+                    .expect("a valid timestamp"),
+            ),
+        );
+        local.uid = EventUid::new("evt-1@caldir");
+
+        let created = create_event("user", "pass", &calendar_url(&server), local)
+            .await
+            .expect("the create succeeds");
+
+        assert_eq!(
+            created.summary.as_deref(),
+            Some("Renamed by the server"),
+            "the read-back must win: dropping it loses every server-assigned value"
+        );
+        assert!(
+            created
+                .x_properties
+                .iter()
+                .any(|prop| prop.name == "X-RADICALE-NAME"),
+            "server-only properties must survive the read-back, got {:?}",
+            created.x_properties
+        );
+    }
+}

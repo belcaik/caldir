@@ -56,3 +56,6 @@ url = "2"
 
 [dev-dependencies]
 tempfile = "3"
+# HTTP double for the CalDAV request/response gates (ADJUDICATION: authorized
+# on L5-01 M7 evidence). Dev-only; never ships in a binary.
+wiremock = "0.6"

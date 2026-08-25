@@ -26,8 +26,16 @@ pub async fn update_event(
     let calendar_href = url_to_href(calendar_url);
 
     // Try {uid}.ics first (most servers), fall back to UID-based REPORT query
-    let location =
-        find_event_location(&caldav, &calendar_href, calendar_url, event.uid.as_str()).await?;
+    // The kind comes from the item being written, never a constant: locating
+    // an event's href for a task's PUT would overwrite the wrong resource.
+    let location = find_event_location(
+        &caldav,
+        &calendar_href,
+        calendar_url,
+        event.uid.as_str(),
+        event.event_instance_id().kind(),
+    )
+    .await?;
 
     // Use request_raw to avoid duplicate Content-Type header (see create_event).
     let uri = caldav.relative_uri(&location.href)?;

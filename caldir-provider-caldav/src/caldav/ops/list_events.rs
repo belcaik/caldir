@@ -238,6 +238,8 @@ fn parse_calendar_resources(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::caldav::ops::test_dav::{calendar_url, mount_report, multistatus};
+    use wiremock::MockServer;
 
     const HREF: &str = "/testuser/calendar/";
     const START: &str = "20250825T000000Z";
@@ -417,5 +419,55 @@ END:VCALENDAR\r\n";
         for query in &queries {
             assert_eq!(query.collection_href, HREF);
         }
+    }
+
+    /// The **M7 lock**. `fetch_events` issues two REPORTs and merges their
+    /// resources; before this test nothing held the merge, and a mutation that
+    /// consumed only the first REPORT's resources passed the entire suite.
+    /// That is silent task loss: core reads a remote listing as the complete
+    /// remote state, so a task missing from it is an incoming delete of the
+    /// user's file (R19, R48, R74).
+    ///
+    /// Driven from raw ICS on a real HTTP double, never from domain values
+    /// re-encoded by the code under test.
+    #[tokio::test]
+    async fn both_reports_resources_reach_the_caller() {
+        let server = MockServer::start().await;
+
+        mount_report(
+            &server,
+            "VEVENT",
+            multistatus("/cal/evt-1.ics", "\"e-1\"", VEVENT_RESOURCE_ICS),
+        )
+        .await;
+        mount_report(
+            &server,
+            "VTODO",
+            multistatus("/cal/task-1.ics", "\"t-1\"", VTODO_RESOURCE_ICS),
+        )
+        .await;
+
+        let items = fetch_events(
+            "user",
+            "pass",
+            &calendar_url(&server),
+            "2025-08-25T00:00:00Z",
+            "2027-08-25T00:00:00Z",
+        )
+        .await
+        .expect("both REPORTs answer");
+
+        let uids: Vec<&str> = items.iter().map(|item| item.uid().as_str()).collect();
+
+        assert!(
+            uids.contains(&"evt-1@caldir"),
+            "the VEVENT REPORT's resources must reach the caller, got {uids:?}"
+        );
+        assert!(
+            uids.contains(&"task-1@caldir"),
+            "M7: the VTODO REPORT's resources must reach the caller — dropping \
+             them reads to core as 'the server does not have this task', i.e. a \
+             delete. Got {uids:?}"
+        );
     }
 }
