@@ -286,3 +286,31 @@ future-proofing (the crate's enum is not caldir's, and its commented-out
 assertion that reaches into implementation detail to "catch" M8.
 Reviewers: this is known and accepted. See follow-up ticket idea:
 a crate-version-pinned guard for the day upstream adds Custom.
+
+## RELEASE IMPACT — PR-1 needs a MINOR bump (0.14.1 -> 0.15.0)
+L0-05 adds `CalendarError::IncompleteListing { unreadable, first }`.
+`CalendarError` is NOT `#[non_exhaustive]`, so a downstream that matches
+it exhaustively WITHOUT a wildcard arm stops compiling. Anything using
+`?`, `Box<dyn Error>`, or a `_` arm is unaffected.
+Per .agents/skills/bump/SKILL.md the project is pre-1.0 and gives
+breaking changes a MINOR bump => 0.15.0.
+OPEN CALL for whoever cuts the release: marking `CalendarError`
+`#[non_exhaustive]` would prevent this class of break in future, but is
+itself breaking, so L0-05 deliberately did NOT do it.
+
+## KNOWN REMAINING HOLE — `Calendar::master_event_for` (deliberate)
+Same absence-inference shape as the three L0-05 fixed: returns `Ok(None)`
+when the master's file is unreadable. L0-05 left it because it NEVER
+WRITES, and its one internal caller (`update_recurring_instance`'s None
+branch) is now only reachable on a complete listing. But a GUI calling
+`master_event_for` directly still cannot distinguish "no master" from
+"unreadable master". Follow-up if the whole absence-query family should
+be made coherent. Not a data-loss path.
+
+## PR-1 FINAL STATE
+Branch `pr1-graceful-degradation`, 2 commits off main:
+  f5517c1 graceful degradation + delete suppression
+  68bf616 do not infer "absent" from an unreadable event file
+695 passed / 0 failed. clippy -D warnings clean. fmt clean.
+Zero VTODO bytes. Description at docs/vtodo/PR1-DESCRIPTION.md.
+Ready to open upstream.
