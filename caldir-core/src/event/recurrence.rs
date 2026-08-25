@@ -98,7 +98,11 @@ impl Recurrence {
         }
     }
 
-    pub(crate) fn apply_to(&self, event: &mut icalendar::Event) {
+    // Generic over `Component` for the same reason `from_ical_event` is: the
+    // VTODO codec emits RRULE/EXDATE/RDATE identically (spec §6), and a copy
+    // would be a second place for the two to drift apart. Behaviour for
+    // `icalendar::Event` is unchanged.
+    pub(crate) fn apply_to<C: Component + ?Sized>(&self, event: &mut C) {
         event.append_property(Property::new("RRULE", &self.rrule));
         for exdate in &self.exdates {
             event.append_multi_property(DatePerhapsTime::from(exdate).to_property("EXDATE"));

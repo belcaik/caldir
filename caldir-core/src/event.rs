@@ -33,8 +33,8 @@ pub use time::EventTime;
 pub use visibility::Visibility;
 pub use x_property::XProperty;
 
-const ICS_PRODID: &str = "CALDIR";
-const ICS_VERSION: &str = "2.0";
+pub(crate) const ICS_PRODID: &str = "CALDIR";
+pub(crate) const ICS_VERSION: &str = "2.0";
 const ICS_UID_DOMAIN: &str = "caldir";
 
 #[derive(Debug, Clone, Eq, educe::Educe)]
