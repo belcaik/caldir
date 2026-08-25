@@ -1,8 +1,8 @@
 //! The public `--json` schema for agenda output.
 
 use caldir_core::{
-    Attachment, Attendee, Availability, Event, EventTime, Organizer, ParticipationStatus,
-    Recurrence, Reminder, Status, Visibility, XProperty,
+    Attachment, Attendee, Availability, CalendarItem, Event, EventTime, Organizer,
+    ParticipationStatus, Recurrence, Reminder, Status, Visibility, XProperty,
 };
 use chrono::SecondsFormat;
 use serde::{Serialize, Serializer};
@@ -14,7 +14,18 @@ impl Serialize for AgendaView {
     where
         S: Serializer,
     {
-        self.entries.serialize(serializer)
+        // TODO(L7-03): the `--json` stream stays event-only until the schema
+        // widens for tasks (ADR-10 D6 — `kind`, `due`, nullable `start`).
+        // Filtering here rather than fabricating an event shape for a task
+        // keeps every document a consumer can receive byte-identical to
+        // before. Display-only: nothing infers a deletion from this list.
+        let events: Vec<&AgendaEntry> = self
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.item, CalendarItem::Event(_)))
+            .collect();
+
+        events.serialize(serializer)
     }
 }
 
@@ -23,7 +34,12 @@ impl Serialize for AgendaEntry {
     where
         S: Serializer,
     {
-        AgendaJson::from(self).serialize(serializer)
+        match &self.item {
+            CalendarItem::Event(event) => AgendaJson::new(self, event).serialize(serializer),
+            // Unreachable through `AgendaView`, which filters tasks out above.
+            // TODO(L7-03): give a task its own shape rather than `null`.
+            CalendarItem::Todo(_) => serializer.serialize_none(),
+        }
     }
 }
 
@@ -40,17 +56,17 @@ struct AgendaJson<'a> {
     event: EventJson<'a>,
 }
 
-impl<'a> From<&'a AgendaEntry> for AgendaJson<'a> {
-    fn from(entry: &'a AgendaEntry) -> Self {
+impl<'a> AgendaJson<'a> {
+    fn new(entry: &'a AgendaEntry, event: &'a Event) -> Self {
         Self {
-            instance_id: entry.event.event_instance_id().to_string(),
+            instance_id: event.event_instance_id().to_string(),
             calendar: &entry.calendar,
-            title: &entry.event.summary,
-            all_day: entry.event.start.is_date(),
-            tzid: event_tzid(&entry.event.start),
+            title: &event.summary,
+            all_day: event.start.is_date(),
+            tzid: event_tzid(&event.start),
             rsvp: entry.rsvp,
-            recurring: entry.event.recurrence_id.is_some(),
-            event: EventJson::from(&entry.event),
+            recurring: event.recurrence_id.is_some(),
+            event: EventJson::from(event),
         }
     }
 }
@@ -284,7 +300,15 @@ mod tests {
         AgendaEntry {
             calendar: Some("personal".to_string()),
             rsvp: None,
-            event,
+            item: CalendarItem::Event(event),
+        }
+    }
+
+    fn todo_entry(todo: caldir_core::Todo) -> AgendaEntry {
+        AgendaEntry {
+            calendar: Some("personal".to_string()),
+            rsvp: None,
+            item: CalendarItem::Todo(todo),
         }
     }
 
@@ -614,6 +638,26 @@ END:VCALENDAR\r\n";
         assert_eq!(json["start"], "2026-08-14");
         assert_eq!(json["end"], "2026-08-17");
         assert_eq!(json["tzid"], serde_json::Value::Null);
+    }
+
+    /// C13 at the `--json` seam: tasks reach `AgendaView::entries` since
+    /// L7-01, but the public schema does not widen until L7-03 (ADR-10 D6).
+    /// Until it does, the stream a consumer receives is exactly the one it
+    /// received before tasks existed — no fabricated `start`, no new shape.
+    /// TODO(L7-03): replace this with the two-fixture schema assertion.
+    #[test]
+    fn the_json_stream_stays_event_only_until_the_schema_widens() {
+        let mut todo = caldir_core::Todo::new("Ship crawler patch");
+        todo.due = Some(EventTime::Date(date(2026, 8, 15)));
+        let view = view(vec![
+            entry(Event::new("Standup", EventTime::Date(date(2026, 8, 14)))),
+            todo_entry(todo),
+        ]);
+
+        let json = view.to_json();
+
+        assert_eq!(json.as_array().unwrap().len(), 1);
+        assert_eq!(json[0]["title"], "Standup");
     }
 
     #[test]
