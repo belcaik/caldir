@@ -254,6 +254,7 @@ dependencies = [
  "roxmltree",
  "serde",
  "serde_json",
+ "serial_test",
  "tempfile",
  "tokio",
  "toml",

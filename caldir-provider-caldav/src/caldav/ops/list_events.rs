@@ -140,6 +140,30 @@ fn calendar_query_body(filter: ComponentFilter<'_>) -> String {
     )
 }
 
+/// The REPORT bodies one `fetch_events` run actually puts on the wire, in
+/// order, taken from `prepare_request` rather than re-derived.
+///
+/// Test-only seam (R51/R58, T-54). The live tier asserts on the **request**,
+/// not on a server's answer: Radicale implements RFC 4791 §9.9 faithfully, so
+/// a reintroduced `<C:time-range>` on the VTODO query silently omits an
+/// undated task and core turns that absence into a delete of the user's file.
+/// Reaching through `prepare_request` means a filter rewired anywhere between
+/// `calendar_queries` and the wire is caught here.
+#[cfg(test)]
+pub(crate) fn report_request_bodies(collection_href: &str, start: &str, end: &str) -> Vec<String> {
+    let base: Uri = "http://127.0.0.1/".parse().expect("a valid base URI");
+
+    calendar_queries(collection_href, start, end)
+        .iter()
+        .map(|query| {
+            query
+                .prepare_request(base.clone())
+                .expect("the REPORT request builds")
+                .into_body()
+        })
+        .collect()
+}
+
 /// A fetched calendar resource with its ICS data.
 #[derive(Debug)]
 struct CalendarResource {
