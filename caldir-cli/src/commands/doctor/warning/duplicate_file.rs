@@ -13,8 +13,14 @@ pub(crate) fn duplicate_file_warnings(events: &[CalendarEvent]) -> Vec<DoctorWar
 fn duplicate_file_sets(events: &[CalendarEvent]) -> Vec<Vec<PathBuf>> {
     let mut by_id: HashMap<EventInstanceId, Vec<PathBuf>> = HashMap::new();
     for ce in events {
+        // Only events carry an `EventInstanceId`. `L2-08` makes this check
+        // kind-aware; until then a task is not bucketed at all.
+        let Some(event) = ce.as_event() else {
+            continue;
+        };
+
         by_id
-            .entry(ce.event().event_instance_id())
+            .entry(event.event_instance_id())
             .or_default()
             .push(ce.path().to_path_buf());
     }

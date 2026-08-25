@@ -44,7 +44,11 @@ fn run_direct(caldir: &Caldir, path_str: &str, response_str: &str) -> Result<()>
         .context("No account email configured for this calendar")?;
 
     let mut cal_event = CalendarEvent::load(&path).context("Failed to load event")?;
-    let event = cal_event.event();
+    // An RSVP is meaningless on a task (R81). Fail before anything is written;
+    // `L7-04` owns the final wording.
+    let Some(event) = cal_event.as_event() else {
+        anyhow::bail!("Cannot RSVP to a task: {}", path.display());
+    };
 
     if !event.is_invite_for(email) {
         anyhow::bail!("This event is not an invite for {}", email);
@@ -78,8 +82,9 @@ fn run_interactive(caldir: &Caldir) -> Result<()> {
         .unwrap()
         .with_timezone(&Utc);
 
-    // (cal_slug, email, CalendarEvent) — own the CalendarEvent so we can mutate.
-    let mut invites: Vec<(String, String, CalendarEvent)> = Vec::new();
+    // (cal_slug, email, Event, CalendarEvent) — own the CalendarEvent so we can
+    // mutate, and carry the narrowed event so no later step has to re-narrow.
+    let mut invites: Vec<(String, String, Event, CalendarEvent)> = Vec::new();
 
     for cal in caldir.calendars().into_iter().filter_map(Result::ok) {
         let Some(email) = cal.remote_email() else {
@@ -89,17 +94,23 @@ fn run_interactive(caldir: &Caldir) -> Result<()> {
         let cal_slug = cal.slug().unwrap_or("(Unknown calendar)").to_string();
 
         for ce in cal.events()?.into_events() {
-            let event = ce.event();
+            // Tasks have no invites to answer (R81), so they are simply not
+            // listed here; `L7-04` owns the user-facing story.
+            let Some(event) = ce.as_event() else {
+                continue;
+            };
+
             let in_range = event.occurs_in_range(from, to);
             let is_pending = event.is_invite_for(&email)
                 && event.attendee_status(&email) == Some(ParticipationStatus::NeedsAction);
             if in_range && is_pending {
-                invites.push((cal_slug.clone(), email.clone(), ce));
+                let event = event.clone();
+                invites.push((cal_slug.clone(), email.clone(), event, ce));
             }
         }
     }
 
-    invites.sort_by_key(|(_, _, ce)| ce.event().start.to_utc());
+    invites.sort_by_key(|(_, _, event, _)| event.start.to_utc());
 
     if invites.is_empty() {
         println!("{}", "No pending invites.".dimmed());
@@ -119,8 +130,7 @@ fn run_interactive(caldir: &Caldir) -> Result<()> {
     let mut responded = 0;
     let mut current_date: Option<String> = None;
 
-    for (cal_slug, email, mut ce) in invites {
-        let event = ce.event().clone();
+    for (cal_slug, email, event, mut ce) in invites {
         let date_label = format_date_only(&event.start);
         if current_date.as_ref() != Some(&date_label) {
             if current_date.is_some() {
