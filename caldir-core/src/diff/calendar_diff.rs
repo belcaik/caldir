@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use super::event_change::EventChange;
 use crate::calendar::{CalendarListing, SyncBases};
 use crate::event::Status;
+use crate::item::CalendarItem;
 use crate::{CalendarEvent, DateRange, RemoteEvent};
 
 pub struct CalendarDiff {
@@ -86,7 +87,10 @@ impl CalendarDiff {
                     to_push.visibility = remote_event.event().visibility;
                 }
 
-                let base = sync_bases.get(&id).and_then(Option::as_deref);
+                let base = sync_bases
+                    .get(&id)
+                    .and_then(Option::as_deref)
+                    .and_then(CalendarItem::as_event);
                 let direction = if &to_push == remote_event.event() {
                     Some(UpdateDirection::Pull)
                 } else {

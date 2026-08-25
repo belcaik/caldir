@@ -99,6 +99,20 @@ impl CalendarItem {
         }
     }
 
+    /// The event backing this item, or `None` for any other kind.
+    ///
+    /// The narrowing the VEVENT-only sync seams still need. It is not a drop:
+    /// every caller looks the item up by an *event* identity, and a stored
+    /// base always shares its key's kind, so `None` here is unreachable rather
+    /// than lossy — and where it is reached anyway it means "no base", which
+    /// costs a three-way compare, never a delete (R19).
+    pub(crate) fn as_event(&self) -> Option<&Event> {
+        match self {
+            CalendarItem::Event(event) => Some(event),
+            CalendarItem::Todo(_) => None,
+        }
+    }
+
     /// The item's `SUMMARY`, from whichever kind backs it.
     pub fn summary(&self) -> Option<&str> {
         match self {

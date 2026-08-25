@@ -3,15 +3,22 @@ use std::{collections::HashMap, path::Path};
 use sha2::{Digest, Sha256};
 
 use super::CalendarStateError;
-use crate::{Event, EventInstanceId};
+use crate::{EventInstanceId, item::CalendarItem};
 
 pub(crate) const EVENT_BASES_DIR_NAME: &str = "bases";
 
-pub(crate) struct EventBases(HashMap<EventInstanceId, Event>);
+/// The last-synced form of each item, keyed by its kind-carrying identity.
+///
+/// The on-disk layout is unchanged (C5): one single-component `VCALENDAR` per
+/// item at `bases/<sha256(identity_string)>.ics`. An event's identity string
+/// is unprefixed, so an event's base filename is byte-identical to what every
+/// existing caldir already wrote; a task's carries the `VTODO:` sigil and can
+/// never land on an event's file even when they share a UID (R43, R36 hazard 4).
+pub(crate) struct EventBases(HashMap<EventInstanceId, CalendarItem>);
 
 impl IntoIterator for EventBases {
-    type Item = (EventInstanceId, Event);
-    type IntoIter = std::collections::hash_map::IntoIter<EventInstanceId, Event>;
+    type Item = (EventInstanceId, CalendarItem);
+    type IntoIter = std::collections::hash_map::IntoIter<EventInstanceId, CalendarItem>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
@@ -20,24 +27,24 @@ impl IntoIterator for EventBases {
 
 impl EventBases {
     pub(crate) fn write_from<'a>(
-        events: impl IntoIterator<Item = &'a Event>,
+        items: impl IntoIterator<Item = &'a CalendarItem>,
         path: &Path,
     ) -> Result<(), CalendarStateError> {
         std::fs::create_dir_all(path)?;
 
-        for event in events {
-            let filename = hash_filename(&event.event_instance_id().to_string());
-            let event_path = path.join(format!("{filename}.ics"));
+        for item in items {
+            let filename = hash_filename(&item.instance_id().to_string());
+            let item_path = path.join(format!("{filename}.ics"));
 
             // Skip unchanged bases to avoid churning every file on every sync.
             // Parse-compare, not byte-compare: to_ics_string stamps a fresh DTSTAMP.
-            if Event::load_single(&event_path).is_ok_and(|existing| &existing == event) {
+            if CalendarItem::load(&item_path).is_ok_and(|existing| &existing == item) {
                 continue;
             }
 
             let mut tmp = tempfile::NamedTempFile::new_in(path)?;
-            std::io::Write::write_all(&mut tmp, event.to_ics_string().as_bytes())?;
-            tmp.persist(event_path).map_err(|err| err.error)?;
+            std::io::Write::write_all(&mut tmp, item.to_ics_string().as_bytes())?;
+            tmp.persist(item_path).map_err(|err| err.error)?;
         }
 
         Ok(())
@@ -56,16 +63,19 @@ impl EventBases {
 
                 if file_path.is_file() && is_hashed_filename(filename) {
                     // An unreadable base is no base — degrade to the legacy
-                    // known-id entry rather than failing the whole load.
-                    let Ok(event) = Event::load_single(&file_path) else {
+                    // known-id entry rather than failing the whole load (C5,
+                    // INVIOLABLE). Safe for the delete path: `known_event_ids`
+                    // still holds the identity, so the item degrades to
+                    // "seen, no base", never to "never seen".
+                    let Ok(item) = CalendarItem::load(&file_path) else {
                         continue;
                     };
-                    let event_instance_id = event.event_instance_id();
+                    let instance_id = item.instance_id();
                     let expected_filename =
-                        format!("{}.ics", hash_filename(&event_instance_id.to_string()));
+                        format!("{}.ics", hash_filename(&instance_id.to_string()));
 
                     if filename == expected_filename {
-                        event_bases.insert(event_instance_id, event);
+                        event_bases.insert(instance_id, item);
                     }
                 }
             }
@@ -90,7 +100,7 @@ fn is_hashed_filename(filename: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{EventBases, EventInstanceId, hash_filename, is_hashed_filename};
+    use super::{CalendarItem, EventBases, EventInstanceId, hash_filename, is_hashed_filename};
     use crate::test_utils::test_event;
 
     // Backward compatibility: an event id hashes the SAME string it always did,
@@ -147,12 +157,12 @@ mod tests {
     #[test]
     fn write_skips_unchanged_bases_despite_dtstamp_drift() {
         let dir = tempfile::TempDir::new().unwrap();
-        let event = test_event();
+        let event = CalendarItem::from(test_event());
         EventBases::write_from([&event], dir.path()).unwrap();
 
         let path = dir.path().join(format!(
             "{}.ics",
-            hash_filename(&event.event_instance_id().to_string())
+            hash_filename(&event.instance_id().to_string())
         ));
 
         // Simulate an earlier sync: same event, older DTSTAMP.
@@ -189,7 +199,7 @@ mod tests {
     #[test]
     fn corrupt_base_is_skipped_rather_than_failing_the_load() {
         let dir = tempfile::TempDir::new().unwrap();
-        let event = test_event();
+        let event = CalendarItem::from(test_event());
         EventBases::write_from([&event], dir.path()).unwrap();
 
         let garbled = format!("{}.ics", hash_filename("garbled"));
@@ -199,7 +209,230 @@ mod tests {
 
         let loaded: Vec<_> = EventBases::load(dir.path()).unwrap().into_iter().collect();
 
-        assert_eq!(loaded, vec![(event.event_instance_id(), event)]);
+        assert_eq!(loaded, vec![(event.instance_id(), event)]);
+    }
+
+    /// The rehash gate is a silent discarder by design: a base whose id
+    /// string form has drifted from its filename degrades to "no base"
+    /// rather than being trusted under the wrong key.
+    #[test]
+    fn load_discards_a_base_whose_filename_does_not_match_its_contents() {
+        let dir = tempfile::TempDir::new().unwrap();
+
+        // A perfectly valid event document, filed under another id's digest.
+        std::fs::write(
+            dir.path()
+                .join("99af2871eebb2d3a36d4269410f91edc56db3d531c12f46800bf0b6d7e59c9ba.ics"),
+            crate::test_utils::VEVENT_CONTROL_ICS,
+        )
+        .unwrap();
+
+        let loaded: Vec<_> = EventBases::load(dir.path()).unwrap().into_iter().collect();
+
+        assert_eq!(loaded, vec![]);
+    }
+
+    /// Backward compatibility, end to end: a base file written by an older
+    /// caldir — an event document under `sha256(<uid>)` with no kind sigil —
+    /// still loads. If this ever fails, every existing user's sync state
+    /// silently reads as empty and the next sync becomes a full re-push.
+    #[test]
+    fn a_legacy_event_base_written_before_vtodo_support_still_loads() {
+        let dir = tempfile::TempDir::new().unwrap();
+
+        // `printf 'window-123@u-crawler' | sha256sum` — an independent digest,
+        // written the way pre-VTODO caldir would have named the file.
+        std::fs::write(
+            dir.path()
+                .join("4c6a2c75669698a6e1127c24dadde2bb9e48ffff12b55e5797cf5e78b31e3b54.ics"),
+            crate::test_utils::VEVENT_CONTROL_ICS,
+        )
+        .unwrap();
+
+        let loaded: Vec<_> = EventBases::load(dir.path()).unwrap().into_iter().collect();
+
+        assert_eq!(loaded.len(), 1, "{loaded:?}");
+        assert_eq!(
+            loaded[0].0,
+            EventInstanceId::new(
+                crate::event::EventUid::new("window-123@u-crawler".to_string()),
+                None
+            )
+        );
+        assert!(matches!(loaded[0].1, CalendarItem::Event(_)));
+    }
+
+    /// T-23. Three things that can independently break, in one test:
+    /// the task base round-trips (R43), the rehash check agrees with the
+    /// kind-carrying id string form (the L1-06 + L3-01 contract), and an
+    /// unparseable base is skipped rather than fatal (C5, INVIOLABLE).
+    #[test]
+    fn a_task_base_loads_and_rehashes_and_an_unparseable_base_is_skipped() {
+        use crate::event::ComponentKind;
+        use crate::test_utils::VTODO_ICS;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let task = CalendarItem::from_single_ics_str(VTODO_ICS).unwrap();
+
+        EventBases::write_from([&task], dir.path()).unwrap();
+
+        // Rehash: the on-disk name is the hash of the task's own id string.
+        // The digest is an independent literal
+        // (`printf 'VTODO:assignment-123@u-crawler' | sha256sum`), not a
+        // recomputation the way the code does it.
+        let expected_filename =
+            "00f37d0ec1204a1be30bbc8cec82b000fc6e8b6405f1dd1dfda5c31367683e83.ics";
+        assert!(dir.path().join(expected_filename).is_file());
+        assert_eq!(
+            format!("{}.ics", hash_filename(&task.instance_id().to_string())),
+            expected_filename
+        );
+
+        // C5: unparseable bases under correctly-named hashed filenames.
+        std::fs::write(
+            dir.path().join(format!("{}.ics", hash_filename("garbled"))),
+            "not an ics file",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(format!("{}.ics", hash_filename("empty"))),
+            "",
+        )
+        .unwrap();
+
+        let loaded: Vec<_> = EventBases::load(dir.path()).unwrap().into_iter().collect();
+
+        assert_eq!(loaded, vec![(task.instance_id(), task)]);
+        assert_eq!(loaded[0].0.kind(), ComponentKind::Todo);
+    }
+
+    /// AC2: two kinds, one UID, two files. The store never conflates them,
+    /// and the event keeps the filename it has always had.
+    #[test]
+    fn an_event_and_a_task_sharing_a_uid_get_two_distinct_base_files() {
+        let dir = tempfile::TempDir::new().unwrap();
+
+        let mut event = test_event();
+        event.uid = crate::event::EventUid::new("shared@u-crawler".to_string());
+        let mut todo = crate::todo::Todo::new("Shared");
+        todo.uid = crate::event::EventUid::new("shared@u-crawler".to_string());
+
+        let event = CalendarItem::from(event);
+        let task = CalendarItem::from(todo);
+
+        EventBases::write_from([&event, &task], dir.path()).unwrap();
+
+        let files: std::collections::BTreeSet<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_str().unwrap().to_string())
+            .collect();
+
+        // Independent digests: `printf '<id>' | sha256sum`.
+        assert_eq!(files.len(), 2, "{files:?}");
+        assert!(
+            files.contains("99af2871eebb2d3a36d4269410f91edc56db3d531c12f46800bf0b6d7e59c9ba.ics")
+        );
+        assert!(
+            files.contains("e49f6d9c1cb361b8f11d241574edf8b6e097d19b08d488b2bfe4f66276acf6c7.ics")
+        );
+
+        let loaded: std::collections::HashMap<_, _> =
+            EventBases::load(dir.path()).unwrap().into_iter().collect();
+
+        assert_eq!(loaded.get(&event.instance_id()), Some(&event));
+        assert_eq!(loaded.get(&task.instance_id()), Some(&task));
+    }
+
+    /// R18: the base decoder applies the `VTIMEZONE` exemption, exactly like
+    /// the disk loader — a zoned task base is not "two components".
+    #[test]
+    fn a_base_with_a_vtimezone_sibling_decodes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VTIMEZONE\r\nTZID:Europe/Stockholm\r\nEND:VTIMEZONE\r\n\
+BEGIN:VTODO\r\nUID:zoned@u-crawler\r\nDUE;TZID=Europe/Stockholm:20260815T235900\r\n\
+END:VTODO\r\nEND:VCALENDAR\r\n";
+
+        // Independent digest: `printf 'VTODO:zoned@u-crawler' | sha256sum`.
+        std::fs::write(
+            dir.path()
+                .join("8be82ff09dc387c86b83580644536fa6814dd4ac7e975f9f6a9b703d598cf36e.ics"),
+            ics,
+        )
+        .unwrap();
+
+        let loaded: Vec<_> = EventBases::load(dir.path()).unwrap().into_iter().collect();
+
+        assert_eq!(loaded.len(), 1, "{loaded:?}");
+        assert_eq!(
+            loaded[0].0,
+            EventInstanceId::todo(
+                crate::event::EventUid::new("zoned@u-crawler".to_string()),
+                None
+            )
+        );
+    }
+
+    /// AC4: an arity failure and an unsupported component are errors the
+    /// decoder raises and `load` swallows — never propagated, never fatal.
+    #[test]
+    fn an_arity_or_unsupported_base_is_skipped_not_propagated() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let event = CalendarItem::from(test_event());
+        EventBases::write_from([&event], dir.path()).unwrap();
+
+        let two_components = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VEVENT\r\nUID:a@caldir\r\nDTSTART:20260301T100000Z\r\nEND:VEVENT\r\n\
+BEGIN:VTODO\r\nUID:b@caldir\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
+        let unsupported = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VFREEBUSY\r\nUID:c@caldir\r\nEND:VFREEBUSY\r\nEND:VCALENDAR\r\n";
+
+        std::fs::write(
+            dir.path().join(format!("{}.ics", hash_filename("two"))),
+            two_components,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path()
+                .join(format!("{}.ics", hash_filename("unsupported"))),
+            unsupported,
+        )
+        .unwrap();
+
+        let loaded: Vec<_> = EventBases::load(dir.path()).unwrap().into_iter().collect();
+
+        assert_eq!(loaded, vec![(event.instance_id(), event)]);
+    }
+
+    /// AC7: the parse-compare skip works for tasks too — a task base is not
+    /// rewritten just because `to_ics_string` stamps a fresh `DTSTAMP`.
+    #[test]
+    fn write_skips_unchanged_task_bases_despite_dtstamp_drift() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let task = CalendarItem::from_single_ics_str(crate::test_utils::VTODO_ICS).unwrap();
+        EventBases::write_from([&task], dir.path()).unwrap();
+
+        let path = dir.path().join(format!(
+            "{}.ics",
+            hash_filename(&task.instance_id().to_string())
+        ));
+
+        let restamped: String = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                if line.starts_with("DTSTAMP:") {
+                    "DTSTAMP:20000101T000000Z\r\n".to_string()
+                } else {
+                    format!("{line}\r\n")
+                }
+            })
+            .collect();
+        std::fs::write(&path, &restamped).unwrap();
+
+        EventBases::write_from([&task], dir.path()).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), restamped);
     }
 
     #[test]

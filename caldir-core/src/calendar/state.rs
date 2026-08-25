@@ -14,6 +14,8 @@ pub(crate) use sync_bases::SyncBases;
 use crate::Event;
 #[cfg(test)]
 use crate::EventInstanceId;
+#[cfg(test)]
+use crate::item::CalendarItem;
 
 #[derive(Debug)]
 pub struct CalendarState {
@@ -50,9 +52,15 @@ impl CalendarState {
         self.sync_bases.iter().map(|(id, _)| id.clone()).collect()
     }
 
+    /// The stored base for an *event* identity. Narrows because every caller
+    /// asserts against an `Event`; a stored base always shares its key's kind,
+    /// so this never hides a task.
     #[cfg(test)]
     pub(crate) fn sync_base(&self, id: &EventInstanceId) -> Option<&Event> {
-        self.sync_bases.get(id).and_then(Option::as_deref)
+        self.sync_bases
+            .get(id)
+            .and_then(Option::as_deref)
+            .and_then(CalendarItem::as_event)
     }
 }
 

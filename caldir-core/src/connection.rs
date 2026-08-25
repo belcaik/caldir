@@ -202,7 +202,7 @@ fn bases_to_backfill(
 
         let base_is_current = match sync_bases.get(&id) {
             None => continue,
-            Some(Some(base)) => base.as_ref() == remote,
+            Some(Some(base)) => base.as_event() == Some(remote),
             Some(None) => false,
         };
 

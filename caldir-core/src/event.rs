@@ -95,13 +95,6 @@ impl Event {
         }
     }
 
-    pub(crate) fn load_single(path: &std::path::Path) -> Result<Self, EventError> {
-        let contents =
-            std::fs::read_to_string(path).map_err(|err| EventError::Io(path.to_path_buf(), err))?;
-
-        Self::narrowed_from_single_ics_str(&contents)
-    }
-
     /// Parse a one-component ICS document and narrow it back to an event.
     ///
     /// Parsing is the item loader's job; this is the lossy step the two
