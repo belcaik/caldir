@@ -204,7 +204,9 @@ impl CalendarDiff {
     ///
     /// The suppression must not be silent — a self-perpetuating belt nobody
     /// is told about is the failure mode this accessor exists to prevent.
-    /// TODO(L7): render it; the wording is deferred by R50, the signal is not.
+    /// Consumed by the CLI's diff renderer (`L7-07`): `status`, `sync` and
+    /// `pull` print a warning line per calendar whenever this is true, and the
+    /// warning survives an otherwise-empty diff.
     pub fn suppressed_task_deletes(&self) -> bool {
         self.suppressed_task_deletes
     }
