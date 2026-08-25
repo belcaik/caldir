@@ -148,6 +148,7 @@ mod tests {
     use crate::test_utils::{VTODO_ZONED_ICS, parse_icalendar_todo};
     use crate::todo::Todo;
     use chrono::{NaiveDate, TimeZone, Utc};
+    use icalendar::Component;
     use pretty_assertions::assert_eq;
 
     // UID is half of identity (R13); a task without one has no identity to
@@ -307,13 +308,61 @@ SUMMARY:No start\r\n\
 END:VTODO\r\n\
 END:VCALENDAR\r\n";
 
-        let todo = Todo::try_from(&parse_icalendar_todo(ics)).unwrap();
+        let component = parse_icalendar_todo(ics);
+
+        // The trap is live: the crate really did parse the DTEND onto the
+        // component and `EventLike` really does expose it here. Without this
+        // the assertions below would pass vacuously on a fixture whose DTEND
+        // the crate had silently discarded.
+        assert!(
+            component.get_end().is_some(),
+            "fixture must actually carry a DTEND for this test to mean anything"
+        );
+
+        let todo = Todo::try_from(&component).unwrap();
 
         assert_eq!(todo.start, None);
+        assert_eq!(
+            todo.due,
+            Some(EventTime::DateTimeUtc(
+                Utc.with_ymd_and_hms(2026, 8, 15, 23, 59, 0).unwrap()
+            ))
+        );
         assert_eq!(todo.summary.as_deref(), Some("No start"));
         assert!(
             !todo.x_properties.iter().any(|x| x.name == "DTEND"),
             "DTEND must not be captured anywhere on a Todo"
+        );
+    }
+
+    // R21, DUE half. `parses_the_rest_of_the_mvp_property_set` pins the
+    // normalization boundary on DTSTART, but the T-13 fixture's DUE already
+    // carries an IANA TZID, so nothing pinned it on DUE — a parser that kept
+    // the inbound TZID verbatim passed both. This is the missing lock: a
+    // Windows TZID on DUE must arrive as IANA, exactly as it does on DTSTART.
+    #[test]
+    fn a_due_with_a_windows_tzid_is_normalized_to_iana() {
+        let ics = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+BEGIN:VTODO\r\n\
+UID:windows-due@caldir\r\n\
+DTSTAMP:20260801T090000Z\r\n\
+DUE;TZID=W. Europe Standard Time:20260815T235900\r\n\
+SUMMARY:Windows deadline\r\n\
+END:VTODO\r\n\
+END:VCALENDAR\r\n";
+
+        let todo = Todo::try_from(&parse_icalendar_todo(ics)).unwrap();
+
+        assert_eq!(
+            todo.due,
+            Some(EventTime::DateTimeZoned {
+                datetime: NaiveDate::from_ymd_opt(2026, 8, 15)
+                    .unwrap()
+                    .and_hms_opt(23, 59, 0)
+                    .unwrap(),
+                tzid: "Europe/Berlin".to_string(),
+            })
         );
     }
 

@@ -258,3 +258,31 @@ Several tickets say "686 baseline". Real baselines by phase:
   + PR-1 (L0-01..03)       697 pass / 5 fail
   + L1-01                  699 pass / 5 fail
 Implementers: use the CURRENT measured tree count, not the AC's number.
+
+## CORRECTION — DTEND reaches icalendar::Todo via TWO traits, not one
+The spec, tickets and briefs say `EventLike` leaks `ends()`/DTEND onto
+`Todo`. That is INCOMPLETE and partly wrong (verified against the pinned
+0.17.10 registry source by the L1-03 agent):
+- `Component::get_end` at `components.rs:199` is the GETTER.
+- `EventLike::ends` at `components.rs:394` is the SETTER.
+- `component_impl! { Todo }` (`:664`) and `event_impl! { Todo }` (`:665`)
+  mean BOTH traits apply to `Todo`.
+So DTEND is reachable from two traits. Any ticket guarding against DTEND
+must block both. L1-03 confirmed the parse side is clean via three
+barriers; the SERIALIZE-side proof (emitted bytes contain no `DTEND:`)
+belongs to L1-04 and MUST be written there.
+
+## ACCEPTED NON-LOCK — M8 (`get_status()` vs raw STATUS read)
+L1-03 mutation-tested 18 mutations; 17 are caught. M8 (swapping the raw
+STATUS read for the crate's `get_status()`) SLIPS, and is UNOBSERVABLE at
+that seam: `icalendar::TodoStatus::from_str` (`properties.rs:303-311`) is
+a byte-for-byte match of caldir's `TodoStatus::from_ics_str` — same four
+literals, same `_ => None` — and both call sites `.unwrap_or_default()`.
+Since R14 rules the outcome is DROP, the two are behaviourally identical
+on 0.17.10.
+RULING: this is a REASONED NON-LOCK, not a testing gap. Reading raw is
+future-proofing (the crate's enum is not caldir's, and its commented-out
+`//Custom(&str)` shows upstream intends to widen it). Do NOT invent an
+assertion that reaches into implementation detail to "catch" M8.
+Reviewers: this is known and accepted. See follow-up ticket idea:
+a crate-version-pinned guard for the day upstream adds Custom.
