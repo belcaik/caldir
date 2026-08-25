@@ -354,7 +354,7 @@ mod tests {
         assert_eq!(calendar.state().sync_base(&id), None);
 
         let mock = test_mock_provider();
-        mock.reply::<rpc::ListEvents>(vec![event.clone()]);
+        mock.reply::<rpc::ListEvents>(vec![event.clone().into()]);
         let remote = Remote::new(mock.provider(), test_remote_params());
 
         let mut connection = Connection::new(calendar, remote);
@@ -372,7 +372,7 @@ mod tests {
         let id = event.event_instance_id();
         connection.local().create_event(event.clone()).unwrap();
 
-        mock.reply::<rpc::ListEvents>(vec![event]);
+        mock.reply::<rpc::ListEvents>(vec![event.into()]);
         connection.diff(&DateRange::default()).await.unwrap();
 
         let reloaded = Calendar::load(connection.local().path()).unwrap();
@@ -412,7 +412,7 @@ mod tests {
         assert!(calendar.events().unwrap().is_incomplete());
 
         let mock = test_mock_provider();
-        mock.reply::<rpc::ListEvents>(vec![remote_only]);
+        mock.reply::<rpc::ListEvents>(vec![remote_only.into()]);
         let remote = Remote::new(mock.provider(), test_remote_params());
 
         let mut connection = Connection::new(calendar, remote);

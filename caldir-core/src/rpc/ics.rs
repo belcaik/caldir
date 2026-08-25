@@ -6,8 +6,19 @@
 //!   disk loader, `VTIMEZONE` exemption included (R54, R18, R102).
 //! - the module-level [`serialize`]/[`deserialize`] used by
 //!   `#[serde(with = "crate::rpc::ics")]`, and [`Ics`], sit on top of it and
-//!   narrow to an `Event`, because the RPC struct field is still `Event`
-//!   (R70; `L4-02` owns moving it).
+//!   narrow to an `Event`, because the **outbound** RPC struct field is still
+//!   `Event` (R70).
+//!
+//! Two wire newtypes, not one, and that asymmetry is deliberate:
+//! - [`Ics`] is the **outbound** payload. It stays `Event`-only, so a task
+//!   pushed to a provider aborts loudly (R70, R71).
+//! - [`ItemIcs`] is the **inbound** payload, carrying a whole [`CalendarItem`]
+//!   so `list_events` can hand a task back at all (R53).
+//!
+//! `WireValue::from_wire` is infallible, so neither newtype may narrow inside
+//! it — a narrowing there has no error channel and could only panic or drop
+//! (R19). Both put every fallible step in `Deserialize`, where serde's error
+//! channel is, and hold an already-decoded value afterwards.
 //!
 //! Decode failure is loud in both layers, and that loudness is the whole
 //! reason an old core paired with a new provider is safe (R57): a VTODO
@@ -36,6 +47,33 @@ impl Serialize for Ics {
 impl<'de> Deserialize<'de> for Ics {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         deserialize(deserializer).map(Self)
+    }
+}
+
+/// The **inbound** wire payload: one supported item of whichever kind.
+///
+/// Carries a decoded [`CalendarItem`], never a narrowing. That is what makes
+/// `WireValue::from_wire`'s infallible signature safe here: by the time a
+/// value exists, [`item::deserialize`] has already reported any failure
+/// through serde (R19, R57).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ItemIcs(pub(crate) CalendarItem);
+
+impl ItemIcs {
+    pub(crate) fn into_inner(self) -> CalendarItem {
+        self.0
+    }
+}
+
+impl Serialize for ItemIcs {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        item::serialize(&self.0, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ItemIcs {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        item::deserialize(deserializer).map(Self)
     }
 }
 

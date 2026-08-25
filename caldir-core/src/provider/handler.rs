@@ -14,7 +14,7 @@ use crate::rpc::{
     Connect, ConnectResponse, CreateEvent, DeleteEvent, ListCalendars, ListEvents, Method, Request,
     Response, Rpc, UpdateEvent, WireValue,
 };
-use crate::{CalendarConfig, Event};
+use crate::{CalendarConfig, CalendarItem, Event};
 
 /// Error returned by [`Handler`] methods.
 pub type Error = Box<dyn StdError + Send + Sync>;
@@ -31,7 +31,10 @@ pub trait Handler: Send + Sync {
         Err("list_calendars is not supported by this provider".into())
     }
 
-    async fn list_events(&self, _cmd: ListEvents) -> Result<Vec<Event>> {
+    /// The one inbound channel for a task: item-typed so a provider can
+    /// return a `VTODO` at all (R53). The outbound methods below stay
+    /// `Event`-typed (R70).
+    async fn list_events(&self, _cmd: ListEvents) -> Result<Vec<CalendarItem>> {
         Err("list_events is not supported by this provider".into())
     }
 
@@ -182,6 +185,58 @@ mod tests {
         let wire_event: Ics = serde_json::from_value(parsed["data"].clone()).unwrap();
 
         assert_eq!(wire_event.into_inner(), event);
+    }
+
+    struct ListingHandler(Vec<CalendarItem>);
+
+    #[async_trait]
+    impl Handler for ListingHandler {
+        async fn connect(&self, _cmd: Connect) -> Result<ConnectResponse> {
+            unreachable!()
+        }
+
+        async fn list_events(&self, _cmd: ListEvents) -> Result<Vec<CalendarItem>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    const LIST_EVENTS_REQUEST: &str = r#"{"command":"list_events","params":{"from":"2026-01-01T00:00:00+00:00","to":"2026-12-31T23:59:59+00:00"}}"#;
+
+    /// R1/R2 (INVIOLABLE) — the migration guarantee. An item-typed response
+    /// must leave the bytes an **event** listing puts on the wire exactly as
+    /// they were, or every installed provider's pull changes shape. Asserted
+    /// against `Event::to_ics_string` — the bytes' own source of truth — not
+    /// against the wire codec, which is the thing under test.
+    #[tokio::test]
+    async fn an_event_listing_is_byte_identical_to_the_event_only_encoding() {
+        let event = Event::new(
+            "Test",
+            EventTime::Date(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()),
+        );
+        let handler = ListingHandler(vec![CalendarItem::Event(event.clone())]);
+
+        let response = process_request(&handler, LIST_EVENTS_REQUEST).await;
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(parsed["data"], serde_json::json!([event.to_ics_string()]));
+    }
+
+    /// R53 — the inbound half of the same seam: a provider can hand a task
+    /// back, and it arrives as a bare ICS string like every other element.
+    #[tokio::test]
+    async fn a_task_listing_reaches_the_wire_as_a_vtodo_string() {
+        let todo = CalendarItem::from_single_ics_str(crate::test_utils::VTODO_ICS).unwrap();
+        let handler = ListingHandler(vec![todo]);
+
+        let response = process_request(&handler, LIST_EVENTS_REQUEST).await;
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        let ics = parsed["data"][0]
+            .as_str()
+            .expect("each element is a plain ICS string");
+
+        assert!(ics.contains("BEGIN:VTODO\r\n"), "got {ics:?}");
+        assert!(!ics.contains("BEGIN:VEVENT"), "got {ics:?}");
     }
 
     #[tokio::test]

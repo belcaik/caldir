@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use caldir_core::rpc::{
     Connect, ConnectResponse, CreateEvent, DeleteEvent, ListCalendars, ListEvents, UpdateEvent,
 };
-use caldir_core::{CalendarConfig, Event, provider};
+use caldir_core::{CalendarConfig, CalendarItem, Event, provider};
 
 struct ICloudProvider;
 
@@ -23,8 +23,10 @@ impl provider::Handler for ICloudProvider {
         Ok(commands::list_calendars::handle(cmd).await?)
     }
 
-    async fn list_events(&self, cmd: ListEvents) -> provider::Result<Vec<Event>> {
-        Ok(commands::list_events::handle(cmd).await?)
+    async fn list_events(&self, cmd: ListEvents) -> provider::Result<Vec<CalendarItem>> {
+        let events = commands::list_events::handle(cmd).await?;
+
+        Ok(events.into_iter().map(CalendarItem::from).collect())
     }
 
     async fn create_event(&self, cmd: CreateEvent) -> provider::Result<Event> {
