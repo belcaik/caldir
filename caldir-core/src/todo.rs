@@ -176,7 +176,9 @@ impl Todo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::parse_icalendar_todo;
+    use crate::test_utils::{
+        VTODO_COMPLETED_PRODUCTION_ICS, VTODO_OPEN_PRODUCTION_ICS, parse_icalendar_todo,
+    };
     use chrono::{NaiveDate, TimeZone};
     use pretty_assertions::assert_eq;
 
@@ -947,5 +949,48 @@ END:VCALENDAR\r\n";
         // absence above is a dropped property and not a failed parse.
         assert_eq!(todo.summary.as_deref(), Some("Chapter 3"));
         assert!(output.contains("SUMMARY:Chapter 3\r\n"));
+    }
+
+    // P1-05 / R68. The shipped VTODO_ICS already carries COMPLETED, so R68's
+    // synthesis failure is invisible against it. This is production's actual
+    // shape: STATUS:COMPLETED alone, with neither COMPLETED nor
+    // PERCENT-COMPLETE. Re-serialization must not invent either.
+    #[test]
+    fn the_completed_production_fixture_carries_no_completed_and_no_percent_complete() {
+        let todo = Todo::try_from(&parse_icalendar_todo(VTODO_COMPLETED_PRODUCTION_ICS)).unwrap();
+
+        assert_eq!(todo.status, TodoStatus::Completed);
+        assert_eq!(todo.completed, None);
+        assert_eq!(todo.percent_complete, None);
+
+        let output = todo.to_ics_string();
+        assert!(output.contains("STATUS:COMPLETED\r\n"));
+        assert!(!output.contains("COMPLETED:"));
+        assert!(!output.contains("PERCENT-COMPLETE:"));
+    }
+
+    // P1-05 / Correction 1. The executable form of the production census: no
+    // shipped fixture may quietly grow a property the real u_crawler pipeline
+    // never emits. A well-meaning later edit that "enriches" one of these
+    // fixtures for realism would falsify the evidence P3-06/P5-06 rely on.
+    #[test]
+    fn the_production_fixtures_carry_no_property_outside_the_census() {
+        for forbidden in [
+            "DESCRIPTION",
+            "COMPLETED:",
+            "PERCENT-COMPLETE",
+            "DTSTART",
+            "RRULE",
+            "X-",
+        ] {
+            assert!(
+                !VTODO_OPEN_PRODUCTION_ICS.contains(forbidden),
+                "open fixture must not contain {forbidden}"
+            );
+            assert!(
+                !VTODO_COMPLETED_PRODUCTION_ICS.contains(forbidden),
+                "completed fixture must not contain {forbidden}"
+            );
+        }
     }
 }

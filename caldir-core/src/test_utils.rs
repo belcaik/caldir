@@ -243,6 +243,75 @@ SUMMARY:Zoned deadline\r\n\
 END:VTODO\r\n\
 END:VCALENDAR\r\n";
 
+// --- P1-05 production fixtures ---
+//
+// Extracted and redacted from `docs/vtodo/caldir-vtodo-fixtures.tar.gz` (a
+// real u_crawler archive, not committed). Redaction replaces the account
+// identifier, the institution hostname, and the internal course/assignment
+// numbers; it changes no property shape. `SUMMARY` text, `UID` domain and
+// every `DUE`/`DTSTAMP`/`DTSTART`/`DTEND` value are preserved byte-for-byte.
+
+/// `deadlines/assignment-1571380.ics`, course `202615_2562_...`. Production's
+/// open (non-completed) task shape: `UID`, `DTSTAMP`, `DUE`, `PRIORITY`,
+/// `SUMMARY`, `URL` and nothing else — the 57/57 census in P1-05's
+/// Correction 1. `DUE` is preserved byte-for-byte: a UTC instant at
+/// `T035959Z`, 23:59:59 on the previous local `America/Santiago` day (C-15).
+/// Redacted: account/course/assignment identifiers in `URL`; the institution
+/// hostname (a LMS product name) -> `lms.example.edu`.
+pub const VTODO_OPEN_PRODUCTION_ICS: &str = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+PRODID:-//u_crawler//calendar-sync//EN\r\n\
+BEGIN:VTODO\r\n\
+UID:u_crawler-todo-9001571@u-crawler.local\r\n\
+DTSTAMP:20260610T191757Z\r\n\
+DUE:20260902T035959Z\r\n\
+PRIORITY:1\r\n\
+SUMMARY:Semana 11: Sumativa 5: Solemne 2\r\n\
+URL:https://lms.example.edu/courses/900223/assignments/9001571\r\n\
+END:VTODO\r\n\
+END:VCALENDAR\r\n";
+
+/// `windows/assignment-1571380.ics`, the `VEVENT` matching
+/// `VTODO_OPEN_PRODUCTION_ICS`. Production keeps distinct UIDs across the
+/// `deadlines/`/`windows/` pair for the same assignment (P1-05 Correction 2)
+/// — this is NOT a same-UID `VEVENT`+`VTODO` case. Redacted identically to
+/// its task counterpart, with the matching assignment number.
+pub const VEVENT_WINDOW_PRODUCTION_ICS: &str = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+PRODID:-//u_crawler//calendar-sync//EN\r\n\
+BEGIN:VEVENT\r\n\
+UID:u_crawler-window-9001571@u-crawler.local\r\n\
+DTSTAMP:20260610T191757Z\r\n\
+DTSTART:20260826T040000Z\r\n\
+DTEND:20260902T035959Z\r\n\
+SUMMARY:Semana 11: Sumativa 5: Solemne 2\r\n\
+URL:https://lms.example.edu/courses/900223/assignments/9001571\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n";
+
+/// `deadlines/assignment-1562539.ics`, course `202615_3049_...`. Production's
+/// completed task shape: `STATUS:COMPLETED` with **neither** `COMPLETED` nor
+/// `PERCENT-COMPLETE` — R68's exact Radicale case, invisible against the
+/// richer `VTODO_ICS` above. `DUE` is preserved byte-for-byte: a UTC instant
+/// at `T035959Z` (C-15/C-18). `SUMMARY` carries non-ASCII UTF-8 ("aquí") —
+/// true of 40/57 production summaries and of no other shipped fixture — and
+/// its embedded `:` and non-ASCII characters are load-bearing, so neither is
+/// touched by redaction. Redacted: account/course/assignment identifiers in
+/// `UID`/`URL`; the institution hostname.
+pub const VTODO_COMPLETED_PRODUCTION_ICS: &str = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+PRODID:-//u_crawler//calendar-sync//EN\r\n\
+BEGIN:VTODO\r\n\
+UID:u_crawler-todo-9002295@u-crawler.local\r\n\
+DTSTAMP:20260701T040020Z\r\n\
+DUE:20260708T035959Z\r\n\
+PRIORITY:1\r\n\
+STATUS:COMPLETED\r\n\
+SUMMARY:Sube aquí tu Certificado: Mentalidad digital\r\n\
+URL:https://lms.example.edu/courses/900222/assignments/9002295\r\n\
+END:VTODO\r\n\
+END:VCALENDAR\r\n";
+
 /// Parse a single-VTODO document into the crate's `icalendar::Todo`.
 /// Panics unless the document holds exactly one VTODO.
 pub fn parse_icalendar_todo(ics: &str) -> icalendar::Todo {

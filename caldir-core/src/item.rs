@@ -332,7 +332,9 @@ fn component_name(component: &CalendarComponent) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{EMPTY_VCALENDAR_ICS, VTODO_ICS};
+    use crate::test_utils::{
+        EMPTY_VCALENDAR_ICS, VEVENT_WINDOW_PRODUCTION_ICS, VTODO_ICS, VTODO_OPEN_PRODUCTION_ICS,
+    };
 
     /// R17: one ordered pass, so document order survives across kinds.
     /// `events()` then `todos()` would yield event, event, todo.
@@ -580,5 +582,21 @@ END:VCALENDAR\r\n",
         let (_, ignored) = CalendarItem::load_with_ignored(&path).unwrap();
 
         assert!(ignored.is_empty(), "got {ignored:?}");
+    }
+
+    /// P1-05 / Correction 2. Production's deadlines/VTODO and windows/VEVENT
+    /// for the same assignment do NOT share a UID — pinning this in code so a
+    /// later ticket cannot read the pair as §8.5's same-UID case and build a
+    /// mapping on a property production does not have.
+    #[test]
+    fn the_production_task_and_its_window_event_are_distinct_identities() {
+        let task = CalendarItem::from_single_ics_str(VTODO_OPEN_PRODUCTION_ICS).unwrap();
+        let window = CalendarItem::from_single_ics_str(VEVENT_WINDOW_PRODUCTION_ICS).unwrap();
+
+        let task_id = task.instance_id();
+        let window_id = window.instance_id();
+
+        assert_ne!(task_id.uid(), window_id.uid());
+        assert_ne!(task_id.kind(), window_id.kind());
     }
 }

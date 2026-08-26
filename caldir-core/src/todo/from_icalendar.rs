@@ -184,8 +184,11 @@ fn integer_property(value: &icalendar::Todo, name: &str) -> Result<Option<i32>, 
 #[cfg(test)]
 mod tests {
     use crate::event::{EventError, EventTime, Organizer, Recurrence, RecurrenceId, Reminder};
-    use crate::test_utils::{VTODO_ZONED_ICS, parse_icalendar_todo};
-    use crate::todo::Todo;
+    use crate::test_utils::{
+        VTODO_COMPLETED_PRODUCTION_ICS, VTODO_OPEN_PRODUCTION_ICS, VTODO_ZONED_ICS,
+        parse_icalendar_todo,
+    };
+    use crate::todo::{Todo, TodoStatus};
     use chrono::{NaiveDate, TimeZone, Utc};
     use icalendar::Component;
     use pretty_assertions::assert_eq;
@@ -538,6 +541,53 @@ DTSTAMP:20260801T090000Z\r\n{body}END:VEVENT\r\nEND:VCALENDAR\r\n"
                     .and_hms_opt(12, 0, 0)
                     .unwrap()
             ))
+        );
+    }
+
+    // P1-05. u_crawler's open task, redacted from the production archive.
+    // Every property the census found on 57/57 tasks must survive: SUMMARY,
+    // the UTC-datetime DUE, PRIORITY:1, URL, and a needs-action status. A
+    // redaction that quietly dropped URL or rounded DUE to a date would be
+    // invisible in review and would silently retune P5-06's classification
+    // table.
+    #[test]
+    fn the_open_production_fixture_parses_with_every_property_intact() {
+        let todo = Todo::try_from(&parse_icalendar_todo(VTODO_OPEN_PRODUCTION_ICS)).unwrap();
+
+        assert_eq!(
+            todo.summary.as_deref(),
+            Some("Semana 11: Sumativa 5: Solemne 2")
+        );
+        assert_eq!(
+            todo.due,
+            Some(EventTime::DateTimeUtc(
+                Utc.with_ymd_and_hms(2026, 9, 2, 3, 59, 59).unwrap()
+            ))
+        );
+        assert_eq!(todo.priority, Some(1));
+        assert_eq!(
+            todo.url.as_deref(),
+            Some("https://lms.example.edu/courses/900223/assignments/9001571")
+        );
+        assert_eq!(todo.status, TodoStatus::NeedsAction);
+    }
+
+    // P1-05 / C-11 non-ASCII. 40 of 57 production summaries carry non-ASCII
+    // UTF-8; no shipped fixture did before this one. A CalDAV PUT whose
+    // Content-Length is computed in chars, or a Google Tasks title truncated
+    // on a byte boundary, cannot be reproduced with an ASCII fixture at all.
+    #[test]
+    fn a_production_summary_survives_its_non_ascii_text() {
+        let todo = Todo::try_from(&parse_icalendar_todo(VTODO_COMPLETED_PRODUCTION_ICS)).unwrap();
+
+        assert_eq!(
+            todo.summary.as_deref(),
+            Some("Sube aquí tu Certificado: Mentalidad digital")
+        );
+        assert!(
+            todo.to_ics_string().contains("SUMMARY:Sube aquí tu Certificado: Mentalidad digital"),
+            "non-ASCII SUMMARY must round-trip byte-equal, got {}",
+            todo.to_ics_string()
         );
     }
 }
