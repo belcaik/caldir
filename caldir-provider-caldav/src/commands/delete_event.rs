@@ -1,7 +1,6 @@
 //! Delete an event from a CalDAV calendar.
 
 use anyhow::Result;
-use caldir_core::CalendarItem;
 use caldir_core::provider::ProviderStorage;
 use caldir_core::rpc::DeleteItem;
 use caldir_provider_caldav::caldav::ops;
@@ -11,12 +10,6 @@ use crate::remote_config::CaldavRemoteConfig;
 use crate::session::SessionStore;
 
 pub async fn handle(cmd: DeleteItem) -> Result<()> {
-    if !matches!(cmd.event, CalendarItem::Event(_)) {
-        return Err(anyhow::anyhow!(
-            "caldir-provider-caldav does not support deleting tasks"
-        ));
-    }
-
     let config = CaldavRemoteConfig::try_from(&cmd.remote)?;
     let store = SessionStore::new(ProviderStorage::for_provider(PROVIDER_NAME)?);
     let session = store.load(&config.caldav_account)?;
