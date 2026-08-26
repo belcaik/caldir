@@ -254,8 +254,12 @@ failure on it **propagates**. Radicale accepts a bare VTODO query (probe Q-B), b
 a decision (tolerate-and-warn is the conservative option) plus one wiremock test for the rejecting
 server. **VERIFIED: still undecided** — the second REPORT propagates today.
 
-### B-17. `docs/vtodo/context/testing.md` additions — real doc debt
-**VERIFIED absent** (`grep -n "reply_raw_data\|test_dav\|percent-encod"` → nothing). Missing:
+### B-17. `docs/vtodo/context/testing.md` additions — real doc debt — **CLOSED by `L8-03`**
+Was **VERIFIED absent** (`grep -n "reply_raw_data\|test_dav\|percent-encod"` → nothing). All of it
+is now in `testing.md`: §3's API table carries `reply_raw_data` and `received_a_request`, the FIFO
+and last-request bullets are labelled as traps, §3 ends with *"The raw-ICS rule"*, and a new §8
+covers `ops/test_dav.rs`, the `wiremock` dev-dep, the `CALDIR_LIVE_RADICALE` + docker + curl live
+gate, and Radicale's `@` → `%40` href escaping. Recorded below as it stood:
 - `mock_provider::reply_raw_data` — the crate's **only** raw-wire escape hatch, i.e. the only way
   to stub a wire shape no typed response can express (a provider *newer* than this core).
 - `caldir-provider-caldav/src/caldav/ops/test_dav.rs` — the crate's HTTP-double seam.
@@ -272,17 +276,19 @@ synthesized `DTSTART`, `DESCRIPTION` drift). **Every future round-trip / idempot
 assertion must drive the remote from RAW ICS via `reply_raw_data`, never from domain values via
 `reply`.** The remote must be an independent store — which is what a remote *is*.
 
-### B-18. `docs/vtodo/spec.md` §6's `RELATED-TO` row is **wrong** — open doc debt
-**VERIFIED still wrong, in two places:**
-- `spec.md:198` — *"A single value survives unmodelled."*
-- `spec.md:686` (R87) — the same clause.
+### B-18. `docs/vtodo/spec.md` §6's `RELATED-TO` row was **wrong** — **CLOSED**
+**Re-verified by `L8-03`: fixed in both places.** `spec.md:198` now reads *"Not modelled and
+DROPPED on caldir's first write (R15, T-17)"*, and `spec.md:686` (R87) *"`RELATED-TO` is NOT
+modelled and is DROPPED on caldir's first write"*. The record of what was wrong, kept because the
+mistake was propagated three times before it was caught:
 
-Both **contradict R15, T-17 and the shipped codec**: `Todo` has no `related_to` field,
+Both rows said *"A single value survives unmodelled"*, which **contradicts R15, T-17 and the shipped
+codec**: `Todo` has no `related_to` field,
 `to_icalendar.rs` never emits one, `R15_DROPPED_PROPERTIES` includes RELATED-TO, and T-17 asserts
 the drop. The phrasing came from ADR-05's justification, which **C-2 VOIDED** when it widened the
 property set. *Would take:* correct it, or explicitly scope it to *"survives ON THE SERVER until
-caldir's first write"* — which is the true statement. Assigned to L8-02/L8-04; **not done at
-902/0**, so it is recorded here rather than lost.
+caldir's first write"* — which is the true statement. It was assigned to L8-02/L8-04, and closed
+after those tickets.
 
 ### B-19. A crate-version-pinned guard for `icalendar::TodoStatus::Custom`
 **Accepted non-lock, not a testing gap.** L1-03's M8 (swapping the raw `STATUS` read for the
@@ -557,7 +563,11 @@ was checked against the tree, not against a report.
 | L5-05 M4b: `find_event_location`'s fallback masks a broken `event_url`; a dedicated unit lock would be stronger | **PARTIALLY CLOSED.** `caldav/client.rs:172` `event_url_joins_calendar_and_uid` and `:179` `event_url_handles_trailing_slash` do assert the href is purely UID-derived; a clock-derived href fails them. T-58 adds the outcome assertion. No further work identified. |
 
 **Still open and correctly so** (do not mistake these for closed): B-4, B-5, B-6, B-9, B-11, B-12,
-B-16, B-17, B-18 were each re-checked against the tree at 902/0 and are **not** done.
+B-16 were each re-checked against the tree at 902/0 and are **not** done.
+
+**B-17 and B-18 have since closed** and are no longer on that list. `L8-03` wrote the `testing.md`
+additions (B-17) and re-verified `spec.md:198` / `:686` against the tree (B-18) — both rows now say
+`RELATED-TO` is DROPPED. See each entry.
 
 ---
 

@@ -10,7 +10,7 @@ src/commands/{connect,list_calendars,list_events,create_event,update_event,delet
 src/remote_config.rs               # caldav_account + caldav_calendar_url
 src/session/{store,types}.rs       # username/password + discovered URLs on disk
 src/caldav/client.rs               # libdav client construction + URL/date helpers
-src/caldav/ops.rs                  # parse_event, find_event_location, FindEventByUid REPORT
+src/caldav/ops.rs                  # parse_item, find_event_location, FindEventByUid REPORT
 src/caldav/ops/{discover,list_calendars,list_events,create_event,update_event,delete_event}.rs
 ```
 
@@ -106,7 +106,7 @@ A repo-wide grep for `VEVENT`/`VTODO` inside the crate returns only those two li
 
 The provider is **semantic on the wire boundary, transport in the middle**:
 
-- Inbound ICS is parsed into a core `Event`: `ops.rs:32-37` `parse_event` calls `caldir_core::Event::from_ics_str` and takes the first `Ok` entry, silently dropping anything that fails to parse. Used by `fetch_events` (`list_events.rs:39`), `create_event` (`:60`), `update_event` (`:59`).
+- **[FIXED by L5-01 — this describes the pre-fix state]** Inbound ICS *was* parsed into a core `Event`: `parse_event` called `Event::from_ics_str` and took the first `Ok` entry, silently dropping anything else. L2-06 widened that drop to "malformed **or not an event**". It is now `parse_item(&str) -> anyhow::Result<CalendarItem>`, delegating to `CalendarItem::from_single_ics_str`, and an unparseable resource fails the ENTIRE listing rather than vanishing — because core reads a listing as complete remote state, so a quarantined resource is indistinguishable from a server-side delete.
 - Outbound is `Event::to_ics_string()` (`create_event.rs:24`, `update_event.rs:25`). The provider never touches ICS text itself — no line manipulation, no property rewriting, no timezone conversion in this crate.
 - The RPC surface is `Event`-typed end to end (`src/main.rs:9-41`); there is no raw-ICS pass-through path.
 
@@ -128,7 +128,7 @@ So the provider carries no calendar semantics of its own beyond the two hard-cod
 6. The RPC handler signatures are `Event`-typed (`src/main.rs:26-40`) and command modules pass `cmd.event` through unchanged (`commands/create_event.rs:98`, `commands/update_event.rs:118`, `commands/delete_event.rs:141`).
 7. `supported-calendar-component-set` is never requested during discovery (`ops/discover.rs`, `ops/list_calendars.rs`), and `RawCalendar` (`list_calendars.rs:13-26`) has no field for it — there is currently no way to know whether a discovered collection accepts VTODO.
 8. `create_event` derives the resource href from the UID alone (`create_event.rs:26` → `client.rs:73-76`), so an event and a todo sharing a UID would collide on the same `.ics` path.
-9. The doc comment at `ops.rs:30` documents the single-VEVENT-per-resource assumption; `parse_event` returns only the first parsed component (`ops.rs:32-37`).
+9. **[FIXED by L5-01]** The single-VEVENT-per-resource assumption is gone: `parse_item` applies core's arity rule (exactly one supported component, VTIMEZONE exempt) and errors on multi-component input.
 10. Tests encode VEVENT-only fixtures (`ops.rs:172`) — no VTODO coverage exists in the crate.
 
 ## Verdict

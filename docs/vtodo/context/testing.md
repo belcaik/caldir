@@ -106,19 +106,30 @@ Full API:
 | Item | Line | Meaning |
 | --- | --- | --- |
 | `MockProvider::new(slug: impl Into<ProviderSlug>)` | `mock_provider.rs:16` | Empty transport, no queued responses |
-| `reply::<C: Rpc>(&self, response: C::Response)` | `mock_provider.rs:24` | Queue one typed success, wrapped as `{"status":"success","data":…}` |
-| `reply_error(&self, error: ProviderTransportError)` | `mock_provider.rs:34` | Queue one transport-level failure |
-| `provider(&self) -> Provider` | `mock_provider.rs:38` | `Provider::with_transport(slug, transport)` — the injection seam |
-| `captured_request::<C: Rpc + DeserializeOwned>(&self) -> C` | `mock_provider.rs:46` | Decode the last request, **asserting `request.method == C::METHOD`** |
+| `reply::<C: Rpc>(&self, response: C::Response)` | `mock_provider.rs:24` | Queue one typed success, wrapped as `{"status":"success","data":…}`. **Encodes via `to_ics_string` — see the raw-ICS rule below** |
+| `reply_raw_data(&self, data: serde_json::Value)` | `mock_provider.rs:37` | Queue one success whose `data` is **raw JSON**, handed to the transport verbatim |
+| `reply_error(&self, error: ProviderTransportError)` | `mock_provider.rs:46` | Queue one transport-level failure |
+| `provider(&self) -> Provider` | `mock_provider.rs:50` | `Provider::with_transport(slug, transport)` — the injection seam |
+| `received_a_request(&self) -> bool` | `mock_provider.rs:59` | Did anything reach the wire at all? For seams that must abort **before** it |
+| `captured_request::<C: Rpc + DeserializeOwned>(&self) -> C` | `mock_provider.rs:64` | Decode the last request, **asserting `request.method == C::METHOD`** |
+
+`reply_raw_data` (added by `L4-03`) is the crate's **only** raw-wire escape hatch — the only way to
+stub a wire shape no typed `C::Response` can express, i.e. a provider *newer* than this core sending
+a component this core cannot decode (R57). It is also what the raw-ICS rule below requires.
 
 Backed by `MockTransport` (`caldir-core/src/provider/transport/mock_transport.rs`), which
 implements `ProviderTransport::exchange`. Key behaviours:
 
-- Responses are a **FIFO `VecDeque`** — one `reply()` per expected RPC call, in order.
+- Responses are a **FIFO `VecDeque`** — one `reply()` per expected RPC call, in order. **Trap:**
+  a seam that issues two RPCs consumes two queued responses; queue them in call order, not in
+  the order that reads best.
 - `exchange` **panics** if the queue is empty (`mock_transport.rs:82`), so a missing stub
   fails loudly rather than silently.
 - It records every request (`captured_requests`) and every timeout (`captured_timeouts`);
   `captured_request()` / `captured_timeout()` return the **last** one (`:56`, `:60`).
+  **Trap:** after a multi-RPC seam, `captured_request()` asserts about the *last* call only —
+  an assertion meant for the first one silently retargets. `received_a_request()` is the
+  companion for "nothing should have gone out at all".
 - `MockTransport::with_response` / `with_error` for direct transport-level tests
   (used in `caldir-core/src/provider.rs` tests).
 
@@ -143,6 +154,31 @@ async fn apply_outgoing_diff_sends_delete_event_for_outgoing_delete() {
     assert_eq!(mock.captured_request::<rpc::DeleteEvent>().event, event);
 }
 ```
+
+### The raw-ICS rule (round-trip / idempotence / fidelity assertions)
+
+`MockProvider::reply` builds the remote's response by encoding the expected value with
+`to_ics_string` — **the encoder under test**. A lossy serialize therefore cancels on both sides and
+the assertion goes blind.
+
+**Measured** (`L4-04`): under a `reply`-based idempotence gate, **6 of 12** mutations that the
+raw-fixture version catches SURVIVED — dropped `COMPLETED`, stripped `X-*`, flattened `TZID`,
+coerced floating `COMPLETED`, synthesized `DTSTART`, `DESCRIPTION` drift.
+
+**Rule: every round-trip, idempotence or fidelity assertion must drive the remote from raw ICS via
+`reply_raw_data`, never from domain values via `reply`.** The remote is an independent store that
+returns what it holds — which is what a remote *is*. The fixture text, not caldir's own encoder, is
+the source of truth on the remote side, so anything the local write/read loop loses or invents shows
+up as a real change instead of cancelling out.
+
+`reply` remains correct for everything else: command/response plumbing, error paths, and any
+assertion about the *request* caldir sent rather than about what survived a round trip.
+
+Worked example — `caldir-core/src/connection.rs:1410` (T-49), whose doc comment states the same
+rule; the same file uses `reply_raw_data` at `:911` (an undecodable component from a newer provider)
+and `:1451`. Comparison is **structural, never textual**: caldir re-stamps `DTSTAMP` on every
+serialize (R25) and Radicale re-sorts properties, re-folds at 75 octets and synthesizes
+`VTIMEZONE`, so ICS text is an *input* here and never an expected value.
 
 ## 4. Fixture conventions
 
@@ -250,3 +286,78 @@ Helpers to reuse, in the order a test would touch them:
 11. **Timezone safety** — CI runs the suite under `UTC`, `Europe/Stockholm`, and
     `America/New_York`. Prefer `EventTime::DateTimeFloating` / `EventTime::Date` fixtures
     (as `test_event_time()` does) unless the test is specifically about zone conversion.
+
+## 8. CalDAV provider seams: the HTTP double and the live tier
+
+Everything above is `caldir-core`. `caldir-provider-caldav` has two seams of its own, neither
+reachable from core's `MockProvider`.
+
+### 8.1 `test_dav.rs` — the HTTP double
+
+`caldir-provider-caldav/src/caldav/ops/test_dav.rs`, declared `pub(crate) mod test_dav;` at
+`caldir-provider-caldav/src/caldav/ops.rs:23`. It exists because the two-REPORT merge in
+`fetch_events` and the fast path in `find_event_location` are **transport** behaviour — no pure
+function sees them, and a mutation to either passed the whole suite before this module existed
+(`L5-01` M7: consuming only the first of the two REPORTs was a silent mass task-loss with zero
+coverage).
+
+Backed by `wiremock = "0.6"`, a **dev-dependency** of `caldir-provider-caldav` only
+(`caldir-provider-caldav/Cargo.toml:61`) — dev-only, never in a shipped binary.
+
+| Helper | Line | Meaning |
+| --- | --- | --- |
+| `COLLECTION_PATH` | `test_dav.rs:12` | `/cal/` — the collection every double serves |
+| `calendar_url(&MockServer) -> String` | `test_dav.rs:15` | The calendar URL to hand the op under test |
+| `multistatus(href, etag, ics) -> String` | `test_dav.rs:22` | A one-resource `207 Multi-Status`, **raw XML around raw ICS** |
+| `mount_report(&MockServer, marker, body)` | `test_dav.rs:46` | Answer every `REPORT` on the collection whose body contains `marker` |
+| `received_bodies(&MockServer) -> Vec<String>` | `test_dav.rs:58` | Every request body received, in arrival order |
+
+`marker` is what tells the doubles apart: `"VEVENT"` / `"VTODO"` for the two listing REPORTs,
+`"calendar-multiget"` / `"calendar-query"` for the fast path versus the UID lookup. Callers:
+`ops.rs:411`, `ops/list_events.rs:265`, `ops/create_event.rs:107`.
+
+**The raw-ICS rule applies here too, and `multistatus` is built for it** — its doc comment says so:
+raw XML around raw ICS, so nothing on the remote side is produced by the encoder under test.
+`received_bodies` is the arrival-ordered counterpart to `MockTransport`'s last-request trap: use it
+when the assertion is about *both* requests, not just the last.
+
+### 8.2 The live Radicale tier
+
+`caldir-provider-caldav/src/live/radicale.rs` — six gates against a real Radicale 3.7.6 in Docker
+(`tomsquest/docker-radicale:latest`, pinned by tag because the probe measured that image; recipe
+reproduced from `context/radicale-probe.md` §Reproduction).
+
+**Gated at runtime, never with `#[ignore]`.** `live_enabled()` (`radicale.rs:130`) requires all
+three of:
+
+1. `CALDIR_LIVE_RADICALE=1` — exactly `"1"` (`GATE_VAR`, `radicale.rs:120`);
+2. `docker --version` succeeds;
+3. `curl --version` succeeds — the harness speaks HTTP with `curl`, deliberately **not** caldir's
+   own client, so a transport bug cannot cancel out on both sides of a gate.
+
+Otherwise `live_gate()` prints one `SKIP live::radicale::{test}` line and the test returns. So:
+
+```text
+cargo test --workspace                                            # skipped, stays green with no Docker
+CALDIR_LIVE_RADICALE=1 cargo test -p caldir-provider-caldav -- live::radicale
+```
+
+`#[ignore]` would not do: the verify command above does not pass `--ignored`, so an ignored test
+would silently never run.
+
+Each gate is `#[serial_test::serial(radicale)]` (dev-dep `serial_test = "3"`) so containers never
+race for a port; the container name is unique per test and `Drop` runs `docker rm -f` on success,
+failure and panic. Startup is health-polled with a `PROPFIND`, never a fixed sleep.
+
+**Radicale percent-encodes `@` in hrefs.** A UID-derived filename comes back with its `@` as `%40`
+in the href Radicale reports from `PROPFIND Depth: 1`. `resource_hrefs()` (`radicale.rs:362`) runs
+every href through the local `percent_decode()` (`radicale.rs:469`) first, so the assertion is about
+the *identity* in the href rather than about the server's escaping. Any new href assertion must do
+the same or it fails on the escaping, not on the behaviour.
+
+Radicale also does not echo PUTs byte-for-byte (properties sorted alphabetically within each
+component, lines re-folded at 75 octets, `VTIMEZONE` synthesized for any `TZID`), though it *is*
+idempotent from the second round trip on. A "sync twice, second diff empty" gate must therefore
+compare parsed-domain values, or GET-pass-2 against GET-pass-1 — never raw bytes against what was
+PUT. `ETag` is invariant to property reordering but changes with `DTSTAMP`, so it can prove "the
+remote changed" and can never prove "caldir's push was a no-op".
