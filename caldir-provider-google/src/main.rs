@@ -9,8 +9,10 @@ mod remote_config;
 mod session;
 
 use async_trait::async_trait;
+use caldir_core::provider::ProviderCapabilities;
 use caldir_core::rpc::{
-    Connect, ConnectResponse, CreateItem, DeleteItem, ListCalendars, ListEvents, UpdateItem,
+    Capabilities, Connect, ConnectResponse, CreateItem, DeleteItem, ListCalendars, ListEvents,
+    UpdateItem,
 };
 use caldir_core::{CalendarConfig, CalendarItem, provider};
 
@@ -20,6 +22,10 @@ struct GoogleProvider;
 impl provider::Handler for GoogleProvider {
     async fn connect(&self, cmd: Connect) -> provider::Result<ConnectResponse> {
         Ok(commands::connect::handle(cmd).await?)
+    }
+
+    async fn capabilities(&self, cmd: Capabilities) -> provider::Result<ProviderCapabilities> {
+        Ok(commands::capabilities::handle(cmd))
     }
 
     async fn list_calendars(&self, cmd: ListCalendars) -> provider::Result<Vec<CalendarConfig>> {

@@ -1,3 +1,4 @@
+pub mod capabilities;
 pub mod connect;
 pub mod create_event;
 pub mod delete_event;
