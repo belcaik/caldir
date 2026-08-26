@@ -4,7 +4,7 @@ mod event;
 
 use crate::diff::EventChange;
 use crate::provider::{ProviderCapabilities, ProviderError};
-use crate::{CalendarItem, DateRange, Event, Provider, rpc};
+use crate::{CalendarItem, DateRange, Provider, rpc};
 
 pub use config::{RemoteConfig, RemoteConfigParams};
 pub use error::RemoteError;
@@ -64,62 +64,57 @@ impl Remote {
     ) -> Result<Option<RemoteEvent>, RemoteError> {
         match change {
             EventChange::Create(item) => {
-                let remote_event = self.create_event(item.clone().into_event()?).await?;
+                let remote_event = self.create_item(item.clone()).await?;
                 Ok(Some(remote_event))
             }
-            // C-13: the merge is item-typed and runs *before* the
-            // event-only narrowing (P1-04's non-goal keeps dispatch here
-            // unchanged — `P2-01` owns sending a task for real), so a task
-            // update never silently drops provider-managed `X-` properties
-            // even though the narrow right after it still aborts.
+            // C-13: the merge is item-typed and dispatches on whichever kind
+            // backs the change, so a task update carries its own
+            // provider-managed `X-` properties across just as an event does.
             EventChange::Update { from, to } => {
-                let merged = to
-                    .clone()
-                    .with_x_properties_merged_from(&from.clone())
-                    .into_event()?;
-                let remote_event = self.update_event(merged).await?;
+                let merged = to.clone().with_x_properties_merged_from(from);
+                let remote_event = self.update_item(merged).await?;
                 Ok(Some(remote_event))
             }
             EventChange::Delete(item) => {
-                self.delete_event(item.clone().into_event()?).await?;
+                self.delete_item(item.clone()).await?;
                 Ok(None)
             }
         }
     }
 
-    async fn create_event(&self, event: Event) -> Result<RemoteEvent, RemoteError> {
+    async fn create_item(&self, item: CalendarItem) -> Result<RemoteEvent, RemoteError> {
         let item = self
             .provider
             .call(rpc::CreateItem {
                 remote: self.params.clone(),
-                event: CalendarItem::Event(event),
+                event: item,
             })
             .await?;
 
-        Ok(RemoteEvent::new(item.into_event()?))
+        Ok(RemoteEvent::new(item))
     }
 
-    async fn delete_event(&self, event: Event) -> Result<(), RemoteError> {
+    async fn delete_item(&self, item: CalendarItem) -> Result<(), RemoteError> {
         self.provider
             .call(rpc::DeleteItem {
                 remote: self.params.clone(),
-                event: CalendarItem::Event(event),
+                event: item,
             })
             .await?;
 
         Ok(())
     }
 
-    async fn update_event(&self, event: Event) -> Result<RemoteEvent, RemoteError> {
+    async fn update_item(&self, item: CalendarItem) -> Result<RemoteEvent, RemoteError> {
         let item = self
             .provider
             .call(rpc::UpdateItem {
                 remote: self.params.clone(),
-                event: CalendarItem::Event(event),
+                event: item,
             })
             .await?;
 
-        Ok(RemoteEvent::new(item.into_event()?))
+        Ok(RemoteEvent::new(item))
     }
 }
 
@@ -174,6 +169,76 @@ mod tests {
         );
     }
 
+    /// P2-01/S5, the update arm at the `Remote` seam. The only arm that
+    /// transforms its input (the `X-` merge) before sending, so a task
+    /// update needs its own dispatch proof: an untested arm here would send
+    /// `from` unmodified and the user's edit would silently never land.
+    #[tokio::test]
+    async fn apply_change_sends_a_vtodo_for_an_outgoing_task_update() {
+        let (mock, remote) = test_remote();
+        let from = crate::todo::Todo::new("Hand in the assignment");
+        let mut to = from.clone();
+        to.summary = Some("Hand in the revised assignment".into());
+        mock.reply::<rpc::UpdateItem>(CalendarItem::Todo(to.clone()));
+
+        remote
+            .apply_change(&EventChange::Update {
+                from: from.into(),
+                to: to.clone().into(),
+            })
+            .await
+            .expect("a task update must reach the provider");
+
+        let captured = mock.captured_request::<rpc::UpdateItem>().event;
+        assert_eq!(captured, CalendarItem::Todo(to));
+
+        let ics = captured.to_ics_string();
+        assert!(ics.contains("BEGIN:VTODO"), "got {ics:?}");
+        assert!(!ics.contains("BEGIN:VEVENT"), "got {ics:?}");
+    }
+
+    /// C-13/P2-01. Mirrors
+    /// `apply_change_update_merges_x_property_params_from_remote` with a
+    /// `Todo`: a provider-managed `X-` parameter present only on `from` must
+    /// survive into the pushed `to`. The natural task implementation —
+    /// "no merge for tasks" — compiles, passes every other test, and
+    /// silently strips provider metadata off every task update; this is the
+    /// test that catches it.
+    #[tokio::test]
+    async fn apply_change_update_merges_x_property_params_for_a_task() {
+        let mut from = crate::todo::Todo::new("Hand in the assignment");
+        from.x_properties = vec![crate::event::XProperty {
+            name: "X-CALDAV-TASK-ID".to_string(),
+            value: "abc123".to_string(),
+            params: vec![("X-TITLE".to_string(), "Server label".to_string())],
+        }];
+
+        let mut to = from.clone();
+        to.summary = Some("Updated".into());
+        to.x_properties = vec![crate::event::XProperty::new("X-CALDAV-TASK-ID", "abc123")];
+
+        let (mock, remote) = test_remote();
+        mock.reply::<rpc::UpdateItem>(CalendarItem::Todo(to.clone()));
+
+        remote
+            .apply_change(&EventChange::Update {
+                from: from.into(),
+                to: to.into(),
+            })
+            .await
+            .unwrap();
+
+        let captured = mock.captured_request::<rpc::UpdateItem>().event;
+        let CalendarItem::Todo(todo) = captured else {
+            panic!("expected a Todo, got {captured:?}");
+        };
+        assert_eq!(todo.x_properties.len(), 1);
+        assert_eq!(
+            todo.x_properties[0].params,
+            vec![("X-TITLE".to_string(), "Server label".to_string())]
+        );
+    }
+
     #[tokio::test]
     async fn apply_change_update_merges_x_property_params_from_remote() {
         // Local copy was written by an old parser that dropped params;
@@ -217,22 +282,29 @@ mod tests {
         );
     }
 
-    /// R70/R71: the RPC payload is still an `Event`, so a task-shaped change
-    /// cannot reach a provider. It aborts with the arity error the wire
-    /// already defines — never a synthesized event, which would push a task
-    /// as if it were a meeting. `L6-01` owns the user-facing story.
+    /// P2-01/S5: the RPC payload is item-typed, so a task create actually
+    /// reaches the provider now — the captured request carries the exact
+    /// `Todo` it was handed, and the bytes on the wire are `VTODO`, never a
+    /// synthesized `VEVENT` (`CROSS-6`). Formerly
+    /// `a_task_change_aborts_instead_of_reaching_the_provider`, which
+    /// asserted the opposite: that nothing reached the provider at all.
     #[tokio::test]
-    async fn a_task_change_aborts_instead_of_reaching_the_provider() {
+    async fn apply_change_sends_a_vtodo_for_an_outgoing_task_create() {
         let (mock, remote) = test_remote();
         let todo = crate::todo::Todo::new("Hand in the assignment");
+        mock.reply::<rpc::CreateItem>(CalendarItem::Todo(todo.clone()));
 
-        let err = remote
-            .apply_change(&EventChange::Create(todo.into()))
+        remote
+            .apply_change(&EventChange::Create(todo.clone().into()))
             .await
-            .expect_err("a task must never be pushed over the event-only wire");
+            .expect("a task create must reach the provider");
 
-        assert_eq!(err.to_string(), "expected 1 event(s) in ICS, found 0");
-        assert!(!mock.received_a_request(), "nothing may reach the provider");
+        let captured = mock.captured_request::<rpc::CreateItem>().event;
+        assert_eq!(captured, CalendarItem::Todo(todo));
+
+        let ics = captured.to_ics_string();
+        assert!(ics.contains("BEGIN:VTODO"), "got {ics:?}");
+        assert!(!ics.contains("BEGIN:VEVENT"), "got {ics:?}");
     }
 
     /// The other half of `push_outgoing_changes`'s
@@ -256,21 +328,34 @@ mod tests {
         );
     }
 
-    /// R70/R71, the delete arm at the `Remote` seam. Companion to
-    /// `a_task_change_aborts_instead_of_reaching_the_provider`, which covers
-    /// `Create`.
+    /// P2-01/S5, the delete arm at the `Remote` seam. Companion to
+    /// `apply_change_sends_a_vtodo_for_an_outgoing_task_create`. A task
+    /// delete now reaches the provider carrying the task's own item, and
+    /// still returns `Ok(None)` — the delete arm never yields a
+    /// `RemoteEvent`, so `push_outgoing_changes`'s
+    /// `unreachable!("apply_change returns None for Delete")` stays sound
+    /// even now that a task delete is the newest shape that could reach it.
+    /// Formerly `a_task_delete_aborts_instead_of_reaching_the_provider`,
+    /// which asserted the opposite: that nothing reached the provider.
     #[tokio::test]
-    async fn a_task_delete_aborts_instead_of_reaching_the_provider() {
+    async fn apply_change_sends_a_vtodo_for_an_outgoing_task_delete() {
         let (mock, remote) = test_remote();
         let todo = crate::todo::Todo::new("Hand in the assignment");
+        mock.reply::<rpc::DeleteItem>(());
 
-        let err = remote
-            .apply_change(&EventChange::Delete(todo.into()))
+        let applied = remote
+            .apply_change(&EventChange::Delete(todo.clone().into()))
             .await
-            .expect_err("a task delete must never be pushed over the event-only wire");
+            .expect("a task delete must reach the provider");
 
-        assert_eq!(err.to_string(), "expected 1 event(s) in ICS, found 0");
-        assert!(!mock.received_a_request(), "nothing may reach the provider");
+        assert_eq!(
+            mock.captured_request::<rpc::DeleteItem>().event,
+            CalendarItem::Todo(todo)
+        );
+        assert!(
+            applied.is_none(),
+            "a delete has no returned item; the push loop treats Some as impossible",
+        );
     }
 
     #[tokio::test]

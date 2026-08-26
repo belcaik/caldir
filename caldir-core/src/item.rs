@@ -170,8 +170,12 @@ impl CalendarItem {
     /// and dropping it would be a silent data loss, so the narrowing has to
     /// stay fallible.
     ///
-    /// Locked by `remote::tests::a_task_change_aborts_instead_of_reaching_the_provider`
-    /// and its `_delete_` sibling.
+    /// `P2-01` removed its last production caller — `Remote::apply_change`
+    /// now dispatches a task as a task instead of narrowing it here — so
+    /// this is deliberately kept as an unused-in-production backstop, not a
+    /// forgotten path. Still exercised by `Event::parse_single_ics` in
+    /// tests.
+    #[allow(dead_code)]
     pub(crate) fn into_event(self) -> Result<Event, EventError> {
         match self {
             CalendarItem::Event(event) => Ok(event),

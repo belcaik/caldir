@@ -438,6 +438,67 @@ mod tests {
         assert_eq!(withheld.withheld_task_pushes(), 1);
     }
 
+    /// P2-01/S5, the connection-level proof that `S3` (capability-aware
+    /// diff) and `S5` (item-typed dispatch) are actually wired to each
+    /// other, not merely each correct in isolation: `remote::tests` drives
+    /// `apply_change` directly and bypasses the diff entirely. Here a task
+    /// create is built through `Connection::diff` against a provider
+    /// advertising `tasks.write=true`, then pushed through
+    /// `apply_outgoing_diff` end to end, and the transport must actually
+    /// receive it while the local file survives.
+    #[tokio::test]
+    async fn a_task_change_reaches_the_provider_when_task_writes_are_advertised() {
+        use crate::provider::Capability;
+
+        let (_tmp, caldir) = test_caldir();
+        let calendar = caldir
+            .create_calendar("writable-cal", Some(calendar_config(Some(false))))
+            .unwrap();
+        let todo = Todo::new("Hand in the assignment");
+        let task_path = calendar
+            .create_event(todo.clone())
+            .unwrap()
+            .path()
+            .to_path_buf();
+
+        let mock = test_mock_provider();
+        mock.reply::<rpc::Capabilities>(ProviderCapabilities {
+            events: Capability {
+                read: true,
+                write: true,
+            },
+            tasks: Capability {
+                read: true,
+                write: true,
+            },
+        });
+        mock.reply::<rpc::ListEvents>(vec![]);
+        let remote = Remote::new(mock.provider(), test_remote_params());
+        let mut connection = Connection::new(calendar, remote);
+
+        let diff = connection.diff(&DateRange::default()).await.unwrap();
+        assert_eq!(
+            diff.outgoing(),
+            &[EventChange::Create(CalendarItem::Todo(todo.clone()))],
+            "tasks.write=true must let the task reach the outgoing set",
+        );
+
+        mock.reply::<rpc::CreateItem>(CalendarItem::Todo(todo.clone()));
+
+        connection
+            .apply_outgoing_diff(&diff)
+            .await
+            .expect("a task change must reach the provider, not abort the push");
+
+        assert_eq!(
+            mock.captured_request::<rpc::CreateItem>().event,
+            CalendarItem::Todo(todo.clone()),
+            "the transport must actually receive the task's own item",
+        );
+        assert!(task_path.is_file(), "the local file must survive the push");
+        assert_eq!(CalendarItem::load(&task_path).unwrap(), todo.into());
+    }
+
     /// C-8/`CROSS-5`. A provider whose capabilities call cannot be answered
     /// must not fail the calendar: `Remote::capabilities()` already reads
     /// that as task-less (P1-02), and this pins that `Connection::diff` acts
