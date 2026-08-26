@@ -30,7 +30,7 @@ fn is_no_uid_conflict(body: &str) -> bool {
 /// Serialize an item to a single-component `VCALENDAR` document, from the
 /// kind's own serializer. Never routed through a shared "as event" path —
 /// that is exactly how a task would get rewritten as a `VEVENT` (CROSS-6).
-fn item_to_ics_string(item: &CalendarItem) -> String {
+pub(super) fn item_to_ics_string(item: &CalendarItem) -> String {
     match item {
         CalendarItem::Event(event) => event.to_ics_string(),
         CalendarItem::Todo(todo) => todo.to_ics_string(),
@@ -42,7 +42,11 @@ fn item_to_ics_string(item: &CalendarItem) -> String {
 ///
 /// `None` on any failure to reach or decode it — the caller falls back to the
 /// value it sent rather than failing a create that already succeeded.
-async fn read_back(caldav: &CalDavClient_, calendar_url: &str, href: &str) -> Option<CalendarItem> {
+pub(super) async fn read_back(
+    caldav: &CalDavClient_,
+    calendar_url: &str,
+    href: &str,
+) -> Option<CalendarItem> {
     let calendar_href = url_to_href(calendar_url);
     let response = caldav
         .request(GetCalendarResources::new(&calendar_href).with_hrefs([href]))
