@@ -7,19 +7,15 @@ use caldir_core::rpc::Capabilities;
 ///
 /// Tasks are per-remote (D-2), not per-binary: `list_calendars` records
 /// `caldav_supports_tasks` for this remote from the collection's advertised
-/// `supported-calendar-component-set` (C-6, a provider-private
-/// `RemoteConfigParams` key). Fail closed on anything but an explicit `true`
-/// (C-8) — absent (unknown), unreadable, or `false` all report
-/// `tasks.read = false`. This is what keeps a rejected VTODO REPORT's
+/// `supported-calendar-component-set` (a provider-private `RemoteConfigParams`
+/// key). Fail closed on anything but an explicit `true` — absent (unknown),
+/// unreadable, or `false` all report `tasks.read = false` and
+/// `tasks.write = false`. This is what keeps a rejected VTODO REPORT's
 /// degrade-to-events-only listing (`caldav/ops/list_events.rs`) from being
 /// read by core as complete task state and deleting every local VTODO
-/// holding a sync base (C-7a).
-///
-/// `tasks.write` is held `false` unconditionally: `P3-02`..`P3-04` haven't
-/// landed the VTODO write path yet, so there is no honest `true` case. This
-/// file MUST NOT flip it to a per-remote answer ahead of those tickets.
+/// holding a sync base.
 pub fn handle(cmd: Capabilities) -> ProviderCapabilities {
-    let tasks_read = cmd
+    let tasks_supported = cmd
         .remote
         .get("caldav_supports_tasks")
         .and_then(|v| v.as_bool())
@@ -31,8 +27,8 @@ pub fn handle(cmd: Capabilities) -> ProviderCapabilities {
             write: true,
         },
         tasks: Capability {
-            read: tasks_read,
-            write: false,
+            read: tasks_supported,
+            write: tasks_supported,
         },
     }
 }
@@ -129,13 +125,11 @@ mod tests {
         assert!(caps.tasks.read);
     }
 
-    /// Sequencing note (W3-C1): `P3-02`..`P3-04` (the VTODO write path)
-    /// haven't landed, so `tasks.write` is held at `false` regardless of
-    /// remote params — a task write reaching this provider today would hit
-    /// `P1-04`'s unsupported-arm gate and error instead of syncing. Declared
-    /// unconditionally, not per-remote: there's no honest `true` case yet.
+    /// The VTODO write path has landed: a remote known to support tasks
+    /// reports `tasks.write = true`, driven by the same
+    /// `caldav_supports_tasks` key as `tasks.read`.
     #[test]
-    fn tasks_write_is_held_false_until_the_write_path_lands() {
+    fn a_remote_known_to_support_vtodo_reports_tasks_write_true() {
         let mut params = RemoteConfigParams::new();
         params.insert(
             "caldav_supports_tasks".to_string(),
@@ -144,6 +138,35 @@ mod tests {
 
         let caps = handle(Capabilities { remote: params });
 
-        assert!(!caps.tasks.write);
+        assert!(caps.tasks.write);
+    }
+
+    /// Fail closed: every input that isn't an explicit `true` must still
+    /// report `tasks.write = false` — absent, unreadable, and explicit
+    /// `false` alike.
+    #[test]
+    fn tasks_write_fails_closed_on_every_non_true_input() {
+        let absent = handle(Capabilities {
+            remote: RemoteConfigParams::new(),
+        });
+        assert!(!absent.tasks.write, "absent key must fail closed");
+
+        let mut explicit_false = RemoteConfigParams::new();
+        explicit_false.insert(
+            "caldav_supports_tasks".to_string(),
+            toml::Value::Boolean(false),
+        );
+        let caps = handle(Capabilities {
+            remote: explicit_false,
+        });
+        assert!(!caps.tasks.write, "explicit false must fail closed");
+
+        let mut unreadable = RemoteConfigParams::new();
+        unreadable.insert(
+            "caldav_supports_tasks".to_string(),
+            toml::Value::String("maybe".to_string()),
+        );
+        let caps = handle(Capabilities { remote: unreadable });
+        assert!(!caps.tasks.write, "unreadable value must fail closed");
     }
 }
