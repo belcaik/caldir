@@ -333,16 +333,24 @@ a one-line spec row plus a byte-exact lock, the way the two arity literals got o
 
 ## §C — Known limitations (13)
 
-True of the shipped feature. A user can hit every one of these.
+True of the shipped feature. A user can hit every one of these, except where an entry is
+marked unreachable and kept for the record.
 
 ### C-1. **caldir PULLS tasks from CalDAV but CANNOT PUSH them.** (`R69` / `R70`)
 The outbound RPC field stays `Event` (`rpc/methods/create_event.rs:10`) — 25 `cmd.event` sites
 across five provider crates depend on it, and retyping it would take the provider blast radius
-from 6 errors to ~25 sites. So a task push **aborts in `into_event()` before any RPC is
-serialized**, with the byte-exact `expected 1 event(s) in ICS, found 0`
-(`EventError::UnexpectedEventCount`; asserted at `connection.rs:764`). **This must be stated
-plainly in the ship report and the PR description.** It is the single largest limitation of the
-feature.
+from 6 errors to ~25 sites. So a task change **never enters the outgoing set**: it is withheld
+when the diff is built (`withhold_task_pushes`, `diff/calendar_diff.rs:295-300`) and reported per
+calendar as `N task change(s) not pushed: tasks are pull-only — caldir cannot push tasks to a
+remote yet.` (`caldir-cli/src/output/diff.rs:275-286`). The events in that calendar push exactly
+as they would in a task-free one, and the push still exits `0`.
+
+`into_event()`'s `expected 1 event(s) in ICS, found 0`
+(`EventError::UnexpectedEventCount`) survives only as an unreachable backstop at the `Remote`
+seam — pinned by `remote::tests::a_task_change_aborts_instead_of_reaching_the_provider` and its
+`_delete_` sibling — so that a task reaching the wire would fail loudly rather than be pushed as
+an event. No user path produces it. **The pull-only limitation must still be stated plainly in the
+ship report and the PR description.** It is the single largest limitation of the feature.
 
 *Downstream consequences worth naming:* a local task file **rename** never reaches a server (a
 rename reaches a server only via a push); the test that "proves" href stability for tasks does so
@@ -361,17 +369,26 @@ Plus: **are Reminders collections returned by discovery at all?**
 ***Settled by:* running the same six probes against a real iCloud account. Nothing else will do
 it.** **Do not claim iCloud task support anywhere.**
 
-### C-3. Pushing a task to Google/Outlook aborts the rest of that calendar's push
-Accepted consequence of the ADR-07 cut (A-6). The abort happens at `connection.rs:232` with
-`expected 1 event(s) in ICS, found 0`. **Ugly, NOT data loss** — ADR-08 D3 and ADR-09 C7 cover the
-destructive variants. There is no capability pre-check by design, and per A-7 there could not be a
-reliable one.
+### C-3. A task in a Google/Outlook-backed calendar is silently unpushable — but only the task
+**Corrected: the earlier claim that the whole calendar's push aborts is false.** That mechanism
+was removed before ship. The task change is withheld from the outgoing set (C-1) and reported;
+everything else in the calendar pushes normally, nothing fails, and the exit code stays `0`.
+
+What remains as the accepted consequence of the ADR-07 cut (A-6): the task never reaches any
+server, on every run, and caldir cannot tell the user *which* providers could have taken it —
+there is no capability pre-check by design, and per A-7 there could not be a reliable one. **Not
+data loss** — ADR-08 D3 and ADR-09 C7 cover the destructive variants.
 
 ### C-4. `CLASS` on a VTODO is **dropped on caldir's first write**
 Per A-10 it is not a modelled field, and ADR-05's unmodelled-property passthrough is **`X-*` ONLY**
 (measured). An inherited `CLASS` therefore does not survive.
 
-### C-5. caldir's first genuine edit **destroys correct server data** for every dropped property
+### C-5. caldir's first genuine edit **destroys correct server data** for every dropped property — **UNREACHABLE FOR TASKS, kept for the record**
+**Not reachable in the shipped feature.** caldir never pushes a task (C-1), so it never re-PUTs a
+task resource and cannot destroy anything a server holds for one. The reasoning below stayed true
+right up to the redesign, and it is exactly what would come back the day a task push is built —
+so it is corrected, not deleted. It also still describes the *event* path unchanged.
+
 This is the general shape behind C-4, A-2 and A-3, and it is worth stating once: CalDAV update is
 a **whole-resource PUT**. After a *pull*, local/base/remote all lack a dropped property equally, so
 nothing pushes — but the **first genuine edit** re-PUTs the whole resource without it. Radicale is
@@ -379,8 +396,10 @@ a faithful store (it holds both `ATTACH`, both `RELATED-TO` with params, `ATTEND
 unescaped), so **everything caldir drops is caldir destroying correct server data**, not the server
 losing it. C-2 widened the modelled set specifically to shrink this surface (`ATTACH`, `ATTENDEE`,
 `ORGANIZER`, `LOCATION`, `RRULE`/`EXDATE`/`RDATE`, `PERCENT-COMPLETE`, `CREATED` all flipped IN).
-What still falls in this hole: `CATEGORIES`, `RELATED-TO`, `GEO`, `RESOURCES`, `COMMENT`,
-`CONTACT`, `CLASS`, and any other IANA or non-`X-` property.
+What would fall in this hole: `CATEGORIES`, `RELATED-TO`, `GEO`, `RESOURCES`, `COMMENT`,
+`CONTACT`, `CLASS`, and any other IANA or non-`X-` property. For tasks this is latent, not live:
+a dropped property is still lost from the local file on caldir's first write (C-4), but the
+server's copy keeps it.
 
 ### C-6. Recurring tasks are **master only** — never expanded (A-4)
 

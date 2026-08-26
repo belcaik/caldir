@@ -49,7 +49,7 @@ permissions.
 
 Google keeps tasks in a separate product with its own API, so caldir does not sync them here.
 
-If a task (`VTODO`) file ends up inside a Google-backed calendar directory, `caldir push` and `caldir sync` stop that one calendar with an error. Nothing is deleted and no file is modified — your other calendars sync as usual — but that calendar will keep failing until you move the task somewhere else.
+If a task (`VTODO`) file ends up inside a Google-backed calendar directory, `caldir push` and `caldir sync` hold it back and print a note saying the task was not pushed. The events in that calendar push as usual, nothing is deleted, and no file is modified — the task simply stays local.
 
 ## iCloud
 
@@ -87,7 +87,7 @@ This will prompt you to register an app in the Azure portal and provide a client
 
 Microsoft keeps tasks in a separate product with its own API, so caldir does not sync them here.
 
-If a task (`VTODO`) file ends up inside an Outlook-backed calendar directory, `caldir push` and `caldir sync` stop that one calendar with an error. Nothing is deleted and no file is modified — your other calendars sync as usual — but that calendar will keep failing until you move the task somewhere else.
+If a task (`VTODO`) file ends up inside an Outlook-backed calendar directory, `caldir push` and `caldir sync` hold it back and print a note saying the task was not pushed. The events in that calendar push as usual, nothing is deleted, and no file is modified — the task simply stays local.
 
 ## Other CalDAV server
 

@@ -159,20 +159,19 @@ impl CalendarItem {
     /// Narrow to an `Event` for the event-only RPC wire.
     ///
     /// Not a drop: the `Err` is the arity error the wire already reports, so a
-    /// task push aborts loudly instead of being pushed as something else.
+    /// task arriving here fails loudly instead of being pushed as something
+    /// else.
     ///
-    /// **This error text is a contract, not an accident.** A friendlier
-    /// message here would mean asking each provider what component kinds it
-    /// can carry, which was deliberately not built; the accepted price is that
-    /// a task in a calendar backed by an event-only provider fails that
-    /// calendar's push, every sync, with exactly
-    /// `expected 1 event(s) in ICS, found 0`. Ugly, and deliberately so — the
-    /// only prettier alternative is that capability negotiation, and skipping
-    /// the task instead would be a silent data drop.
-    /// Locked by `remote::tests::a_task_change_aborts_instead_of_
-    /// reaching_the_provider`, its `_delete_` sibling, and
-    /// `connection::tests::pushing_a_task_to_a_task_less_provider_fails_that_
-    /// calendar_without_data_loss`. Do not soften it without moving those.
+    /// **This is a backstop, not the path a user travels.** Task changes are
+    /// withheld when the diff is built, so a task never enters the outgoing
+    /// set and this error never surfaces: the push reports what it held back
+    /// and the calendar's events sync as usual. What remains here guards the
+    /// seam itself — pushing a task as an event would be a silent corruption,
+    /// and dropping it would be a silent data loss, so the narrowing has to
+    /// stay fallible.
+    ///
+    /// Locked by `remote::tests::a_task_change_aborts_instead_of_reaching_the_provider`
+    /// and its `_delete_` sibling.
     pub(crate) fn into_event(self) -> Result<Event, EventError> {
         match self {
             CalendarItem::Event(event) => Ok(event),
