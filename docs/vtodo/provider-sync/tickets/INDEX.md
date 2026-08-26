@@ -175,6 +175,28 @@ error rather than as an empty list. An empty list is an assertion that the remot
 Returning one after a failed VTODO REPORT is a data-loss bug, not a graceful degradation — and it
 is the specific bug C-14 forbids gating the REPORT on a hint in order to avoid.
 
+**C-19 — the mass-delete guarantee is a three-file seam. Re-check it whenever any of them changes.**
+Established by the Wave 3 release-gate review. The release-gate row *"no mass-delete when collection
+hints are wrong"* is proven **compositionally**, not by one end-to-end test — and per `W3-C1`'s
+resolved residual-gap note it cannot be proven live, because a compliant Radicale will not reject a
+well-formed VTODO REPORT. The proof is a chain:
+
+1. `caldir-provider-caldav/src/caldav/ops/list_calendars.rs` — `fetch_supports_tasks` returns
+   `Option<bool>`, `None` on any PROPFIND failure.
+2. `caldir-provider-caldav/src/commands/{list_calendars,capabilities}.rs` — the key is **omitted**
+   rather than written `false` when unknown, and `capabilities::handle` collapses every non-`true`
+   value to `tasks.{read,write} = false`.
+3. `caldir-core/src/diff/calendar_diff.rs` + `connection.rs` — `TaskReads::NotAdvertised` keeps the
+   `suppressed_task_deletes` belt on.
+
+Each link is tested. **Nothing tests the chain.** A change to any one file's output shape can
+silently reopen the hazard without a single failing test pointing at it — and the hazard is a
+user's whole task set.
+
+**So: any change to those three files re-checks this seam by hand**, and says in its report that it
+did. That is cheaper than an integration test that cannot be written, and it is the standing
+mitigation, not a deferred one.
+
 **C-8 — no silent deletion path is acceptable, in either direction.** A provider without task-write
 support preserves local VTODOs. A capability that is absent, unknown, or errored keeps every belt on.
 
