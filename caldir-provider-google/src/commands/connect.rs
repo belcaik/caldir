@@ -279,10 +279,10 @@ async fn complete_auth(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::TASKS_SCOPE;
+    use crate::constants::{CALENDAR_CALENDARS_SCOPE, TASKS_SCOPE};
 
     #[test]
-    fn the_consent_url_requests_the_tasks_scope() {
+    fn the_consent_url_requests_the_full_scope_set() {
         let client = Client::new(
             "dummy-client-id".to_string(),
             "dummy-client-secret".to_string(),
@@ -295,5 +295,6 @@ mod tests {
         let url = client.user_consent_url(&scopes);
 
         assert!(url.contains(TASKS_SCOPE));
+        assert!(url.contains(CALENDAR_CALENDARS_SCOPE));
     }
 }
