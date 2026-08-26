@@ -190,9 +190,12 @@ fn render_bidirectional(
 /// cannot drift apart at a call site.
 #[derive(Clone, Copy)]
 struct Withheld {
-    /// R49's version-skew belt withheld an incoming task delete.
+    /// The version-skew belt withheld an incoming task delete: the remote
+    /// reported no tasks at all, which core refuses to read as "every task
+    /// was deleted".
     task_deletes: bool,
-    /// How many outgoing changes were withheld for being tasks (R70).
+    /// How many outgoing changes were withheld for being tasks: the push wire
+    /// carries events only, so a task can never ride it.
     task_pushes: usize,
 }
 
