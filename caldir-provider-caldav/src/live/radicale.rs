@@ -665,6 +665,7 @@ fn task_with_uid(items: &[CalendarItem], uid: &str) -> Todo {
         // R1: a task pulled back as an `Event` is the whole defect this
         // feature exists to fix.
         CalendarItem::Event(event) => panic!("{uid} came back as an Event, not a Todo: {event:?}"),
+        other => panic!("{uid} came back as neither an Event nor a Todo: {other:?}"),
     }
 }
 

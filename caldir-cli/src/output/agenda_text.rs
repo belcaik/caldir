@@ -88,6 +88,14 @@ impl TextRender for AgendaView {
                     self.time_format,
                     now,
                 )),
+                // No line format exists for a kind this crate cannot read, and
+                // a blank or event-shaped line would misreport it. caldir-cli
+                // depends on caldir-core by path, so a new variant is added in
+                // this same tree and lands here.
+                _ => unreachable!(
+                    "caldir_core::CalendarItem grew a variant; give it an \
+                     agenda line format here"
+                ),
             }
         }
 
@@ -160,6 +168,8 @@ fn kind_ordinal(item: &CalendarItem) -> u8 {
     match item {
         CalendarItem::Event(_) => 0,
         CalendarItem::Todo(_) => 1,
+        // Mirrors `agenda.rs`: later kinds tie-break after both.
+        _ => 2,
     }
 }
 

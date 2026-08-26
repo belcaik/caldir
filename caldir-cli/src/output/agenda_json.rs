@@ -64,6 +64,8 @@ fn recurring(item: &CalendarItem) -> bool {
     match item {
         CalendarItem::Event(event) => event.recurrence_id.is_some(),
         CalendarItem::Todo(todo) => todo.recurrence_id.is_some(),
+        // No recurrence id the CLI can read; `false` over a guess.
+        _ => false,
     }
 }
 
@@ -73,8 +75,14 @@ fn title(item: &CalendarItem) -> &Option<String> {
     match item {
         CalendarItem::Event(event) => &event.summary,
         CalendarItem::Todo(todo) => &todo.summary,
+        // A kind this crate cannot read has no summary to borrow; `null` is
+        // the same value an untitled item already serializes.
+        _ => &UNTITLED,
     }
 }
+
+/// The `None` a kind this crate cannot read borrows its title from.
+static UNTITLED: Option<String> = None;
 
 /// The `kind` discriminator (ADR-10 D6). Additive: it is the one key a
 /// consumer needs to migrate, via `select(.kind == "event")`.
@@ -143,6 +151,15 @@ impl<'a> From<&'a CalendarItem> for ItemJson<'a> {
         match item {
             CalendarItem::Event(event) => Self::from_event(event),
             CalendarItem::Todo(todo) => Self::from_todo(todo),
+            // There is no honest JSON for a kind whose fields this crate has
+            // never seen, and inventing one would corrupt the stream C12's
+            // DEL predicate is pinned against. caldir-cli depends on
+            // caldir-core by path, so this cannot occur without a new variant
+            // being added in this same tree.
+            _ => unreachable!(
+                "caldir_core::CalendarItem grew a variant; give it a `kind` \
+                 discriminator and a field set here (ADR-10 D6)"
+            ),
         }
     }
 }

@@ -12,6 +12,7 @@ use std::fmt;
 /// legitimately share a UID, so the kind is part of the key — without it they
 /// collide in every state map, the diff, and the sync bases.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ComponentKind {
     #[default]
     Event,

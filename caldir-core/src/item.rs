@@ -11,6 +11,7 @@ use std::path::PathBuf;
 /// preserved across every boundary (R7). Adding `VJOURNAL` later is one more
 /// variant, one more struct and one more match arm (R93).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CalendarItem {
     Event(Event),
     Todo(Todo),

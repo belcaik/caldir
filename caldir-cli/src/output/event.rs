@@ -21,6 +21,9 @@ pub fn is_item_visible(item: &CalendarItem) -> bool {
     match item {
         CalendarItem::Event(event) => is_visible(event),
         CalendarItem::Todo(todo) => todo.status != TodoStatus::Cancelled,
+        // Never hide a kind this crate does not know: hiding is a silent drop,
+        // showing is at worst an under-described line.
+        _ => true,
     }
 }
 

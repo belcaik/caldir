@@ -74,6 +74,9 @@ pub(crate) fn anchor(item: &CalendarItem) -> Option<&EventTime> {
     match item {
         CalendarItem::Event(event) => Some(&event.start),
         CalendarItem::Todo(todo) => todo.due.as_ref().or(todo.start.as_ref()),
+        // Undated is a real, kept state (ADR-10 D3) — an unknown kind is
+        // listed in the undated tail rather than given an invented date.
+        _ => None,
     }
 }
 
@@ -84,6 +87,8 @@ fn kind_ordinal(item: &CalendarItem) -> u8 {
     match item {
         CalendarItem::Event(_) => 0,
         CalendarItem::Todo(_) => 1,
+        // Later kinds tie-break after both, so neither existing order moves.
+        _ => 2,
     }
 }
 
@@ -678,5 +683,90 @@ SUMMARY:Ancient task\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
             entries.iter().map(summary).collect::<Vec<_>>(),
             vec!["Ancient task"]
         );
+    }
+
+    /// `T-47` (ADR-10 D3), the pinned name, all three halves in one place.
+    /// They are asserted together because splitting them leaves a gap a
+    /// regression walks through: a task dropped from `entries` outright
+    /// satisfies "absent from the body" on its own, and only the footer and
+    /// the `--json` stream can tell that apart from a task correctly withheld.
+    ///
+    /// - **absent from the body** — never placed in a day group, never given
+    ///   an invented date;
+    /// - **counted in the footer** — one dimmed line, singular, so it is never
+    ///   a silent drop;
+    /// - **present in `--json`** — the schema has carried tasks since `L7-03`,
+    ///   with `start` and `due` both `null`. `--undated` is a text concern and
+    ///   does not gate the stream (`Q-1`), which is why `undated: false` here
+    ///   must still produce a task in the JSON array.
+    ///
+    /// Driven from real files through `collect_entries` + `assemble`, so the
+    /// task reaches the view the way it does in production rather than being
+    /// hand-placed into `entries`.
+    #[test]
+    fn an_undated_task_is_absent_from_the_body_counted_in_the_footer_and_present_in_json() {
+        use crate::output::{Output, TextRender};
+
+        const UNDATED_TASK_ICS: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VTODO\r\nUID:someday@u-crawler\r\n\
+SUMMARY:Someday: rewrite installer\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
+
+        let today = chrono::Local::now().date_naive();
+        let tmp = tempfile::tempdir().unwrap();
+        let cal = calendar(tmp.path(), "work");
+        cal.create_event(Event::new("Sprint demo", EventTime::Date(today)))
+            .unwrap();
+        std::fs::write(cal.path().join("someday.ics"), UNDATED_TASK_ICS).unwrap();
+
+        // Wide enough that no zone in the CI matrix can push today's all-day
+        // event out of the collection window.
+        let from = Utc::now() - chrono::Duration::days(3);
+        let to = Utc::now() + chrono::Duration::days(3);
+        let view = AgendaView::assemble(
+            collect_entries(vec![cal], from, to),
+            from,
+            to,
+            TimeFormat::H24,
+            false,
+        );
+
+        // Both items reached the view: the halves below are about rendering,
+        // not about a task that never arrived.
+        assert_eq!(
+            view.entries
+                .iter()
+                .filter_map(|entry| entry.item.summary())
+                .collect::<Vec<_>>(),
+            vec!["Sprint demo", "Someday: rewrite installer"]
+        );
+
+        let text = view.to_text();
+
+        // Halves 1 and 2, byte-exact: one day group holding the event alone,
+        // then the dimmed count. The task's summary appears nowhere in it.
+        assert!(!text.contains("Someday: rewrite installer"), "{text:?}");
+        assert_eq!(
+            text,
+            concat!(
+                "\u{1b}[1mToday\u{1b}[0m\n",
+                "  all-day Sprint demo \u{1b}[2m[work]\u{1b}[0m\n",
+                "\n",
+                "\u{1b}[2m+ 1 undated task (caldir events --undated)\u{1b}[0m",
+            )
+        );
+
+        // Half 3: the same view under `--json`, with `undated` still false.
+        let json = view.to_json();
+        let entries = json.as_array().expect("the stream is an array");
+        assert_eq!(entries.len(), 2, "{json}");
+
+        let task = entries
+            .iter()
+            .find(|entry| entry["title"] == "Someday: rewrite installer")
+            .expect("the undated task is in the --json stream");
+        assert_eq!(task["kind"], "todo");
+        assert_eq!(task["uid"], "someday@u-crawler");
+        assert_eq!(task["start"], serde_json::Value::Null);
+        assert_eq!(task["due"], serde_json::Value::Null);
     }
 }

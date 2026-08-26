@@ -9,6 +9,12 @@ pub(crate) fn duplicate_file_warnings(events: &[CalendarEvent]) -> Vec<DoctorWar
         .map(|(kind, paths)| match kind {
             ComponentKind::Event => DoctorWarning::DuplicateFiles(paths),
             ComponentKind::Todo => DoctorWarning::DuplicateTaskFiles(paths),
+            // Reporting a later kind under the event sentence would name it
+            // wrong; it needs its own `DoctorWarning` variant, added here.
+            _ => unreachable!(
+                "caldir_core::ComponentKind grew a variant; give it a \
+                 DoctorWarning variant here"
+            ),
         })
         .collect()
 }

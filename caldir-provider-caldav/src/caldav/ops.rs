@@ -129,6 +129,13 @@ fn component_name(kind: ComponentKind) -> &'static str {
     match kind {
         ComponentKind::Event => "VEVENT",
         ComponentKind::Todo => "VTODO",
+        // R60/R61: the kind is load-bearing for this lookup. Filtering a
+        // later kind under VEVENT would point its PUT at somebody's meeting,
+        // which is exactly the defect the kind was threaded through to stop.
+        _ => unreachable!(
+            "caldir_core::ComponentKind grew a variant; give it its \
+             iCalendar component name here"
+        ),
     }
 }
 

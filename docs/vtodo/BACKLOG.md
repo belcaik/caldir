@@ -163,11 +163,17 @@ not deferred — the inbound direction gets its own `ItemIcs` newtype whose `Des
 fallible decode, so `from_wire` only ever unwraps an already-validated value. The invariant is
 documented on the trait.
 
-**VERIFIED at 902/0:** `grep -rn "non_exhaustive" caldir-core/src/` finds only a comment in
-`item.rs:243`. **None of the four has landed.** The adjudication assigns them to "L8-05 (release
-prep)", but L8-05 is *the acceptance gate* and L8-04 is *the semver bump* — **neither ticket's
-body mentions `non_exhaustive`.** *Trigger: before 0.15.0 ships. After it ships, the window
-closes and the cost is paid twice.*
+**Written when none of the four had landed. Since CLOSED — re-verified against the tree:**
+`grep -rn "non_exhaustive" caldir-core/src/` now finds the attribute at
+`calendar/error.rs:8` (`CalendarError`), `event/instance_id.rs:15` (`ComponentKind`),
+`item.rs:14` (`CalendarItem`) and `remote/error.rs:4` (`RemoteError`, whose
+`UnsupportedItem` variant is item 4). `item.rs:244` remains an unrelated comment about
+`icalendar`'s own `CalendarComponent`.
+
+**Two of the four were inert until B-6 closed**, and that is the part worth carrying forward:
+`CalendarError` and `RemoteError` could not be *named* by a downstream crate, so the attribute had
+no match to constrain. Landing an API-hygiene attribute on an unreachable type buys nothing —
+check nameability whenever one is added. See B-6 for the proof.
 
 ### B-5. Test constructors for downstream crates — **ONE ticket, five instances**
 Root cause is single: `Caldir::new` is `#[cfg(test)] pub(crate)` (`caldir-core/src/caldir.rs:20`)
@@ -190,6 +196,22 @@ for `Caldir` + `CalendarDiff`. Rides B-4's window.
 *Would take:* two `pub use` lines. **Resolve BOTH together, in the 0.15.0 window** — adding them
 alongside B-4 keeps the enums' `#[non_exhaustive]` decision and their public visibility in one
 diff.
+
+**CLOSED, and it took three not two.** `caldir-core/src/lib.rs` now re-exports `CalendarError`,
+`CalendarEventError` and **`RemoteError`** — the third was found in the same position
+(`remote.rs`'s `pub(crate) use error::RemoteError`, while every public `Remote` method returns it)
+and had to ride the same diff, because B-4 had just landed `#[non_exhaustive]` on it. Until the
+re-export, **two of B-4's four attributes were inert**: a downstream crate cannot be forced to add
+a wildcard arm to a type it cannot name. Proven both ways from a genuine downstream crate
+(`caldir-core/tests/public_error_api.rs`, an integration test compiled as a separate crate):
+naming and matching all three now compiles, and an exhaustive match with **no** wildcard fails
+`E0004` — *"`CalendarError` is marked as non-exhaustive"* — on all four of `CalendarError`,
+`ComponentKind`, `CalendarItem` and `RemoteError`.
+
+*Left open, same defect one level out (new, not part of B-6):* `EventError`, `ProviderError`,
+`CalendarConfigError` and `CalendarStateError` remain unnameable, yet each is the **payload** of a
+variant on a type that is now public. A consumer can match `RemoteError::UnsupportedItem(_)` but
+cannot name what is inside it. Purely additive, so it does **not** need the 0.15.0 window.
 
 ### B-7. `duplicate_file_sets` should bucket into a `BTreeMap`
 L2-08's M6 is only ~50% catchable because the **mutant is nondeterministic**: without the trailing
@@ -562,8 +584,22 @@ was checked against the tree, not against a report.
 | *"NEW for the 0.15.0 window: `WireValue::from_wire` should return `Result`"* | **STRUCK, not deferred** — L4-02's `ItemIcs` newtype made it unnecessary. The window is four items, not five. See B-4. |
 | L5-05 M4b: `find_event_location`'s fallback masks a broken `event_url`; a dedicated unit lock would be stronger | **PARTIALLY CLOSED.** `caldav/client.rs:172` `event_url_joins_calendar_and_uid` and `:179` `event_url_handles_trailing_slash` do assert the href is purely UID-derived; a clock-derived href fails them. T-58 adds the outcome assertion. No further work identified. |
 
-**Still open and correctly so** (do not mistake these for closed): B-4, B-5, B-6, B-9, B-11, B-12,
-B-16 were each re-checked against the tree at 902/0 and are **not** done.
+### The one pre-existing test name that no longer exists
+
+R2/R104 say the pre-existing suite ships unmodified. It does, with **exactly one** exception, and
+it is recorded here rather than left to a reviewer's diff:
+
+| Was | Is | Why |
+|---|---|---|
+| `caldav::ops::tests::parse_event_returns_none_on_invalid_ics`, asserting `parse_event("not ics").is_none()` | `caldav::ops::tests::parse_event_errors_on_invalid_ics` (`caldir-provider-caldav/src/caldav/ops.rs:352`), asserting `parse_item("not ics").is_err()` | **Forced, not adapted.** C10/R19 require an unknown or unparseable component to **hard-error, never silently drop**, so `parse_event -> Option` became `parse_item -> Result` (`L5-01`, hazard A10). `is_none()` cannot be written against a `Result`. The assertion is **strictly stronger**: the old one passed for a silent drop, which is the defect C10 exists to prevent. |
+
+No other pre-existing test was renamed, weakened or deleted. The rest of the suite's names are
+unchanged; `T-59`'s baseline is intact.
+
+**Still open and correctly so** (do not mistake these for closed): B-5, B-9, B-11, B-12, B-16 were
+each re-checked against the tree and are **not** done. **B-4 and B-6 have since closed** — the
+`#[non_exhaustive]` attributes landed on all four enums, and the three error types are re-exported.
+See each entry.
 
 **B-17 and B-18 have since closed** and are no longer on that list. `L8-03` wrote the `testing.md`
 additions (B-17) and re-verified `spec.md:198` / `:686` against the tree (B-18) — both rows now say

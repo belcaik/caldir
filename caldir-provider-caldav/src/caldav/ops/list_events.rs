@@ -344,6 +344,7 @@ END:VCALENDAR\r\n";
             .map(|item| match item {
                 CalendarItem::Event(_) => "event",
                 CalendarItem::Todo(_) => "todo",
+                _ => "other",
             })
             .collect();
 

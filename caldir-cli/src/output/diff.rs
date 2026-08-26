@@ -67,6 +67,9 @@ fn render_change(change: &EventChange, time_format: TimeFormat) -> String {
     let is_recurring = match item {
         CalendarItem::Event(event) => event.recurrence.is_some(),
         CalendarItem::Todo(todo) => todo.recurrence.is_some(),
+        // A kind core adds later carries no recurrence the CLI can read; no
+        // badge is the conservative render, never a wrong one.
+        _ => false,
     };
 
     let recurring = if is_recurring { " 🔁" } else { "" };
