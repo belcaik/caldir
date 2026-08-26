@@ -27,15 +27,21 @@ pub trait Handler: Send + Sync {
     async fn connect(&self, cmd: Connect) -> Result<ConnectResponse>;
     async fn list_calendars(&self, cmd: ListCalendars) -> Result<Vec<CalendarConfig>> { .. }
     async fn list_events(&self, cmd: ListEvents) -> Result<Vec<CalendarItem>> { .. }
-    async fn create_event(&self, cmd: CreateEvent) -> Result<Event> { .. }
-    async fn update_event(&self, cmd: UpdateEvent) -> Result<Event> { .. }
-    async fn delete_event(&self, cmd: DeleteEvent) -> Result<()> { .. }
+    async fn create_item(&self, cmd: CreateItem) -> Result<CalendarItem> { .. }
+    async fn update_item(&self, cmd: UpdateItem) -> Result<CalendarItem> { .. }
+    async fn delete_item(&self, cmd: DeleteItem) -> Result<()> { .. }
     async fn capabilities(&self, cmd: Capabilities) -> Result<ProviderCapabilities> { .. }
 }
 ```
 
 Only `connect` is required; every other method has a default. This guide is about `capabilities`
 and about what happens on both sides when a method is missing or fails.
+
+**C-16: the Rust API is item-typed; the wire is not.** `create_item`/`update_item`/`delete_item`
+and their `CreateItem`/`UpdateItem`/`DeleteItem`/`CalendarItem` types are Rust-side names only —
+they exist so a provider's `match` can serve a task once it has one. On the wire, nothing changed:
+the RPC verbs are still `create_event`, `update_event`, `delete_event`, and the JSON payload key is
+still `"event"`. Do not go looking for a renamed verb or key; there isn't one.
 
 ## Declaring task support
 

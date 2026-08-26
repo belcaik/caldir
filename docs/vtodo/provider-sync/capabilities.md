@@ -89,8 +89,9 @@ async fn capabilities(&self, _cmd: Capabilities) -> Result<ProviderCapabilities>
 existing provider crate needs to implement `capabilities` at all to remain correct.
 
 **Why `events.write` defaults to `true`, not because caldir gates event writes on it.** A webcal
-provider cannot write events, and its own `Handler::create_event` default already returns an error
-independently of this field (§18 forbids changing that shipped behaviour). `events.write: true` in
+provider cannot write events, and its own `Handler::create_item` default already returns an error
+independently of this field (§18 forbids changing that shipped behaviour); the wire verb it fails
+against is still `create_event` (C-16 — see the provider-author guide). `events.write: true` in
 the default is not a promise that the provider can write — it is the pre-existing, unrestricted
 baseline for events, which this ticket does not touch. Fail-closed is a **tasks-only** contract.
 Do not design around `events.write` gating anything; nothing reads it that way today.
