@@ -54,6 +54,22 @@ impl Remote {
             .await
         {
             Ok(capabilities) => (capabilities, None),
+            // A coded (typed) error already names its class; left as-is.
+            // An uncoded one — every provider built before the `code` field
+            // existed — carries only its own parse-failure text, which
+            // never names the provider or the verb it choked on. Naming
+            // both here (not in `classify`) keeps every typed class, and
+            // every other call site, untouched.
+            Err(ProviderError::Provider(message)) => (
+                ProviderCapabilities::default(),
+                Some(
+                    ProviderError::Provider(format!(
+                        "provider `{}` gave an unrecognized reply to `capabilities`: {message}",
+                        self.provider.slug()
+                    ))
+                    .into(),
+                ),
+            ),
             Err(err) => (ProviderCapabilities::default(), Some(err.into())),
         }
     }
@@ -459,5 +475,44 @@ mod tests {
                 "case {name}: the reason must be preserved"
             );
         }
+    }
+
+    /// `W6-C2`. A genuinely pre-`P1-01` binary's own parse failure carries no
+    /// `code`, so `classify` has nothing to key on but the generic arm and
+    /// the text is passed through verbatim (`P6-02`, `provider::tests::
+    /// a_pre_capability_binary_yields_a_version_error_for_the_capabilities_verb`
+    /// proves that end to end against a real subprocess). `Remote::
+    /// capabilities()` is the seam that knows both the provider it asked and
+    /// that it asked for `capabilities`, so the reason it hands back should
+    /// read as a version/capability problem, not a bare parse error, while
+    /// still folding to the fail-closed default untouched (§17, D-2).
+    #[tokio::test]
+    async fn an_uncoded_capabilities_error_names_the_provider_and_method() {
+        let transport = Arc::new(MockTransport::with_response(
+            r#"{"status":"error","error":"Failed to parse request: unknown variant `capabilities`, expected one of `connect`, `list_calendars`, `list_events`, `create_event`, `update_event`, `delete_event`"}"#,
+        ));
+        let provider = Provider::with_transport(ProviderSlug::from("legacy"), transport);
+        let remote = Remote::new(provider, RemoteConfigParams::new());
+
+        let (capabilities, reason) = remote.capabilities().await;
+
+        assert_eq!(
+            capabilities,
+            ProviderCapabilities::default(),
+            "must still read as task-less"
+        );
+        let reason = reason.expect("the reason must be preserved").to_string();
+        assert!(
+            reason.contains("legacy"),
+            "must name the provider: {reason}"
+        );
+        assert!(
+            reason.contains("capabilities"),
+            "must name the RPC method: {reason}"
+        );
+        assert!(
+            reason.contains("unknown variant `capabilities`"),
+            "the provider's own diagnostic text must survive verbatim inside the wrapper: {reason}"
+        );
     }
 }
