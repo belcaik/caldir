@@ -972,3 +972,38 @@ constructor gap.
 Fold all four into ONE 0.15.0-window ticket: "test constructors for
 downstream crates" (Caldir + CalendarDiff). This unblocks every future
 CLI-level lock, not just the ones found so far.
+
+## UPSTREAM FINDING (independent of VTODO) — the bump skill misses a pin class
+L8-04 found a SEVENTH pin that neither `.agents/skills/bump/SKILL.md`'s
+crate table nor constraint C11 mentions:
+    caldir-provider-icloud/Cargo.toml:21
+    caldir-provider-caldav = { path = "...", version = "0.2.0" }
+That is a CROSS-PROVIDER pin, a different class from the six
+caldir-core pins both documents cover. `cargo check` HARD-FAILED on it
+(requirement ^0.2.0, candidate 0.3.0) until bumped.
+Worth fixing in the bump skill regardless of this feature. Mention in
+the PR description as a drive-by finding.
+
+## RELEASE ANCHOR — no v* tag exists, locally or on the remote
+`git tag` lists only `wip-snapshot`; `git ls-remote --tags origin`
+returns nothing. L8-04 used commit `2019223 "Bump versions"` (61 commits
+back) as the anchor and derived the per-crate change map from it. That is
+the best available choice, but the maintainer should confirm whether
+tags were never pushed or this clone fetched without them.
+
+## ⛔ L8-05 IS NOW LOAD-BEARING FOR THE RELEASE
+L8-04 correctly declined `#[non_exhaustive]` - the adjudication assigns
+it to L8-05 - and flagged the consequence: THE WINDOW CLOSES WHEN 0.15.0
+SHIPS. If L8-05 does not land the attribute on all four enums, every
+future variant addition is a fresh breaking release.
+Exact sites, verified by L8-04 (attribute goes above each, after derives):
+  caldir-core/src/calendar/error.rs:8      pub enum CalendarError
+  caldir-core/src/event/instance_id.rs:15  pub enum ComponentKind
+  caldir-core/src/item.rs:14               pub enum CalendarItem
+  caldir-core/src/remote/error.rs:4        pub enum RemoteError
+None currently carries it - verified, not assumed.
+
+## STILL OPEN, now unowned — spec.md §6's RELATED-TO row
+L8-04 flagged it as outside its file scope. §6 still says "A single value
+survives unmodelled", contradicting R15, T-17 and the shipped codec
+(RELATED-TO is DROPPED). Route to whoever closes out L8-02/L8-03.
