@@ -134,15 +134,30 @@ carries the class alongside the message:
 - `network` — your own call to the remote API failed for network reasons. Distinct from a failure
   in the exchange between caldir and your binary, which caldir already detects on its own.
 
-**You cannot opt into any of these today except `unsupported_operation`.** The only thing that
-attaches a class to a `Handler` error is `Classified`, a struct private to `caldir-core`'s own
-`handler.rs`, used solely by the trait defaults (`create_item`/`update_item`/`delete_item`) to tag
-their own `unsupported_operation` refusal. There is no public constructor, trait method, or
-`Handler::Error` shape that lets your binary attach `missing_auth_scope`, `remote_not_found`,
-`conflict`, `semantic_limitation`, or `network` to an error you return — return a plain error and
-it lands as the unclassified/generic class, exactly like before this section existed. Giving
-providers a way to attach the other five classes is tracked by `P3-02`/`P3-03`/`P4-02`; until one
-of those lands, do not design an integration around producing them.
+Attach any of the six classes to an error you return from a `Handler` method with
+`caldir_core::provider::classified_error`:
+
+```rust
+use caldir_core::provider::classified_error;
+use caldir_core::rpc::ErrorCode;
+
+async fn create_item(&self, cmd: CreateItem) -> caldir_core::provider::Result<CalendarItem> {
+    if self.token_lacks_calendar_scope() {
+        return Err(classified_error(
+            ErrorCode::MissingAuthScope,
+            "stored token lacks the calendar.events scope; reauth required",
+        ));
+    }
+    // ...
+}
+```
+
+The class rides the same `Err(Error)` your `Handler` method already returns — no trait signature
+changes, so this is a drop-in addition to error paths you already have. Return a plain
+string/`anyhow`/etc. error instead and it lands as the unclassified/generic class, exactly like
+before `classified_error` existed: attaching a class is opt-in, not required. This is what the
+`create_item`/`update_item`/`delete_item` trait defaults use internally to tag their own
+`unsupported_operation` refusal — `classified_error` is that same mechanism, made public.
 
 `ErrorCode` is `#[non_exhaustive]` and unknown values decode as a generic "unrecognized" bucket
 rather than failing to parse — so a class added to a future `caldir-core` never breaks an older
@@ -173,9 +188,9 @@ Everything above only works if you can name and construct the types involved fro
   (`ProviderTransportError::Network`) out from an unrelated local subprocess failure.
 
 None of this is something your `Handler` implementation constructs or matches — these are the
-CLI's types for consuming failures your provider produces, not yours for producing them. Nothing
-above lets you *attach* a class to your own error; see "You cannot opt into any of these today"
-above.
+CLI's types for consuming failures your provider produces, not yours for producing them. To
+*attach* a class to your own error, use `caldir_core::provider::classified_error`; see "The six
+failure classes" above.
 
 ## Where you write state
 

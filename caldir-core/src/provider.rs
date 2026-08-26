@@ -18,7 +18,7 @@ use transport::{ProviderTransport, SubprocessTransport};
 
 pub use capabilities::{Capability, ProviderCapabilities};
 pub use error::ProviderError;
-pub use handler::{Error, Handler, Result, process_request, run_provider};
+pub use handler::{Error, Handler, Result, classified_error, process_request, run_provider};
 pub use registry::ProviderRegistry;
 pub use slug::{ProviderSlug, provider_slug_from_filename};
 pub use storage::{ProviderStorage, StorageError};

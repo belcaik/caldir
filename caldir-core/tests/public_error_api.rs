@@ -222,6 +222,28 @@ fn a_downstream_crate_distinguishes_the_six_error_classes_on_provider_error() {
     }
 }
 
+/// W2-C3: `W2-C1` let a *consumer* outside the crate distinguish the six §16
+/// classes on `ProviderError`, but nothing let a *producer* attach one —
+/// `Classified` was `pub(crate)` to `handler.rs`, reachable only by the
+/// trait's own `unsupported_operation` defaults. This is the reachability
+/// half of that fix: `classified_error` must be nameable and callable from a
+/// separately compiled crate, the same bar `a_downstream_crate_distinguishes_
+/// the_six_error_classes_on_provider_error` set for `ProviderError` itself.
+/// The wire round trip that proves the attached class actually arrives as
+/// the matching variant lives in-crate, where the transport mock is
+/// available (`provider::handler::tests::
+/// a_handler_attached_error_class_survives_the_wire_round_trip`); this test
+/// only proves the constructor compiles and runs from outside.
+#[test]
+fn a_downstream_crate_can_construct_a_classified_error() {
+    use caldir_core::provider::classified_error;
+    use caldir_core::rpc::ErrorCode;
+
+    let err = classified_error(ErrorCode::Conflict, "stale etag");
+
+    assert_eq!(err.to_string(), "stale etag");
+}
+
 /// `ConnectionError` is the error type of every public `Connection` method —
 /// `diff`, `apply_outgoing_diff`, `discard_outgoing_diff` — and was unnameable
 /// downstream too. Driven through the `From<CalendarError>`

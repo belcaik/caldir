@@ -28,7 +28,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Tags a [`Handler`]'s own failure with a §16 `ErrorCode` so
 /// `process_request` can put it on the wire without inspecting the message
 /// text (`CROSS-4`). The `create_item`/`update_item`/`delete_item` defaults
-/// below are today's only producer.
+/// below and the public [`classified_error`] both go through this.
 #[derive(Debug)]
 struct Classified {
     code: ErrorCode,
@@ -42,6 +42,16 @@ impl Classified {
             message: message.into(),
         })
     }
+}
+
+/// Lets a `Handler` attach a §16 `ErrorCode` to an error it returns, so it
+/// arrives at the consumer as the matching `ProviderError` variant instead of
+/// the generic one (`W2-C3`). The `Handler` trait's `Result<T, Error>`
+/// signatures are unchanged — this only widens what a provider can put
+/// inside the `Err`. Additive: an error that never passes through here still
+/// degrades to `ProviderError::Provider`, exactly as before.
+pub fn classified_error(code: ErrorCode, msg: impl Into<String>) -> Error {
+    Classified::boxed(code, msg)
 }
 
 impl std::fmt::Display for Classified {
@@ -287,6 +297,64 @@ mod tests {
             CalendarItem::from_single_ics_str(parsed["data"].as_str().unwrap()).unwrap();
 
         assert_eq!(wire_event, CalendarItem::Event(event));
+    }
+
+    /// W2-C3, the whole ticket's acceptance test: a `Handler` attaches a §16
+    /// class with the public `classified_error` constructor, and the bytes
+    /// `process_request` puts on the wire for it are fed through the real
+    /// consumer-side decode path (`Provider::call`) — not inspected as JSON
+    /// here. The class must arrive as the matching `ProviderError` variant,
+    /// not fall back to the generic one `classified_error` didn't exist to
+    /// prevent.
+    #[tokio::test]
+    async fn a_handler_attached_error_class_survives_the_wire_round_trip() {
+        struct RefusingHandler;
+
+        #[async_trait]
+        impl Handler for RefusingHandler {
+            async fn connect(&self, _cmd: Connect) -> Result<ConnectResponse> {
+                unreachable!()
+            }
+
+            async fn create_item(&self, _cmd: CreateItem) -> Result<CalendarItem> {
+                Err(classified_error(
+                    ErrorCode::MissingAuthScope,
+                    "reauth required",
+                ))
+            }
+        }
+
+        fn create_item_request() -> CreateItem {
+            CreateItem {
+                remote: RemoteConfigParams::new(),
+                event: CalendarItem::Event(Event::new(
+                    "Standup",
+                    EventTime::Date(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()),
+                )),
+            }
+        }
+
+        let request = create_item_request().to_json().unwrap();
+        let wire_response = process_request(&RefusingHandler, &request.to_string()).await;
+
+        let mock = std::sync::Arc::new(
+            crate::provider::transport::mock_transport::MockTransport::with_response(wire_response),
+        );
+        let provider = crate::provider::Provider::with_transport(
+            crate::provider::ProviderSlug::from("test"),
+            mock as std::sync::Arc<dyn crate::provider::transport::ProviderTransport>,
+        );
+
+        let err = provider.call(create_item_request()).await.unwrap_err();
+
+        assert!(
+            matches!(
+                &err,
+                crate::provider::ProviderError::MissingAuthScope(msg)
+                    if msg.contains("reauth required")
+            ),
+            "got {err:?}"
+        );
     }
 
     struct ListingHandler(Vec<CalendarItem>);
