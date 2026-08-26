@@ -27,9 +27,7 @@ impl provider::Handler for GoogleProvider {
     }
 
     async fn list_events(&self, cmd: ListEvents) -> provider::Result<Vec<CalendarItem>> {
-        let events = commands::list_events::handle(cmd).await?;
-
-        Ok(events.into_iter().map(CalendarItem::from).collect())
+        Ok(commands::list_events::handle(cmd).await?)
     }
 
     async fn create_item(&self, cmd: CreateItem) -> provider::Result<CalendarItem> {

@@ -4,5 +4,7 @@
 //! Containment).
 
 mod client;
+mod from_google;
 
-pub use client::list_task_lists;
+pub use client::{Task, list_task_lists, list_tasks};
+pub use from_google::task_to_calendar_item;

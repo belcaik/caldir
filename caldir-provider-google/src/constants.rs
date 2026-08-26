@@ -1,6 +1,9 @@
 pub const PROVIDER_NAME: &str = "google";
 pub const PROVIDER_EVENT_ID_PROPERTY: &str = "X-GOOGLE-EVENT-ID";
 pub const PROVIDER_COLOR_ID_PROPERTY: &str = "X-GOOGLE-COLOR-ID";
+/// Mirrors `PROVIDER_EVENT_ID_PROPERTY` for the Tasks path: the Google task
+/// id is provider metadata, never the VTODO `UID` (spec §12, D-4).
+pub const PROVIDER_TASK_ID_PROPERTY: &str = "X-GOOGLE-TASK-ID";
 
 pub const CALENDAR_LIST_SCOPE: &str =
     "https://www.googleapis.com/auth/calendar.calendarlist.readonly";
