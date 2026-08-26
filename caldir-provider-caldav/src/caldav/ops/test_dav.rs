@@ -54,6 +54,62 @@ pub async fn mount_report(server: &MockServer, marker: &str, body: String) {
         .await;
 }
 
+/// Answer every `REPORT` on the collection whose body contains `marker` with
+/// a bare `status` and no body — simulating a server rejecting that query
+/// (e.g. a bare-`VTODO` `calendar-query` on a task-hostile collection).
+pub async fn mount_report_status(server: &MockServer, marker: &str, status: u16) {
+    Mock::given(method("REPORT"))
+        .and(path(COLLECTION_PATH))
+        .and(body_string_contains(marker.to_string()))
+        .respond_with(ResponseTemplate::new(status))
+        .mount(server)
+        .await;
+}
+
+/// A `207 Multi-Status` for `PROPFIND` on `DAV:supported-calendar-component-set`,
+/// advertising exactly `names` (e.g. `&["VEVENT"]`, `&["VEVENT", "VTODO"]`).
+pub fn component_set_multistatus(names: &[&str]) -> String {
+    let comps: String = names
+        .iter()
+        .map(|name| format!(r#"<C:comp name="{name}"/>"#))
+        .collect();
+
+    format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<multistatus xmlns="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <response>
+    <href>{COLLECTION_PATH}</href>
+    <propstat>
+      <prop>
+        <C:supported-calendar-component-set>{comps}</C:supported-calendar-component-set>
+      </prop>
+      <status>HTTP/1.1 200 OK</status>
+    </propstat>
+  </response>
+</multistatus>"#
+    )
+}
+
+/// Answer the collection's `PROPFIND` with `body` (207 Multi-Status).
+pub async fn mount_propfind(server: &MockServer, body: String) {
+    Mock::given(method("PROPFIND"))
+        .and(path(COLLECTION_PATH))
+        .respond_with(
+            ResponseTemplate::new(207).set_body_raw(body, "application/xml; charset=utf-8"),
+        )
+        .mount(server)
+        .await;
+}
+
+/// Answer the collection's `PROPFIND` with a bare failure `status`.
+pub async fn mount_propfind_status(server: &MockServer, status: u16) {
+    Mock::given(method("PROPFIND"))
+        .and(path(COLLECTION_PATH))
+        .respond_with(ResponseTemplate::new(status))
+        .mount(server)
+        .await;
+}
+
 /// Every request body the double received, in arrival order.
 pub async fn received_bodies(server: &MockServer) -> Vec<String> {
     server

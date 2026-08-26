@@ -3,10 +3,11 @@
 use anyhow::{Context, Result};
 use caldir_core::CalendarItem;
 use http::{Method, Request, Uri};
+use libdav::caldav::{CalendarComponent, GetSupportedComponents};
 use libdav::dav::make_relative_url;
 use libdav::requests::{DavRequest, ParseResponseError};
 
-use crate::caldav::{create_caldav_client, format_caldav_datetime, url_to_href};
+use crate::caldav::{CalDavClient_, create_caldav_client, format_caldav_datetime, url_to_href};
 
 use super::parse_item;
 
@@ -30,14 +31,46 @@ pub async fn fetch_events(
 
     let mut resources = Vec::new();
     for query in calendar_queries(&calendar_href, &from_caldav, &to_caldav) {
-        let response = caldav
-            .request(query)
-            .await
-            .context("Failed to fetch calendar resources")?;
-        resources.extend(response.resources);
+        let is_task_query = matches!(query.filter, ComponentFilter::AllTasks);
+
+        match caldav.request(query).await {
+            Ok(response) => resources.extend(response.resources),
+            Err(err)
+                if is_task_query
+                    && collection_openly_lacks_vtodo(&caldav, &calendar_href).await =>
+            {
+                eprintln!(
+                    "warning: collection {calendar_href} rejected the VTODO calendar-query and \
+                     its supported-calendar-component-set omits VTODO; treating it as an \
+                     events-only collection for this listing ({err:#})"
+                );
+            }
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!("Failed to fetch calendar resources from collection {calendar_href}")
+                });
+            }
+        }
     }
 
     decode_resources(resources)
+}
+
+/// Classify a failed `VTODO` REPORT as fatal-vs-degrade, **after** the server
+/// has already rejected it (C-14). Never a gate on whether to send the
+/// REPORT: the property is advisory and can be wrong (R92), so a negative
+/// hint alone must never suppress the request. This only decides whether a
+/// rejection the server already produced may be downgraded to "no tasks
+/// here" — and only when the collection's own advertisement says so
+/// explicitly. Absent, unreadable or malformed evidence leaves the original
+/// failure fatal, because guessing here can delete a collection's worth of
+/// tasks.
+async fn collection_openly_lacks_vtodo(caldav: &CalDavClient_, collection_href: &str) -> bool {
+    caldav
+        .request(GetSupportedComponents::new(collection_href))
+        .await
+        .map(|response| !response.components.contains(&CalendarComponent::VTodo))
+        .unwrap_or(false)
 }
 
 /// Decode every fetched resource, or fail the whole listing.
@@ -261,7 +294,10 @@ fn parse_calendar_resources(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::caldav::ops::test_dav::{calendar_url, mount_report, multistatus};
+    use crate::caldav::ops::test_dav::{
+        calendar_url, component_set_multistatus, mount_propfind, mount_propfind_status,
+        mount_report, mount_report_status, multistatus,
+    };
     use wiremock::MockServer;
 
     const HREF: &str = "/testuser/calendar/";
@@ -493,5 +529,138 @@ END:VCALENDAR\r\n";
              them reads to core as 'the server does not have this task', i.e. a \
              delete. Got {uids:?}"
         );
+    }
+
+    /// R2/C13. A server that rejects the bare-`VTODO` `calendar-query` and
+    /// openly says (via `supported-calendar-component-set`) that it has no
+    /// `VTODO` support must not lose the caller's **event** sync. Before this
+    /// fix, the second REPORT's `?` discarded a perfectly good first REPORT.
+    #[tokio::test]
+    async fn a_rejected_vtodo_report_does_not_break_an_event_only_listing() {
+        let server = MockServer::start().await;
+
+        mount_report(
+            &server,
+            "VEVENT",
+            multistatus("/cal/evt-1.ics", "\"e-1\"", VEVENT_RESOURCE_ICS),
+        )
+        .await;
+        mount_report_status(&server, "VTODO", 400).await;
+        mount_propfind(&server, component_set_multistatus(&["VEVENT"])).await;
+
+        let items = fetch_events(
+            "user",
+            "pass",
+            &calendar_url(&server),
+            "2025-08-25T00:00:00Z",
+            "2027-08-25T00:00:00Z",
+        )
+        .await
+        .expect("a task-hostile collection must not break event sync");
+
+        let uids: Vec<&str> = items.iter().map(|item| item.uid().as_str()).collect();
+        assert_eq!(uids, ["evt-1@caldir"]);
+    }
+
+    /// C-14's guard against a blanket swallow. A collection whose advertised
+    /// component set **includes** `VTODO` and then refuses the REPORT anyway
+    /// must still fail loudly — reporting "no tasks" here would read to core
+    /// as a delete of every task the collection holds.
+    #[tokio::test]
+    async fn a_rejected_vtodo_report_on_a_task_capable_collection_is_still_an_error() {
+        let server = MockServer::start().await;
+
+        mount_report(
+            &server,
+            "VEVENT",
+            multistatus("/cal/evt-1.ics", "\"e-1\"", VEVENT_RESOURCE_ICS),
+        )
+        .await;
+        mount_report_status(&server, "VTODO", 400).await;
+        mount_propfind(&server, component_set_multistatus(&["VEVENT", "VTODO"])).await;
+
+        let err = fetch_events(
+            "user",
+            "pass",
+            &calendar_url(&server),
+            "2025-08-25T00:00:00Z",
+            "2027-08-25T00:00:00Z",
+        )
+        .await
+        .expect_err("a task-capable collection refusing the REPORT must not be read as 'no tasks'");
+
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains(crate::caldav::ops::test_dav::COLLECTION_PATH),
+            "the failure must name the collection, got: {rendered}"
+        );
+    }
+
+    /// R92, the executable form: the property is a post-mortem, never a
+    /// gate. A healthy listing issues exactly the two REPORTs it always has —
+    /// no `PROPFIND` at all.
+    #[tokio::test]
+    async fn a_healthy_listing_never_asks_for_the_component_set() {
+        let server = MockServer::start().await;
+
+        mount_report(
+            &server,
+            "VEVENT",
+            multistatus("/cal/evt-1.ics", "\"e-1\"", VEVENT_RESOURCE_ICS),
+        )
+        .await;
+        mount_report(
+            &server,
+            "VTODO",
+            multistatus("/cal/task-1.ics", "\"t-1\"", VTODO_RESOURCE_ICS),
+        )
+        .await;
+
+        fetch_events(
+            "user",
+            "pass",
+            &calendar_url(&server),
+            "2025-08-25T00:00:00Z",
+            "2027-08-25T00:00:00Z",
+        )
+        .await
+        .expect("both REPORTs answer");
+
+        let bodies = crate::caldav::ops::test_dav::received_bodies(&server).await;
+        assert_eq!(bodies.len(), 2, "exactly two requests, got: {bodies:?}");
+        for body in &bodies {
+            assert!(
+                !body.contains("supported-calendar-component-set"),
+                "the happy path must fire zero extra requests, got: {body}"
+            );
+        }
+    }
+
+    /// C-14's other guard: when the classifying `PROPFIND` itself cannot be
+    /// read (fails, 404s, is malformed), the original failure stays fatal.
+    /// Guessing here costs data — an unreadable component set could be a
+    /// transient `500` on a collection full of tasks.
+    #[tokio::test]
+    async fn an_unreadable_component_set_leaves_the_failure_fatal() {
+        let server = MockServer::start().await;
+
+        mount_report(
+            &server,
+            "VEVENT",
+            multistatus("/cal/evt-1.ics", "\"e-1\"", VEVENT_RESOURCE_ICS),
+        )
+        .await;
+        mount_report_status(&server, "VTODO", 400).await;
+        mount_propfind_status(&server, 500).await;
+
+        fetch_events(
+            "user",
+            "pass",
+            &calendar_url(&server),
+            "2025-08-25T00:00:00Z",
+            "2027-08-25T00:00:00Z",
+        )
+        .await
+        .expect_err("an unreadable component set must not turn a rejection into a degrade");
     }
 }
