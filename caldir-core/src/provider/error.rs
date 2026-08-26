@@ -24,4 +24,11 @@ pub enum ProviderError {
 
     #[error("Provider returned error: {0}")]
     Provider(String),
+
+    /// The provider replied that it does not recognise the RPC method sent
+    /// to it (`rpc::ErrorCode::UnsupportedMethod`) — distinct from
+    /// `Provider` so a caller can tell "too old to answer" from "answered
+    /// and failed" without matching on message text (§16, `CROSS-4`).
+    #[error("Provider does not support this method: {0}")]
+    UnsupportedMethod(String),
 }

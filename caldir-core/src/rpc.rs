@@ -53,7 +53,28 @@ impl Request {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Response<T> {
     Success { data: T },
-    Error { error: String },
+    Error {
+        error: String,
+        /// Additive (R55/C9): absent on every envelope written before this
+        /// field existed, and on every error an older provider still emits.
+        #[serde(default)]
+        code: Option<ErrorCode>,
+    },
+}
+
+/// A machine-matchable discriminator riding beside `Response::Error::error`.
+/// `format_chain` flattens the source chain into `error` itself, so anything
+/// a caller needs to match on travels here instead of in the message text.
+///
+/// Exactly one variant today: the one seam this ticket owns. `P2-04` extends
+/// this enum with the §16 error classes; it does not need a second wire
+/// change to do so, because this field is already additive and optional.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
+    /// The `command` on the envelope is not a verb this provider binary
+    /// understands — an old binary facing a newer core, or a typo.
+    UnsupportedMethod,
 }
 
 impl<T: Serialize> Response<T> {
@@ -66,9 +87,10 @@ impl<T: Serialize> Response<T> {
 
 impl Response<()> {
     /// Serialize an error response to a JSON string for stdout.
-    pub fn error(msg: &str) -> String {
+    pub fn error(msg: &str, code: Option<ErrorCode>) -> String {
         serde_json::to_string(&Response::<()>::Error {
             error: msg.to_string(),
+            code,
         })
         .expect("Response::Error serialization is infallible")
     }
@@ -79,6 +101,18 @@ mod tests {
     use super::*;
     use crate::test_utils::{VEVENT_CONTROL_ICS, VTODO_ICS};
     use serde_json::json;
+
+    /// R55/C9 (INVIOLABLE). An older provider's error envelope carries no
+    /// structured field at all; a new optional field must not make it
+    /// unparseable, or every installed provider binary breaks the day core
+    /// adds one.
+    #[test]
+    fn an_error_envelope_from_an_older_provider_still_decodes() {
+        let decoded: Response<()> =
+            serde_json::from_str(r#"{"status":"error","error":"boom"}"#).unwrap();
+
+        assert!(matches!(decoded, Response::Error { error, .. } if error == "boom"));
+    }
 
     /// `T-33` — R52/C8 (INVIOLABLE). `Method` is a closed serde enum with no
     /// `#[serde(other)]`, so a seventh verb makes every *installed* provider

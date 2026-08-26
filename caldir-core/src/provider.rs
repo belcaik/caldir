@@ -83,7 +83,11 @@ impl Provider {
 
         match response {
             rpc::Response::Success { data } => Ok(rpc::WireValue::from_wire(data)),
-            rpc::Response::Error { error } => Err(ProviderError::Provider(error)),
+            rpc::Response::Error {
+                error,
+                code: Some(rpc::ErrorCode::UnsupportedMethod),
+            } => Err(ProviderError::UnsupportedMethod(error)),
+            rpc::Response::Error { error, code: _ } => Err(ProviderError::Provider(error)),
         }
     }
 
@@ -263,6 +267,27 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, ProviderError::Provider(msg) if msg == "oh no"));
+    }
+
+    /// `P1-02`'s fail-closed branch and `P2-04`'s taxonomy both need to tell
+    /// "too old to answer" from "answered and failed" without substring
+    /// matching on the message (`CROSS-4`, §16).
+    #[tokio::test]
+    async fn an_unsupported_method_reply_becomes_a_typed_provider_error() {
+        let mock = Arc::new(MockTransport::with_response(
+            r#"{"status":"error","error":"unknown command: list_todos","code":"unsupported_method"}"#,
+        ));
+        let provider = provider_with_transport(mock);
+
+        let err = provider
+            .call(EchoCommand { value: "x".into() })
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, ProviderError::UnsupportedMethod(ref msg) if msg.contains("list_todos")),
+            "got: {err:?}"
+        );
     }
 
     #[tokio::test]

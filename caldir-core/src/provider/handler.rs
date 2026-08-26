@@ -11,10 +11,12 @@ use std::future::Future;
 use std::io::{self, BufRead, Write};
 
 use crate::rpc::{
-    Connect, ConnectResponse, CreateEvent, DeleteEvent, ListCalendars, ListEvents, Method, Request,
-    Response, Rpc, UpdateEvent, WireValue,
+    Connect, ConnectResponse, CreateEvent, DeleteEvent, ErrorCode, ListCalendars, ListEvents,
+    Method, Request, Response, Rpc, UpdateEvent, WireValue,
 };
 use crate::{CalendarConfig, CalendarItem, Event};
+
+use super::slug::provider_slug_from_filename;
 
 /// Error returned by [`Handler`] methods.
 pub type Error = Box<dyn StdError + Send + Sync>;
@@ -72,18 +74,66 @@ pub async fn run_provider<H: Handler>(handler: H) {
     }
 }
 
+/// The subset of an envelope that decodes even when `command` is a verb this
+/// binary has never heard of. `Method`'s `Deserialize` is intentionally
+/// strict (R52/C-5: no `#[serde(other)]`, no `#[non_exhaustive]`), so the
+/// tolerance for an unrecognised verb lives here, one step before `Method`
+/// ever sees the string.
+#[derive(serde::Deserialize)]
+struct RawRequest {
+    command: String,
+    #[serde(default)]
+    params: serde_json::Value,
+}
+
 /// Process a single JSON-encoded request line and return the JSON-encoded
 /// response. Exposed for unit tests — most providers only need [`run_provider`].
 pub async fn process_request<H: Handler>(handler: &H, line: &str) -> String {
-    let request: Request = match serde_json::from_str(line) {
+    let raw: RawRequest = match serde_json::from_str(line) {
         Ok(r) => r,
-        Err(e) => return Response::error(&format!("Failed to parse request: {e}")),
+        Err(e) => return Response::error(&format!("Failed to parse request: {e}"), None),
+    };
+
+    let method: Method = match serde_json::from_value(serde_json::Value::String(raw.command.clone()))
+    {
+        Ok(method) => method,
+        Err(_) => {
+            return Response::error(
+                &format!(
+                    "{} does not support the \"{}\" command; the provider may need updating",
+                    provider_name(),
+                    raw.command,
+                ),
+                Some(ErrorCode::UnsupportedMethod),
+            );
+        }
+    };
+
+    let request = Request {
+        method,
+        params: raw.params,
     };
 
     match dispatch(handler, request).await {
         Ok(data) => Response::success(data),
-        Err(e) => Response::error(&format!("Error handling request: {}", format_chain(&*e))),
+        Err(e) => Response::error(
+            &format!("Error handling request: {}", format_chain(&*e)),
+            None,
+        ),
     }
+}
+
+/// The provider's own name, recovered from its binary filename — no new
+/// argument needed (`provider_slug_from_filename`, `slug.rs`). Falls back to
+/// a generic label when the filename can't be read (e.g. in unit tests).
+fn provider_name() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.file_name().map(|name| name.to_os_string()))
+        .and_then(|name| name.to_str().map(str::to_string))
+        .and_then(|name| provider_slug_from_filename(&name))
+        .map(|slug| slug.to_string())
+        .unwrap_or_else(|| "this provider".to_string())
 }
 
 /// Preserves context from providers' `anyhow::Context`
@@ -300,6 +350,51 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["status"], "error");
         assert_eq!(parsed["error"], "Error handling request: outer: inner");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_command_is_reported_as_a_version_error() {
+        let response = process_request(
+            &StubHandler,
+            r#"{"command":"list_todos","params":{}}"#,
+        )
+        .await;
+
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["status"], "error");
+        let error = parsed["error"].as_str().unwrap();
+        assert!(error.contains("list_todos"), "got: {error}");
+        assert!(
+            !error.contains("Failed to parse request"),
+            "got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_typo_in_a_known_command_is_still_loud() {
+        struct PanicsIfCreateEventRuns;
+
+        #[async_trait]
+        impl Handler for PanicsIfCreateEventRuns {
+            async fn connect(&self, _cmd: Connect) -> Result<ConnectResponse> {
+                unreachable!()
+            }
+
+            async fn create_event(&self, _cmd: CreateEvent) -> Result<Event> {
+                panic!("create_event must not run for a typo'd command");
+            }
+        }
+
+        let response = process_request(
+            &PanicsIfCreateEventRuns,
+            r#"{"command":"create_evnet","params":{}}"#,
+        )
+        .await;
+
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["status"], "error");
+        let error = parsed["error"].as_str().unwrap();
+        assert!(error.contains("create_evnet"), "got: {error}");
     }
 
     #[tokio::test]
