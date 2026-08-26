@@ -17,13 +17,8 @@ use google_calendar::types::MinAccessRole;
 use url::Url;
 
 use crate::app_config::{AppConfig, AppConfigStore};
-use crate::constants::PROVIDER_NAME;
+use crate::constants::{PROVIDER_NAME, REQUESTED_SCOPES};
 use crate::session::{AuthMode, Session, SessionData, SessionStore};
-
-pub const SCOPES: &[&str] = &[
-    "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
-    "https://www.googleapis.com/auth/calendar.events",
-];
 
 pub async fn handle(cmd: Connect) -> Result<ConnectResponse> {
     let storage = ProviderStorage::for_provider(PROVIDER_NAME)?;
@@ -109,11 +104,12 @@ To connect to Google Calendar, you need to create OAuth credentials:\n\
   1. Go to https://console.cloud.google.com/apis/credentials\n\
   2. Create a new project (or select an existing one)\n\
   3. Enable the Google Calendar API for your project: https://console.developers.google.com/apis/api/calendar-json.googleapis.com\n\
-  4. Add your own account as a test user in the \"Audience\" tab\n\
-  5. Click \"Create credentials\" → \"OAuth client ID\"\n\
-  6. Choose \"Desktop app\" as the application type\n\
-  7. Pick a name (e.g., \"Caldir\")\n\
-  8. Copy the client ID and client secret below"
+  4. Enable the Google Tasks API for your project: https://console.developers.google.com/apis/api/tasks.googleapis.com\n\
+  5. Add your own account as a test user in the \"Audience\" tab\n\
+  6. Click \"Create credentials\" → \"OAuth client ID\"\n\
+  7. Choose \"Desktop app\" as the application type\n\
+  8. Pick a name (e.g., \"Caldir\")\n\
+  9. Copy the client ID and client secret below"
                     .to_string(),
                 fields: vec![
                     CredentialField {
@@ -151,7 +147,7 @@ To connect to Google Calendar, you need to create OAuth credentials:\n\
         String::new(),
     );
 
-    let scopes: Vec<String> = SCOPES.iter().map(|s| s.to_string()).collect();
+    let scopes: Vec<String> = REQUESTED_SCOPES.iter().map(|s| s.to_string()).collect();
 
     let authorization_url = client.user_consent_url(&scopes);
 
@@ -200,10 +196,13 @@ async fn complete_auth(
                 })
                 .ok_or_else(|| anyhow::anyhow!("Missing 'expires_in' in credentials"))?;
 
+            let scope = cmd.data.get("scope").and_then(|v| v.as_str());
+
             let session_data = SessionData::from_tokens(
                 access_token.to_string(),
                 refresh_token.to_string(),
                 expires_in,
+                scope,
             );
 
             let client = Client::new(
@@ -275,4 +274,26 @@ async fn complete_auth(
     session_store.save(&session)?;
 
     Ok(account_email.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::constants::TASKS_SCOPE;
+
+    #[test]
+    fn the_consent_url_requests_the_tasks_scope() {
+        let client = Client::new(
+            "dummy-client-id".to_string(),
+            "dummy-client-secret".to_string(),
+            "http://localhost:1234".to_string(),
+            String::new(),
+            String::new(),
+        );
+
+        let scopes: Vec<String> = REQUESTED_SCOPES.iter().map(|s| s.to_string()).collect();
+        let url = client.user_consent_url(&scopes);
+
+        assert!(url.contains(TASKS_SCOPE));
+    }
 }

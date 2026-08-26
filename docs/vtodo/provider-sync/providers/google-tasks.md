@@ -138,3 +138,25 @@ signatures themselves must never name a Tasks type.
 ## Unsupported field policy
 
 (Extended in place by `P5-06` — do not fill in here.)
+
+## Session migration
+
+`P4-02` adds the Tasks scope (`https://www.googleapis.com/auth/tasks`) to the consent request
+alongside the two existing Calendar scopes. A session created before this change has no record of
+Tasks access.
+
+**What an existing user must do:** run `caldir connect google` again for the affected account. This
+re-runs the OAuth consent flow and re-grants the Calendar scopes the session already had plus the
+new Tasks scope; it does not lose or reset Calendar sync state.
+
+**What they see if they do nothing:** Calendar sync (events) keeps working exactly as before —
+nothing about the existing session is invalidated. The first attempt to read or write Tasks against
+that session fails a scope guard (`Session::require_tasks_scope`, `caldir-provider-google/src/session/types.rs`)
+before any Google API call is made, with a message naming the account and the exact fix:
+
+> Google account `<email>` is not authorized for Google Tasks. Run `caldir connect google` to
+> reauthorize and grant access.
+
+It never surfaces as a bare Google 403 — the guard runs before the request, and an empty
+`granted_scopes` (the shape of every pre-existing session file) is treated as "not granted", never
+"unknown, assume yes".

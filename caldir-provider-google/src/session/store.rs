@@ -233,6 +233,7 @@ mod tests {
                 refresh_token: "refresh-xyz".to_string(),
                 expires_at: Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap(),
                 auth_mode: AuthMode::Hosted,
+                granted_scopes: vec![],
             },
         }
     }
