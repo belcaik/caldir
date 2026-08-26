@@ -45,11 +45,11 @@ A caldir directory can also hold tasks (`VTODO`), not just events. A task is a r
 
 Tasks show up next to your events in `caldir events`, `caldir today` and `caldir week`, and in their [`--json` output](/commands#caldir-events).
 
-### Tasks sync one way only
+### Task support varies by provider
 
-caldir can **pull** tasks from a CalDAV server, but it cannot **push** them.
+Whether a calendar can push tasks depends on the provider behind it. Generic CalDAV servers and Google Task lists support full read/write; others are pull-only or don't see tasks at all.
 
-A task you create or edit locally stays local. If a task file sits in a calendar whose provider doesn't support task writes, `caldir push` and `caldir sync` hold that change back and tell you so, naming the provider:
+A task you create or edit locally stays local until the remote can take it. If a task file sits in a calendar whose provider doesn't support task writes, `caldir push` and `caldir sync` hold that change back and tell you so, naming the provider:
 
 ```
    ⚠ 1 task change not pushed: Provider "webcal" does not support task writes.
@@ -61,9 +61,10 @@ Where tasks stand per provider:
 
 | Provider | Tasks |
 |---|---|
-| Generic CalDAV | Pulled. Verified against a real Radicale server |
-| iCloud | Untested — it runs the same CalDAV code, but caldir makes no promise here |
-| Google Calendar | Not supported — Google Tasks is a separate product with its own API |
+| Generic CalDAV | Full support — discovery, create, update, delete. Advertised per remote: a collection that can't serve tasks reports so and its tasks are left alone. Verified against a real Radicale server |
+| Google Task list | Full support — a separate remote kind from Google Calendar, discovered alongside your calendars. Read and write, but lossy — see the [field-by-field notes](https://github.com/t4t5/caldir/blob/main/docs/vtodo/provider-sync/providers/google-tasks.md) |
+| Google Calendar | Not supported — a Calendar remote is never reinterpreted as a task list |
+| iCloud | Pull only — it runs the same CalDAV code, but caldir has never been tested against a real iCloud account, and pushing tasks is refused |
 | Outlook | Not supported — Microsoft To Do is a separate product with its own API |
 | Webcal | Not supported — feeds are read-only, and a task in a feed is ignored |
 

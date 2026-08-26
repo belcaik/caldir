@@ -129,7 +129,7 @@ Fri Aug 14
 - A date-only `DUE` prints `due` in the time column rather than a clock time — a task is due *by* that day, it doesn't occupy it.
 - A task with neither `DUE` nor `DTSTART` belongs to no day, so it is counted in a dimmed footer instead of being listed. `--undated` (on `events`, `today` and `week`) lists them in a trailing `No date` section instead.
 
-caldir pulls tasks but cannot push them — see [Tasks](/#tasks).
+Whether a task can be pushed depends on the provider behind its calendar — see [Tasks](/#tasks).
 
 <details>
 <summary>Optional JSON output</summary>
