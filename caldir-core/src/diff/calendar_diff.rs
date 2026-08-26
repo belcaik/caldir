@@ -1559,6 +1559,65 @@ mod tests {
         assert_eq!(diff.withheld_task_pushes, 0);
     }
 
+    /// W1-C2 (P1-03/S3, acceptance criterion 4). `Create` above is not proof
+    /// that `Update` also reaches the outgoing set — cover it directly.
+    #[test]
+    fn a_task_update_is_outgoing_when_task_writes_are_advertised() {
+        let (_tmp, calendar) = test_calendar();
+        let remote_todo = Todo::new("Hand in the assignment");
+
+        let mut local_todo = remote_todo.clone();
+        local_todo.summary = Some("Hand in the assignment (revised)".to_string());
+        let calendar_event = CalendarEvent::create(&calendar, local_todo.clone()).unwrap();
+
+        let mut sync_bases = SyncBases::new();
+        sync_bases.insert_known_event_id(CalendarItem::from(remote_todo.clone()).instance_id());
+
+        let diff = CalendarDiff::compute_with(
+            vec![calendar_event],
+            vec![RemoteEvent::new(remote_todo.clone())],
+            &sync_bases,
+            &DateRange::default(),
+            Deletes::Allowed,
+            TaskPushes::Allowed,
+        );
+
+        assert_eq!(
+            diff.outgoing,
+            vec![EventChange::Update {
+                from: CalendarItem::Todo(remote_todo),
+                to: CalendarItem::Todo(local_todo),
+            }]
+        );
+        assert_eq!(diff.withheld_task_pushes, 0);
+    }
+
+    /// W1-C2 (P1-03/S3, acceptance criterion 4). Same gap, for `Delete`: a
+    /// task known from a prior sync but gone locally must still reach the
+    /// outgoing set when the provider advertises `tasks.write`.
+    #[test]
+    fn a_task_delete_is_outgoing_when_task_writes_are_advertised() {
+        let todo = Todo::new("Hand in the assignment");
+
+        let mut sync_bases = SyncBases::new();
+        sync_bases.insert_event_base(CalendarItem::from(todo.clone()).instance_id(), todo.clone());
+
+        let diff = CalendarDiff::compute_with(
+            vec![],
+            vec![RemoteEvent::new(todo.clone())],
+            &sync_bases,
+            &DateRange::default(),
+            Deletes::Allowed,
+            TaskPushes::Allowed,
+        );
+
+        assert_eq!(
+            diff.outgoing,
+            vec![EventChange::Delete(CalendarItem::Todo(todo))]
+        );
+        assert_eq!(diff.withheld_task_pushes, 0);
+    }
+
     /// The honest `false` beside the honest `true` above: without the
     /// capability, the task is withheld and an event change in the same diff
     /// still goes out (R70 is scoped to tasks, never to the whole diff).
