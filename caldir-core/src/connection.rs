@@ -870,6 +870,213 @@ mod tests {
         assert_eq!(connection.local().state().sync_base(&id), Some(&event));
     }
 
+    /// P2-02: a provider advertising task writes, used to drive a real
+    /// outgoing task change through `Connection::diff`. `CalendarDiff::
+    /// from_changes` (behind `outgoing_create_diff`/`outgoing_update_diff`)
+    /// withholds every task unconditionally (R70), so it cannot produce the
+    /// shape these tests need — only the capability-aware production path can.
+    fn task_writable_capabilities() -> ProviderCapabilities {
+        use crate::provider::Capability;
+        ProviderCapabilities {
+            events: Capability {
+                read: true,
+                write: true,
+            },
+            tasks: Capability {
+                read: true,
+                write: true,
+            },
+        }
+    }
+
+    /// P2-02/§15. `create -> sync -> sync`: the churn gate for tasks. The
+    /// first pass must do real work or the second pass proving nothing is
+    /// free; the second, against a remote that now reports the pushed task
+    /// back, must be empty.
+    #[tokio::test]
+    async fn creating_a_task_then_syncing_twice_yields_an_empty_second_diff() {
+        let (_tmp, mock, mut connection) = writable_connection();
+        let todo = Todo::new("Hand in the assignment");
+        connection.local().create_event(todo.clone()).unwrap();
+
+        mock.reply::<rpc::Capabilities>(task_writable_capabilities());
+        mock.reply::<rpc::ListEvents>(vec![]);
+        let first = connection.diff(&DateRange::default()).await.unwrap();
+
+        assert!(
+            !first.is_empty(),
+            "the first sync must actually do work, or this gate proves nothing",
+        );
+        assert_eq!(
+            first.outgoing(),
+            &[EventChange::Create(CalendarItem::Todo(todo.clone()))],
+        );
+
+        mock.reply::<rpc::CreateItem>(CalendarItem::Todo(todo.clone()));
+        connection.apply_outgoing_diff(&first).await.unwrap();
+
+        // A fresh process reads its bases from disk, not the in-memory map
+        // the apply just populated.
+        connection.local = Calendar::load(connection.local().path()).unwrap();
+
+        mock.reply::<rpc::Capabilities>(task_writable_capabilities());
+        mock.reply::<rpc::ListEvents>(vec![CalendarItem::Todo(todo)]);
+        let second = connection.diff(&DateRange::default()).await.unwrap();
+
+        assert!(
+            second.is_empty(),
+            "second sync churned a task create — incoming: {:#?}\noutgoing: {:#?}",
+            second.incoming(),
+            second.outgoing(),
+        );
+    }
+
+    /// P2-02/§15. `update -> sync -> sync`. The create-only gate above cannot
+    /// see this: a base recorded on create but never refreshed on update
+    /// flips `update_direction` forever, which only a *second* update-path
+    /// diff exposes.
+    #[tokio::test]
+    async fn updating_a_task_then_syncing_twice_yields_an_empty_second_diff() {
+        let (_tmp, mock, mut connection) = writable_connection();
+
+        let original = Todo::new("Hand in the assignment");
+        let mut cal_event = connection.local().create_event(original.clone()).unwrap();
+        connection
+            .local
+            .record_sync_bases(vec![CalendarItem::Todo(original.clone())])
+            .unwrap();
+
+        let mut updated = original.clone();
+        updated.summary = Some("Hand in the final assignment".to_string());
+        cal_event
+            .update(CalendarItem::Todo(updated.clone()))
+            .unwrap();
+
+        mock.reply::<rpc::Capabilities>(task_writable_capabilities());
+        mock.reply::<rpc::ListEvents>(vec![CalendarItem::Todo(original.clone())]);
+        let first = connection.diff(&DateRange::default()).await.unwrap();
+
+        assert!(
+            !first.is_empty(),
+            "the first sync must actually do work, or this gate proves nothing",
+        );
+        assert_eq!(
+            first.outgoing(),
+            &[EventChange::Update {
+                from: CalendarItem::Todo(original),
+                to: CalendarItem::Todo(updated.clone()),
+            }],
+        );
+
+        mock.reply::<rpc::UpdateItem>(CalendarItem::Todo(updated.clone()));
+        connection.apply_outgoing_diff(&first).await.unwrap();
+
+        connection.local = Calendar::load(connection.local().path()).unwrap();
+
+        mock.reply::<rpc::Capabilities>(task_writable_capabilities());
+        mock.reply::<rpc::ListEvents>(vec![CalendarItem::Todo(updated)]);
+        let second = connection.diff(&DateRange::default()).await.unwrap();
+
+        assert!(
+            second.is_empty(),
+            "second sync churned a task update — incoming: {:#?}\noutgoing: {:#?}",
+            second.incoming(),
+            second.outgoing(),
+        );
+    }
+
+    /// P2-02/§7. Recording the *sent* item (the natural-looking
+    /// implementation) is invisible against a provider that echoes its
+    /// input, and is exactly what makes a canonicalizing provider churn
+    /// forever. The base must be the item the provider *returned*.
+    #[tokio::test]
+    async fn a_pushed_task_records_the_providers_canonical_item_as_its_base() {
+        let (_tmp, mock, mut connection) = writable_connection();
+        let todo = Todo::new("Hand in the assignment");
+        connection.local().create_event(todo.clone()).unwrap();
+
+        mock.reply::<rpc::Capabilities>(task_writable_capabilities());
+        mock.reply::<rpc::ListEvents>(vec![]);
+        let diff = connection.diff(&DateRange::default()).await.unwrap();
+
+        let mut canonical = todo.clone();
+        canonical.x_properties.push(XProperty::new(
+            "X-PROVIDER-TASK-ID".to_string(),
+            "abc123".to_string(),
+        ));
+        mock.reply::<rpc::CreateItem>(CalendarItem::Todo(canonical.clone()));
+
+        connection.apply_outgoing_diff(&diff).await.unwrap();
+
+        let id = CalendarItem::Todo(canonical.clone()).instance_id();
+        assert_eq!(
+            connection.local().state().sync_bases().get(&id),
+            Some(&Some(Box::new(CalendarItem::Todo(canonical)))),
+            "the base must be the provider's returned item, not the item that was sent",
+        );
+    }
+
+    /// P2-02/§6. `push_outgoing_changes` looks the local event up by
+    /// `original_event_id`, computed from the *sent* change. If that lookup
+    /// misses for a task, the push silently leaves the old file in place and
+    /// the next sync creates a duplicate.
+    #[tokio::test]
+    async fn a_provider_reassigned_task_uid_rewrites_the_local_file() {
+        let (_tmp, mock, mut connection) = writable_connection();
+        let todo = Todo::new("Hand in the assignment");
+        let original_id = CalendarItem::Todo(todo.clone()).instance_id();
+        connection.local().create_event(todo.clone()).unwrap();
+
+        mock.reply::<rpc::Capabilities>(task_writable_capabilities());
+        mock.reply::<rpc::ListEvents>(vec![]);
+        let diff = connection.diff(&DateRange::default()).await.unwrap();
+
+        let mut canonical = todo.clone();
+        canonical.uid = EventUid::new("provider-assigned-task-uid@example.com");
+        let canonical_id = CalendarItem::Todo(canonical.clone()).instance_id();
+        assert_ne!(original_id, canonical_id);
+        mock.reply::<rpc::CreateItem>(CalendarItem::Todo(canonical.clone()));
+
+        connection.apply_outgoing_diff(&diff).await.unwrap();
+
+        let reloaded = connection.local().events().unwrap().into_events();
+        assert_eq!(
+            reloaded.len(),
+            1,
+            "no second file may be left behind, got {reloaded:?}",
+        );
+        assert_eq!(reloaded[0].item(), &CalendarItem::Todo(canonical.clone()));
+
+        let synced = connection.local().state().synced_event_ids();
+        assert!(synced.contains(&canonical_id));
+        assert!(!synced.contains(&original_id));
+    }
+
+    /// P2-02/§7. `record` writes both `known_event_ids` and the per-item base
+    /// directory; a base that never reached disk is churn on the next
+    /// process, which is the only run that matters.
+    #[tokio::test]
+    async fn a_pushed_task_base_survives_a_reload_from_disk() {
+        let (_tmp, mock, mut connection) = writable_connection();
+        let todo = Todo::new("Hand in the assignment");
+        connection.local().create_event(todo.clone()).unwrap();
+
+        mock.reply::<rpc::Capabilities>(task_writable_capabilities());
+        mock.reply::<rpc::ListEvents>(vec![]);
+        let diff = connection.diff(&DateRange::default()).await.unwrap();
+
+        mock.reply::<rpc::CreateItem>(CalendarItem::Todo(todo.clone()));
+        connection.apply_outgoing_diff(&diff).await.unwrap();
+
+        let id = CalendarItem::Todo(todo.clone()).instance_id();
+        let reloaded = Calendar::load(connection.local().path()).unwrap();
+        assert_eq!(
+            reloaded.state().sync_bases().get(&id),
+            Some(&Some(Box::new(CalendarItem::Todo(todo)))),
+            "the base must survive a reload from disk, not just live in memory",
+        );
+    }
+
     #[tokio::test]
     async fn apply_outgoing_diff_persists_synced_ids_on_partial_success() {
         use crate::provider::transport::ProviderTransportError;
