@@ -110,6 +110,50 @@ pub async fn mount_propfind_status(server: &MockServer, status: u16) {
         .await;
 }
 
+/// The property **names** inside the one `VTODO` component of a document, as a
+/// sorted, de-duplicated set.
+///
+/// Only the `VTODO`: a sibling `VTIMEZONE` component is expected and must not
+/// be counted, and nested `VALARM` properties belong to the alarm. Shared
+/// between the live Radicale tier and the ops-level fidelity gates so the
+/// extractor cannot drift into two copies.
+pub(crate) fn vtodo_property_names(ics: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut depth = 0usize;
+
+    for line in ics.lines() {
+        if let Some(component) = line.strip_prefix("BEGIN:") {
+            depth += 1;
+            if component == "VTODO" {
+                // Reset: only the VTODO's own properties count.
+                names.clear();
+            }
+            continue;
+        }
+        if line.starts_with("END:") {
+            if line.starts_with("END:VTODO") {
+                break;
+            }
+            depth = depth.saturating_sub(1);
+            continue;
+        }
+        // Only lines directly inside the VTODO (VCALENDAR + VTODO = depth 2),
+        // and never a folded continuation line.
+        if depth == 2
+            && !line.starts_with(' ')
+            && !line.starts_with('\t')
+            && let Some(name) = line.split([';', ':']).next()
+            && !name.is_empty()
+        {
+            names.push(name.to_string());
+        }
+    }
+
+    names.sort();
+    names.dedup();
+    names
+}
+
 /// Every request body the double received, in arrival order.
 pub async fn received_bodies(server: &MockServer) -> Vec<String> {
     server

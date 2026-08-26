@@ -182,8 +182,14 @@ pub async fn create_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::caldav::ops::test_dav::{calendar_url, mount_report, multistatus};
-    use caldir_core::{CalendarItem, EventTime, EventUid, Todo};
+    use crate::caldav::ops::test_dav::{
+        calendar_url, mount_report, multistatus, vtodo_property_names,
+    };
+    use caldir_core::{
+        Attachment, Attendee, CalendarItem, EventTime, EventUid, Organizer, Recurrence,
+        RecurrenceId, Reminder, Todo, TodoStatus, XProperty,
+    };
+    use std::collections::BTreeSet;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -192,6 +198,370 @@ mod tests {
         let mut todo = Todo::new("Sent by caldir");
         todo.uid = EventUid::new("task-1@caldir");
         todo
+    }
+
+    // ========================================================================
+    // P3-06 — round-trip fidelity
+    // ========================================================================
+
+    /// spec §6's IN set, as it lands on `Todo`'s fields — the enumerated list
+    /// §8.4's "without provider-level semantic loss" needs to be checkable.
+    /// Copied here, not imported: `caldir_core::Todo`'s own equivalent list
+    /// (`MODELLED_PROPERTIES`) lives in a `#[cfg(test)]` private module and
+    /// cannot cross the crate boundary. `DTSTAMP` is included though it is
+    /// not a field — emitted, never modelled (R25), re-stamped on every
+    /// serialize. `VALARM` is a component, not a property, and is exercised
+    /// separately by the reminder on `fully_populated_todo`. `X-*` properties
+    /// are exercised by `an_unknown_x_property_survives_and_a_server_added_one_arrives`,
+    /// not this list.
+    ///
+    /// `the_property_list_matches_the_core_task_codec` is the non-vacuity
+    /// guard that keeps this copy honest against `Todo` itself.
+    const CALDAV_ROUND_TRIP_PROPERTIES: &[&str] = &[
+        "UID",
+        "DTSTAMP",
+        "DTSTART",
+        "DUE",
+        "COMPLETED",
+        "SUMMARY",
+        "DESCRIPTION",
+        "LOCATION",
+        "URL",
+        "STATUS",
+        "PRIORITY",
+        "PERCENT-COMPLETE",
+        "CREATED",
+        "LAST-MODIFIED",
+        "SEQUENCE",
+        "RECURRENCE-ID",
+        "ORGANIZER",
+        "ATTENDEE",
+        "ATTACH",
+        "RRULE",
+        "EXDATE",
+        "RDATE",
+    ];
+
+    /// R15's documented loss set: properties `Todo` does not model and the
+    /// provider must never reintroduce. `CLASS` and `DURATION` are the open
+    /// half (spec §6's OUT rows / ADJUDICATION); `CATEGORIES`/`RELATED-TO`
+    /// are OUT by ADJUDICATION §C-2.
+    const R15_DROPPED_PROPERTIES: &[&str] = &[
+        "CATEGORIES",
+        "GEO",
+        "RELATED-TO",
+        "RESOURCES",
+        "COMMENT",
+        "CONTACT",
+        "CLASS",
+        "DURATION",
+    ];
+
+    /// `deadlines/assignment-1571380.ics`, byte-identical to
+    /// `caldir_core::test_utils::VTODO_OPEN_PRODUCTION_ICS` (P1-05). Copied
+    /// rather than imported: the core fixture lives behind a `#[cfg(test)]`
+    /// private module and cannot cross the crate boundary, exactly like
+    /// `CALDAV_ROUND_TRIP_PROPERTIES` above. Carries exactly `UID`,
+    /// `DTSTAMP`, `DUE`, `PRIORITY`, `SUMMARY`, `URL` — the full property set
+    /// every one of the 57 production `deadlines/*.ics` files carries, no
+    /// more (C-15).
+    const P1_05_OPEN_TASK_ICS: &str = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+PRODID:-//u_crawler//calendar-sync//EN\r\n\
+BEGIN:VTODO\r\n\
+UID:u_crawler-todo-9001571@u-crawler.local\r\n\
+DTSTAMP:20260610T191757Z\r\n\
+DUE:20260902T035959Z\r\n\
+PRIORITY:1\r\n\
+SUMMARY:Semana 11: Sumativa 5: Solemne 2\r\n\
+URL:https://lms.example.edu/courses/900223/assignments/9001571\r\n\
+END:VTODO\r\n\
+END:VCALENDAR\r\n";
+
+    /// Every optional field on `Todo` populated once, so a set-difference
+    /// against `CALDAV_ROUND_TRIP_PROPERTIES` is not vacuous (AC 3). Carries
+    /// one user-authored `X-` property with a parameter and one `VALARM`.
+    fn fully_populated_todo() -> Todo {
+        let mut todo = Todo::new("Fully populated task");
+        todo.uid = EventUid::new("fully-populated@caldir");
+        todo.description = Some("Every property here must survive the server.".to_string());
+        todo.location = Some("Room 3".to_string());
+        todo.start = Some(EventTime::DateTimeUtc(
+            "2026-08-10T09:00:00Z".parse().expect("a valid timestamp"),
+        ));
+        todo.due = Some(EventTime::DateTimeUtc(
+            "2026-08-15T23:59:00Z".parse().expect("a valid timestamp"),
+        ));
+        todo.status = TodoStatus::InProcess;
+        todo.completed = Some(EventTime::DateTimeFloating(
+            chrono::NaiveDate::from_ymd_opt(2026, 8, 14)
+                .expect("a valid date")
+                .and_hms_opt(12, 0, 0)
+                .expect("a valid time"),
+        ));
+        todo.percent_complete = Some(40);
+        // Out-of-range and legal input (spec §6 PRIORITY row) — must round-trip
+        // verbatim rather than through `Component::priority()`'s clamp.
+        todo.priority = Some(42);
+        todo.url = Some("https://example.edu/rich".to_string());
+        let mut recurrence = Recurrence::new("FREQ=WEEKLY;BYDAY=MO");
+        recurrence.exdates = vec![EventTime::DateTimeUtc(
+            "2026-08-17T09:00:00Z".parse().expect("a valid timestamp"),
+        )];
+        recurrence.rdates = vec![EventTime::DateTimeUtc(
+            "2026-08-24T09:00:00Z".parse().expect("a valid timestamp"),
+        )];
+        todo.recurrence = Some(recurrence);
+        todo.recurrence_id = Some(RecurrenceId::from_event_time(EventTime::DateTimeUtc(
+            "2026-08-10T09:00:00Z".parse().expect("a valid timestamp"),
+        )));
+        todo.organizer = Some(Organizer::new("teacher@example.edu"));
+        todo.attendees = vec![Attendee::new("student@example.edu")];
+        todo.reminders = vec![Reminder::from_minutes(30)];
+        todo.attachments = vec![Attachment::new("https://example.edu/rich/brief.pdf")];
+        let mut x_property = XProperty::new("X-CALDIR-KEEP", "kept");
+        x_property.params = vec![("X-SOURCE".to_string(), "user".to_string())];
+        todo.x_properties = vec![x_property];
+        todo.created = Some("2026-07-01T08:00:00Z".parse().expect("a valid timestamp"));
+        todo.last_modified = Some("2026-08-01T09:00:00Z".parse().expect("a valid timestamp"));
+        todo.sequence = 3;
+        todo
+    }
+
+    /// **AC 1, 2, 7 (§8.4, `CALDAV-7`).** A task seeded from the `P1-05`
+    /// production fixture (AC 7), then filled in with every property the
+    /// fixture itself never carries, must still put every entry of
+    /// `CALDAV_ROUND_TRIP_PROPERTIES` on the wire. Right proof: "it
+    /// round-trips" is unfalsifiable until the properties are enumerated —
+    /// a serializer emitting only `UID` and `SUMMARY` would pass a bare
+    /// assertion.
+    #[tokio::test]
+    async fn every_modelled_task_property_reaches_the_put_body() {
+        let CalendarItem::Todo(mut todo) =
+            parse_item(P1_05_OPEN_TASK_ICS).expect("the P1-05 fixture parses")
+        else {
+            panic!("the P1-05 fixture must parse as a Todo");
+        };
+
+        // The fixture alone carries UID, DTSTAMP, DUE, PRIORITY, SUMMARY, URL
+        // (C-15) — every other modelled property is layered on top so this
+        // test can check the full list while still anchoring on production
+        // data.
+        let extra = fully_populated_todo();
+        todo.description = extra.description;
+        todo.location = extra.location;
+        todo.start = extra.start;
+        todo.status = extra.status;
+        todo.completed = extra.completed;
+        todo.percent_complete = extra.percent_complete;
+        todo.recurrence = extra.recurrence;
+        todo.recurrence_id = extra.recurrence_id;
+        todo.organizer = extra.organizer;
+        todo.attendees = extra.attendees;
+        todo.attachments = extra.attachments;
+        todo.created = extra.created;
+        todo.last_modified = extra.last_modified;
+        todo.sequence = extra.sequence;
+
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(201))
+            .mount(&server)
+            .await;
+
+        create_item(
+            "user",
+            "pass",
+            &calendar_url(&server),
+            CalendarItem::Todo(todo),
+        )
+        .await
+        .expect("creating a fully populated task succeeds");
+
+        let puts = puts(&server).await;
+        assert_eq!(puts.len(), 1, "exactly one PUT for the create");
+        let body = String::from_utf8_lossy(&puts[0].body).into_owned();
+        let names = vtodo_property_names(&body);
+
+        for property in CALDAV_ROUND_TRIP_PROPERTIES {
+            assert!(
+                names.iter().any(|name| name == property),
+                "{property} is missing from the PUT body: {body}"
+            );
+        }
+    }
+
+    /// **AC 3.** The non-vacuity guard on the test above: `Todo`'s own fully
+    /// populated form must emit *exactly* `CALDAV_ROUND_TRIP_PROPERTIES`
+    /// (`X-*` names aside — those are exercised separately). Without this, a
+    /// field added to `Todo` without a matching entry here would silently
+    /// narrow the fidelity claim.
+    #[test]
+    fn the_property_list_matches_the_core_task_codec() {
+        let ics = item_to_ics_string(&CalendarItem::Todo(fully_populated_todo()));
+
+        let output_names: BTreeSet<String> = vtodo_property_names(&ics)
+            .into_iter()
+            .filter(|name| !name.starts_with("X-"))
+            .collect();
+        let expected: BTreeSet<String> = CALDAV_ROUND_TRIP_PROPERTIES
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
+
+        assert_eq!(
+            output_names, expected,
+            "a fully populated task must emit exactly the round-trip list, got: {ics}"
+        );
+    }
+
+    /// **AC 4 (R30).** The double's `calendar-multiget` echoes back exactly
+    /// the bytes it received on the PUT. The returned `Todo` must be `==` the
+    /// pushed one — `Todo`'s derived `PartialEq`, which deliberately ignores
+    /// `created`, `last_modified` and `sequence` — never a byte comparison.
+    #[tokio::test]
+    async fn the_server_answer_parses_back_to_an_equal_task() {
+        let todo = fully_populated_todo();
+        let item = CalendarItem::Todo(todo.clone());
+        let ics_content = item_to_ics_string(&item);
+
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(201))
+            .mount(&server)
+            .await;
+        let href = url_to_href(&event_url(&calendar_url(&server), todo.uid.as_str()));
+        mount_report(
+            &server,
+            "calendar-multiget",
+            multistatus(&href, "\"fp-1\"", &ics_content),
+        )
+        .await;
+
+        let created = create_item("user", "pass", &calendar_url(&server), item)
+            .await
+            .expect("the create succeeds");
+
+        let CalendarItem::Todo(created) = created else {
+            panic!("expected the server's Todo back, got {created:?}");
+        };
+
+        assert_eq!(
+            created, todo,
+            "a double echoing exactly what it received must parse back as the \
+             semantically identical task (R30)"
+        );
+    }
+
+    /// **AC 5 (R23, §8.4).** A user-authored `X-` property survives with its
+    /// parameter, and an `X-` property the server added — never sent by
+    /// caldir — arrives on the returned item. R23's parameter clause is the
+    /// half a naive name/value passthrough drops.
+    #[tokio::test]
+    async fn an_unknown_x_property_survives_and_a_server_added_one_arrives() {
+        let mut todo = Todo::new("Carries an unknown X- property");
+        todo.uid = EventUid::new("x-prop@caldir");
+        let mut user_property = XProperty::new("X-CALDIR-SOURCE", "local-value");
+        user_property.params = vec![("X-NOTE".to_string(), "user-authored".to_string())];
+        todo.x_properties = vec![user_property];
+
+        let pushed_ics = item_to_ics_string(&CalendarItem::Todo(todo.clone()));
+        // The server echoes what it received, plus its own X- property
+        // spliced in — exactly what caldir never sent.
+        let server_held_ics = pushed_ics.replacen(
+            "END:VTODO\r\n",
+            "X-RADICALE-NAME:9f2c.ics\r\nEND:VTODO\r\n",
+            1,
+        );
+        assert_ne!(
+            pushed_ics, server_held_ics,
+            "the splice must actually add a line, or this test proves nothing"
+        );
+
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(201))
+            .mount(&server)
+            .await;
+        let href = url_to_href(&event_url(&calendar_url(&server), todo.uid.as_str()));
+        mount_report(
+            &server,
+            "calendar-multiget",
+            multistatus(&href, "\"x-1\"", &server_held_ics),
+        )
+        .await;
+
+        let created = create_item(
+            "user",
+            "pass",
+            &calendar_url(&server),
+            CalendarItem::Todo(todo),
+        )
+        .await
+        .expect("the create succeeds");
+
+        let CalendarItem::Todo(created) = created else {
+            panic!("expected the server's Todo back, got {created:?}");
+        };
+
+        let user_property = created
+            .x_properties
+            .iter()
+            .find(|property| property.name == "X-CALDIR-SOURCE")
+            .expect("the user-authored X- property must survive");
+        assert_eq!(user_property.value, "local-value");
+        assert!(
+            user_property
+                .params
+                .iter()
+                .any(|(key, value)| key == "X-NOTE" && value == "user-authored"),
+            "the parameter must survive too (R23), got {:?}",
+            user_property.params
+        );
+
+        assert!(
+            created
+                .x_properties
+                .iter()
+                .any(|property| property.name == "X-RADICALE-NAME" && property.value == "9f2c.ics"),
+            "a server-added X- property must arrive on the returned item, got {:?}",
+            created.x_properties
+        );
+    }
+
+    /// **AC 6 (R15).** No property from R15's documented loss set is emitted
+    /// by the provider, even for a fully populated task. R15 is a user
+    /// guarantee in both directions: a provider that helpfully re-emits a
+    /// property core does not model would emit a value core never validated.
+    #[tokio::test]
+    async fn the_provider_reintroduces_none_of_the_documented_loss_set() {
+        let todo = fully_populated_todo();
+
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(201))
+            .mount(&server)
+            .await;
+
+        create_item(
+            "user",
+            "pass",
+            &calendar_url(&server),
+            CalendarItem::Todo(todo),
+        )
+        .await
+        .expect("the create succeeds");
+
+        let puts = puts(&server).await;
+        let body = String::from_utf8_lossy(&puts[0].body).into_owned();
+        let names = vtodo_property_names(&body);
+
+        for dropped in R15_DROPPED_PROPERTIES {
+            assert!(
+                !names.contains(&dropped.to_string()),
+                "{dropped} must never be emitted by the provider (R15), got: {body}"
+            );
+        }
     }
 
     /// **AC 1, 2 (§8.1, R62, CROSS-6).** The two MUSTs are both statements
