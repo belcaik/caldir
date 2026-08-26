@@ -12,9 +12,27 @@
 //! (for `sync`) the refused task was painted with the green `+` that means
 //! "pushed". `sync` is the command most users actually run.
 
+use chrono::{Duration, Utc};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+
+/// Fixture timestamps are anchored to *today*, never to a literal date.
+///
+/// `sync`/`pull` use the CLI's default ±365-day window, so a fixture pinned to
+/// a literal 2026 date silently falls out of that window in 2027 — and a test
+/// that passes because its subject is out of range is a green tick over zero
+/// coverage, not a passing test. Anchoring to `now` makes every fixture below
+/// permanently in-window.
+fn day_from_now(days: i64) -> String {
+    (Utc::now() + Duration::days(days))
+        .format("%Y%m%d")
+        .to_string()
+}
+
+fn stamp() -> String {
+    Utc::now().format("%Y%m%dT%H%M%SZ").to_string()
+}
 
 /// Answers `list_events` with an empty remote (so every local file is an
 /// outgoing create) and echoes back whatever `create_event` is handed.
@@ -45,23 +63,31 @@ esac
 
 /// Lists one remote event that is not on disk, so there is always an incoming
 /// create to apply locally, and still echoes back any write it is handed.
-const SERVING_PROVIDER: &str = r#"#!/bin/sh
+fn serving_provider() -> String {
+    format!(
+        r#"#!/bin/sh
 request=$(cat)
 case "$request" in
   *'"list_events"'*)
-    printf '{"status":"success","data":["BEGIN:VCALENDAR\\r\\nVERSION:2.0\\r\\nPRODID:-//caldir-test//EN\\r\\nBEGIN:VEVENT\\r\\nUID:from-remote@test\\r\\nDTSTAMP:20260801T120000Z\\r\\nDTSTART:20260902T090000Z\\r\\nDTEND:20260902T100000Z\\r\\nSUMMARY:Remote seminar\\r\\nEND:VEVENT\\r\\nEND:VCALENDAR\\r\\n"]}\n'
+    printf '{{"status":"success","data":["BEGIN:VCALENDAR\\r\\nVERSION:2.0\\r\\nPRODID:-//caldir-test//EN\\r\\nBEGIN:VEVENT\\r\\nUID:from-remote@test\\r\\nDTSTAMP:{stamp}\\r\\nDTSTART:{day}T090000Z\\r\\nDTEND:{day}T100000Z\\r\\nSUMMARY:Remote seminar\\r\\nEND:VEVENT\\r\\nEND:VCALENDAR\\r\\n"]}}\n'
     ;;
   *)
-    event=${request#*'"event":'}
-    event=${event%\}\}}
-    printf '{"status":"success","data":%s}\n' "$event"
+    event=${{request#*'"event":'}}
+    event=${{event%\}}\}}}}
+    printf '{{"status":"success","data":%s}}\n' "$event"
     ;;
 esac
-"#;
+"#,
+        stamp = stamp(),
+        day = day_from_now(8),
+    )
+}
 
 /// Lists `MASS_DELETE_THRESHOLD` remote events and logs every RPC method it is
 /// asked for to `$HOME/rpc.log`, so a test can assert what did *not* happen.
-const LOGGING_PROVIDER: &str = r#"#!/bin/sh
+fn logging_provider() -> String {
+    format!(
+        r#"#!/bin/sh
 request=$(cat)
 echo "$request" >> "$HOME/rpc.log"
 case "$request" in
@@ -69,16 +95,20 @@ case "$request" in
     events=""
     i=1
     while [ $i -le 10 ]; do
-      events="$events${events:+,}\"BEGIN:VCALENDAR\\r\\nVERSION:2.0\\r\\nPRODID:-//caldir-test//EN\\r\\nBEGIN:VEVENT\\r\\nUID:doomed-$i@test\\r\\nDTSTAMP:20260801T120000Z\\r\\nDTSTART:20260902T090000Z\\r\\nDTEND:20260902T100000Z\\r\\nSUMMARY:Doomed $i\\r\\nEND:VEVENT\\r\\nEND:VCALENDAR\\r\\n\""
+      events="$events${{events:+,}}\"BEGIN:VCALENDAR\\r\\nVERSION:2.0\\r\\nPRODID:-//caldir-test//EN\\r\\nBEGIN:VEVENT\\r\\nUID:doomed-$i@test\\r\\nDTSTAMP:{stamp}\\r\\nDTSTART:{day}T090000Z\\r\\nDTEND:{day}T100000Z\\r\\nSUMMARY:Doomed $i\\r\\nEND:VEVENT\\r\\nEND:VCALENDAR\\r\\n\""
       i=$((i + 1))
     done
-    printf '{"status":"success","data":[%s]}\n' "$events"
+    printf '{{"status":"success","data":[%s]}}\n' "$events"
     ;;
   *)
-    echo '{"status":"success","data":null}'
+    echo '{{"status":"success","data":null}}'
     ;;
 esac
-"#;
+"#,
+        stamp = stamp(),
+        day = day_from_now(8),
+    )
+}
 
 /// Cannot even describe the remote, so `Connection::diff` fails and no diff
 /// ever exists — the path that used to `println!` and fall through to exit 0.
@@ -88,18 +118,29 @@ echo '{"status":"error","error":"the remote is unreachable"}'
 "#;
 
 fn event_ics(slug: &str) -> String {
+    let stamp = stamp();
+    let day = day_from_now(7);
     format!(
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//caldir-test//EN\r\n\
-BEGIN:VEVENT\r\nUID:{slug}@test\r\nDTSTAMP:20260801T120000Z\r\n\
-DTSTART:20260901T090000Z\r\nDTEND:20260901T100000Z\r\nSUMMARY:Lecture {slug}\r\n\
+BEGIN:VEVENT\r\nUID:{slug}@test\r\nDTSTAMP:{stamp}\r\n\
+DTSTART:{day}T090000Z\r\nDTEND:{day}T100000Z\r\nSUMMARY:Lecture {slug}\r\n\
 END:VEVENT\r\nEND:VCALENDAR\r\n"
     )
 }
 
-const TASK_ICS: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//caldir-test//EN\r\n\
-BEGIN:VTODO\r\nUID:hand-in@u-crawler\r\nDTSTAMP:20260801T120000Z\r\n\
-DUE:20260905T170000Z\r\nSUMMARY:Hand in the assignment\r\n\
-END:VTODO\r\nEND:VCALENDAR\r\n";
+/// The id `known_event_ids` records for this task — `VTODO:` sigil included.
+const TASK_ID: &str = "VTODO:hand-in@u-crawler";
+
+fn task_ics() -> String {
+    let stamp = stamp();
+    let day = day_from_now(11);
+    format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//caldir-test//EN\r\n\
+BEGIN:VTODO\r\nUID:hand-in@u-crawler\r\nDTSTAMP:{stamp}\r\n\
+DUE:{day}T170000Z\r\nSUMMARY:Hand in the assignment\r\n\
+END:VTODO\r\nEND:VCALENDAR\r\n"
+    )
+}
 
 struct Sandbox {
     _tmp: tempfile::TempDir,
@@ -147,7 +188,7 @@ impl Sandbox {
         // The task is written first so it also sorts first in `read_dir`: the
         // original defect abandoned whatever followed it.
         if with_task {
-            fs::write(root.join("data/work/hand-in.ics"), TASK_ICS).unwrap();
+            fs::write(root.join("data/work/hand-in.ics"), task_ics()).unwrap();
         }
         if with_events {
             for slug in ["a", "b"] {
@@ -472,9 +513,16 @@ fn a_discard_whose_remote_is_unreadable_exits_non_zero() {
 /// `pull` has no outgoing half, so the unpushable-task pre-flight does not
 /// apply: a local task simply is not part of a pull. Locked so the guard is
 /// not copied over.
+///
+/// The task is pre-seeded as already synced, so "the file is still there"
+/// cannot be true for a trivial reason. A never-synced task is an *outgoing*
+/// create that `pull` discards anyway; a previously-synced one missing from
+/// the remote response is a candidate *incoming delete*, and only R49's
+/// version-skew belt holds it back. That is the mechanism this test exists to
+/// watch, and it is the same mechanism whatever today's date is.
 #[test]
 fn pull_ignores_a_local_task_and_exits_zero() {
-    let sandbox = Sandbox::new(true);
+    let sandbox = Sandbox::new(true).already_synced(&[TASK_ID.to_string()]);
     let output = sandbox.pull();
     let (stdout, stderr) = streams(&output);
 
@@ -486,6 +534,37 @@ fn pull_ignores_a_local_task_and_exits_zero() {
     assert!(
         sandbox.exists("hand-in.ics"),
         "a pull may not touch the local task",
+    );
+
+    // Non-vacuity: the belt is what saved it, and it says so. Without the
+    // suppression the task would have been deleted here, silently.
+    assert!(
+        stdout.contains("task deletion withheld"),
+        "the withheld delete must be reported, got {stdout:?}",
+    );
+}
+
+/// The belt is scoped to *tasks*: an event that has synced before and is
+/// absent from the remote response is still a real delete. Sibling of the test
+/// above, and the reason its green tick means something — without this, "the
+/// file survived" would be satisfied by a `pull` that deletes nothing at all.
+#[test]
+fn pull_still_deletes_a_previously_synced_event_the_remote_no_longer_lists() {
+    let sandbox = Sandbox::new(false).already_synced(&["a@test".to_string()]);
+    let output = sandbox.pull();
+    let (stdout, stderr) = streams(&output);
+
+    assert!(
+        output.status.success(),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        !sandbox.exists("lecture-a.ics"),
+        "a synced event gone from the remote is a real delete, got {stdout:?}",
+    );
+    assert!(
+        !stdout.contains("task deletion withheld"),
+        "the belt is task-scoped and must not fire here, got {stdout:?}",
     );
 }
 
@@ -571,7 +650,7 @@ fn read_only_dirs_are_enforced(dir: &Path) -> bool {
 #[cfg(unix)]
 #[test]
 fn a_pull_that_cannot_write_locally_exits_non_zero() {
-    let sandbox = Sandbox::remote_only(SERVING_PROVIDER);
+    let sandbox = Sandbox::remote_only(&serving_provider());
     if !read_only_dirs_are_enforced(&sandbox.calendar_dir()) {
         return;
     }
@@ -596,7 +675,7 @@ fn a_pull_that_cannot_write_locally_exits_non_zero() {
 #[cfg(unix)]
 #[test]
 fn a_sync_whose_pull_half_cannot_write_locally_exits_non_zero() {
-    let sandbox = Sandbox::remote_only(SERVING_PROVIDER);
+    let sandbox = Sandbox::remote_only(&serving_provider());
     if !read_only_dirs_are_enforced(&sandbox.calendar_dir()) {
         return;
     }
@@ -623,7 +702,7 @@ fn a_sync_whose_pull_half_cannot_write_locally_exits_non_zero() {
 #[test]
 fn a_sync_that_would_mass_delete_warns_and_pushes_nothing() {
     let ids: Vec<String> = (1..=10).map(|i| format!("doomed-{i}@test")).collect();
-    let sandbox = Sandbox::remote_only(LOGGING_PROVIDER).already_synced(&ids);
+    let sandbox = Sandbox::remote_only(&logging_provider()).already_synced(&ids);
 
     let output = sandbox.sync();
     let (stdout, stderr) = streams(&output);

@@ -1564,4 +1564,183 @@ END:VCALENDAR\r\n";
         assert_eq!(items.len(), 1);
         assert!(matches!(items[0], Ok(CalendarItem::Event(_))));
     }
+    /// One row of the equality table: the field's name, and a mutation that
+    /// changes only that field.
+    type Mutation = (&'static str, fn(&mut Event));
+
+    /// The `Event` twin of `todo::tests::every_content_field_participates_in_
+    /// equality`. `Event`'s `PartialEq` is the sync predicate too: `==` means
+    /// "content unchanged", and that is what picks push over pull.
+    ///
+    /// Pre-existing hole, not one this branch opened: `location`,
+    /// `description` and `reminders` could all be dropped from `==` with the
+    /// whole suite still green. The exhaustive destructure has no `..`, so a
+    /// new field on `Event` stops this test compiling until a row names it.
+    #[test]
+    fn every_content_field_participates_in_equality() {
+        let base = fully_populated_event();
+
+        let Event {
+            uid,
+            summary,
+            description,
+            location,
+            start,
+            end,
+            status,
+            availability,
+            visibility,
+            recurrence,
+            recurrence_id,
+            organizer,
+            attendees,
+            reminders,
+            url,
+            attachments,
+            x_properties,
+            last_modified,
+            sequence,
+        } = base.clone();
+
+        // Non-vacuity: every row below mutates an already-populated value.
+        assert!(!uid.as_str().is_empty());
+        assert!(summary.is_some() && description.is_some() && location.is_some());
+        assert_eq!(start, EventTime::Date(event_day(2026, 8, 10)));
+        assert!(end.is_some() && visibility.is_some() && url.is_some());
+        assert_eq!(status, Status::Tentative);
+        assert_eq!(availability, Availability::Free);
+        assert!(recurrence.is_some() && recurrence_id.is_some() && organizer.is_some());
+        assert!(!attendees.is_empty() && !reminders.is_empty());
+        assert!(!attachments.is_empty() && !x_properties.is_empty());
+        assert!(last_modified.is_some());
+        assert_eq!(sequence, 4);
+
+        let mutations: [Mutation; 17] = [
+            ("uid", |e| e.uid = EventUid::new("someone-else@caldir")),
+            ("summary", |e| e.summary = Some("Not everything".into())),
+            ("description", |e| {
+                e.description = Some("Some other rows".into())
+            }),
+            ("location", |e| e.location = Some("Room 4".into())),
+            ("start", |e| {
+                e.start = EventTime::Date(event_day(2027, 1, 2))
+            }),
+            ("end", |e| {
+                e.end = Some(EventTime::Date(event_day(2027, 3, 4)))
+            }),
+            ("status", |e| e.status = Status::Cancelled),
+            ("availability", |e| e.availability = Availability::Busy),
+            ("visibility", |e| e.visibility = Some(Visibility::Private)),
+            ("recurrence", |e| {
+                e.recurrence.as_mut().unwrap().rrule = "FREQ=DAILY".into()
+            }),
+            ("recurrence_id", |e| {
+                e.recurrence_id = Some(RecurrenceId::from_event_time(EventTime::Date(event_day(
+                    2027, 7, 8,
+                ))))
+            }),
+            ("organizer", |e| {
+                e.organizer = Some(Organizer::new("someone.else@example.com"))
+            }),
+            ("attendees", |e| {
+                e.attendees.push(Attendee::new("bo@example.com"))
+            }),
+            ("reminders", |e| {
+                e.reminders.push(Reminder::from_minutes(60))
+            }),
+            ("url", |e| e.url = Some("https://example.edu/a/2".into())),
+            ("attachments", |e| {
+                e.attachments
+                    .push(Attachment::new("https://example.com/b.pdf"))
+            }),
+            ("x_properties", |e| {
+                e.x_properties.push(XProperty::new("X-OTHER", "2"))
+            }),
+        ];
+
+        for (field, mutate) in mutations {
+            let mut changed = base.clone();
+            mutate(&mut changed);
+            assert_ne!(
+                base, changed,
+                "`{field}` is content: changing it must make the event unequal, \
+                 or an edit to it never syncs",
+            );
+        }
+
+        // ---- the three deliberate exclusions, pinned so they cannot widen ----
+
+        // 1. last_modified and sequence are ignored.
+        let mut bookkeeping = base.clone();
+        bookkeeping.last_modified = Some(Utc.with_ymd_and_hms(2002, 2, 2, 0, 0, 0).unwrap());
+        bookkeeping.sequence = sequence + 99;
+        assert_eq!(
+            base, bookkeeping,
+            "last_modified/sequence are bookkeeping: drift in them must not read \
+             as a content change",
+        );
+
+        // 2. attachments compare by URI alone, order-independently.
+        let mut reparametrized = base.clone();
+        for attachment in &mut reparametrized.attachments {
+            attachment.params.push(("SIZE".into(), "8192".into()));
+        }
+        assert_ne!(
+            base.attachments, reparametrized.attachments,
+            "non-vacuity: the attachment vectors really do differ",
+        );
+        assert_eq!(
+            base, reparametrized,
+            "an attachment's identity is its URI; params must not churn sync",
+        );
+
+        let mut two = base.clone();
+        two.attachments
+            .push(Attachment::new("https://example.com/b.pdf"));
+        let mut reversed = two.clone();
+        reversed.attachments.reverse();
+        assert_eq!(two, reversed, "attachment order is not content");
+
+        // 3. x_properties compare order-independently.
+        let mut two = base.clone();
+        two.x_properties.push(XProperty::new("X-OTHER", "2"));
+        let mut reversed = two.clone();
+        reversed.x_properties.reverse();
+        assert_eq!(two, reversed, "x-property order is not content");
+    }
+
+    fn event_day(year: i32, month: u32, day: u32) -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(year, month, day).expect("a real calendar date")
+    }
+
+    /// Every field of `Event` set to a distinguishable non-default value.
+    fn fully_populated_event() -> Event {
+        Event {
+            uid: EventUid::new("full@caldir"),
+            summary: Some("Everything".into()),
+            description: Some("All the rows".into()),
+            location: Some("Room 3".into()),
+            start: EventTime::Date(event_day(2026, 8, 10)),
+            end: Some(EventTime::Date(event_day(2026, 8, 11))),
+            status: Status::Tentative,
+            availability: Availability::Free,
+            visibility: Some(Visibility::Public),
+            recurrence: Some(Recurrence {
+                rrule: "FREQ=WEEKLY".into(),
+                exdates: vec![EventTime::Date(event_day(2026, 8, 22))],
+                rdates: vec![EventTime::Date(event_day(2026, 8, 29))],
+            }),
+            recurrence_id: Some(RecurrenceId::from_event_time(EventTime::Date(event_day(
+                2026, 8, 15,
+            )))),
+            organizer: Some(Organizer::new("boss@example.com")),
+            attendees: vec![Attendee::new("ann@example.com")],
+            reminders: vec![Reminder::from_minutes(15)],
+            url: Some("https://example.edu/a/1".into()),
+            attachments: vec![Attachment::new("https://example.com/a.pdf")],
+            x_properties: vec![XProperty::new("X-GOOGLE-ID", "abc123")],
+            last_modified: Some(Utc.with_ymd_and_hms(2026, 8, 2, 10, 15, 0).unwrap()),
+            sequence: 4,
+        }
+    }
 }

@@ -218,3 +218,38 @@ fn the_three_error_enums_are_open_to_downstream_additions() {
     let err: ConnectionError = Calendar::create(&path, None).unwrap_err().into();
     assert_eq!(probe_connection_error(&err), "known");
 }
+
+/// The same lock for `CalendarItem`, the one open enum that is not an error.
+///
+/// Sibling of `the_three_error_enums_are_open_to_downstream_additions`, kept
+/// separate only so that test's name stays truthful. `CalendarItem` is
+/// `#[non_exhaustive]` for the same reason the error enums are: adding
+/// `VJOURNAL` later must be one more variant, not a breaking change. Until
+/// this existed the attribute could be deleted and `cargo test` stayed green —
+/// only CI's `-D warnings` caught it, and then incidentally.
+#[test]
+#[deny(unreachable_patterns)]
+fn calendar_item_is_open_to_downstream_additions() {
+    fn probe(item: &CalendarItem) -> &'static str {
+        match item {
+            CalendarItem::Event(_) | CalendarItem::Todo(_) => "known",
+            // Live only because `CalendarItem` is `#[non_exhaustive]`.
+            _ => "added after this test was written",
+        }
+    }
+
+    let event = CalendarItem::from_single_ics_str(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:e-1\r\n\
+         DTSTART:20260901T090000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+    )
+    .expect("a VEVENT is a supported component");
+    let task = CalendarItem::from_single_ics_str(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VTODO\r\nUID:t-1\r\n\
+         DUE:20260905T170000Z\r\nEND:VTODO\r\nEND:VCALENDAR\r\n",
+    )
+    .expect("a VTODO is a supported component");
+
+    // Values of the variants that *do* exist never reach the open arm.
+    assert_eq!(probe(&event), "known");
+    assert_eq!(probe(&task), "known");
+}

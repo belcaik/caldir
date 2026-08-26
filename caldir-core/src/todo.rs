@@ -299,6 +299,170 @@ mod tests {
         assert_ne!(base, changed);
     }
 
+    /// One row of the equality table: the field's name, and a mutation that
+    /// changes only that field.
+    type Mutation = (&'static str, fn(&mut Todo));
+
+    /// The whole of `==`, locked field by field: every content field
+    /// participates, and the four deliberate exclusions stay exactly as wide
+    /// as they are.
+    ///
+    /// `Todo`'s `PartialEq` *is* the sync predicate — `==` means "content
+    /// unchanged", and that is what picks push over pull. A field silently
+    /// falling out of it makes a real edit invisible and the task never
+    /// syncs. `equality_mirrors_event_equality` above pins only `status`,
+    /// `completed` and `percent_complete`; the other content fields —
+    /// `due`, the task's own anchor, included — could all be dropped from the
+    /// `educe` attributes with the rest of the suite still green.
+    ///
+    /// The exhaustive destructure is the second half of the lock: it has no
+    /// `..`, so adding a field to `Todo` stops this test compiling until
+    /// someone decides which side of `==` the new field belongs on and adds
+    /// the matching row below.
+    #[test]
+    fn every_content_field_participates_in_equality() {
+        let base = reparse(FULL_VTODO_ICS);
+
+        let Todo {
+            uid,
+            summary,
+            description,
+            location,
+            start,
+            due,
+            status,
+            completed,
+            percent_complete,
+            priority,
+            url,
+            recurrence,
+            recurrence_id,
+            organizer,
+            attendees,
+            reminders,
+            attachments,
+            x_properties,
+            created,
+            last_modified,
+            sequence,
+        } = base.clone();
+
+        // Non-vacuity: every row below mutates an already-populated value, so
+        // a failing row can never be failing because the base was empty.
+        assert!(!uid.as_str().is_empty());
+        assert!(summary.is_some() && description.is_some() && location.is_some());
+        assert!(start.is_some() && due.is_some() && completed.is_some());
+        assert_eq!(status, TodoStatus::InProcess);
+        assert!(percent_complete.is_some() && priority.is_some() && url.is_some());
+        assert!(recurrence.is_some() && recurrence_id.is_some() && organizer.is_some());
+        assert!(!attendees.is_empty() && !reminders.is_empty());
+        assert!(!attachments.is_empty() && !x_properties.is_empty());
+        assert!(created.is_some() && last_modified.is_some());
+        assert_eq!(sequence, 4);
+
+        // One row per content field, one field changed per row.
+        let mutations: [Mutation; 18] = [
+            ("uid", |t| t.uid = EventUid::new("someone-else@caldir")),
+            ("summary", |t| t.summary = Some("Not everything".into())),
+            ("description", |t| {
+                t.description = Some("Some other rows".into())
+            }),
+            ("location", |t| t.location = Some("Room 4".into())),
+            ("start", |t| {
+                t.start = Some(EventTime::Date(day(2027, 1, 2)))
+            }),
+            ("due", |t| t.due = Some(EventTime::Date(day(2027, 3, 4)))),
+            ("status", |t| t.status = TodoStatus::Completed),
+            ("completed", |t| {
+                t.completed = Some(EventTime::Date(day(2027, 5, 6)))
+            }),
+            ("percent_complete", |t| t.percent_complete = Some(26)),
+            ("priority", |t| t.priority = Some(43)),
+            ("url", |t| t.url = Some("https://example.edu/a/2".into())),
+            ("recurrence", |t| {
+                t.recurrence.as_mut().unwrap().rrule = "FREQ=DAILY".into()
+            }),
+            ("recurrence_id", |t| {
+                t.recurrence_id = Some(RecurrenceId::from_event_time(EventTime::Date(day(
+                    2027, 7, 8,
+                ))))
+            }),
+            ("organizer", |t| {
+                t.organizer = Some(Organizer::new("someone.else@example.com"))
+            }),
+            ("attendees", |t| {
+                t.attendees.push(Attendee::new("bo@example.com"))
+            }),
+            ("reminders", |t| {
+                t.reminders.push(Reminder::from_minutes(60))
+            }),
+            ("attachments", |t| {
+                t.attachments
+                    .push(Attachment::new("https://example.com/b.pdf"))
+            }),
+            ("x_properties", |t| {
+                t.x_properties.push(XProperty::new("X-OTHER", "2"))
+            }),
+        ];
+
+        for (field, mutate) in mutations {
+            let mut changed = base.clone();
+            mutate(&mut changed);
+            assert_ne!(
+                base, changed,
+                "`{field}` is content: changing it must make the task unequal, \
+                 or an edit to it never syncs",
+            );
+        }
+
+        // ---- the four deliberate exclusions, pinned so they cannot widen ----
+
+        // 1. created, last_modified and sequence are ignored (R38).
+        let mut bookkeeping = base.clone();
+        bookkeeping.created = Some(Utc.with_ymd_and_hms(2001, 1, 1, 0, 0, 0).unwrap());
+        bookkeeping.last_modified = Some(Utc.with_ymd_and_hms(2002, 2, 2, 0, 0, 0).unwrap());
+        bookkeeping.sequence = sequence + 99;
+        assert_eq!(
+            base, bookkeeping,
+            "created/last_modified/sequence are bookkeeping: drift in them must \
+             not read as a content change",
+        );
+
+        // 2. attachments compare by URI alone, so volatile params drifting is
+        //    not a content change.
+        let mut reparametrized = base.clone();
+        for attachment in &mut reparametrized.attachments {
+            attachment.params.push(("SIZE".into(), "8192".into()));
+        }
+        assert_ne!(
+            base.attachments, reparametrized.attachments,
+            "non-vacuity: the attachment vectors really do differ",
+        );
+        assert_eq!(
+            base, reparametrized,
+            "an attachment's identity is its URI; params must not churn sync",
+        );
+
+        // 3. attachments compare order-independently.
+        let mut two = base.clone();
+        two.attachments
+            .push(Attachment::new("https://example.com/b.pdf"));
+        let mut reversed = two.clone();
+        reversed.attachments.reverse();
+        assert_eq!(two, reversed, "attachment order is not content");
+
+        // 4. x_properties compare order-independently.
+        let mut two = base.clone();
+        two.x_properties.push(XProperty::new("X-OTHER", "2"));
+        let mut reversed = two.clone();
+        reversed.x_properties.reverse();
+        assert_eq!(two, reversed, "x-property order is not content");
+    }
+
+    fn day(year: i32, month: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(year, month, day).expect("a real calendar date")
+    }
+
     fn reparse(ics: &str) -> Todo {
         Todo::try_from(&parse_icalendar_todo(ics)).unwrap()
     }

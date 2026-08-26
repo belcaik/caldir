@@ -8,6 +8,7 @@
 //! changes, printed its error to **stdout**, and exited **0**. The automated
 //! pipeline caldir serves could not detect the failure at all.
 
+use chrono::{Duration, Utc};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -29,19 +30,43 @@ case "$request" in
 esac
 "#;
 
+/// Fixture timestamps are anchored to *today*, never to a literal date.
+///
+/// `push` diffs against the CLI's default ±365-day window, so a fixture pinned
+/// to a literal 2026 date silently falls out of that window in 2027 — and a
+/// test that passes because its subject is out of range is a green tick over
+/// zero coverage, not a passing test.
+fn day_from_now(days: i64) -> String {
+    (Utc::now() + Duration::days(days))
+        .format("%Y%m%d")
+        .to_string()
+}
+
+fn stamp() -> String {
+    Utc::now().format("%Y%m%dT%H%M%SZ").to_string()
+}
+
 fn event_ics(slug: &str) -> String {
+    let stamp = stamp();
+    let day = day_from_now(7);
     format!(
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//caldir-test//EN\r\n\
-BEGIN:VEVENT\r\nUID:{slug}@test\r\nDTSTAMP:20260801T120000Z\r\n\
-DTSTART:20260901T090000Z\r\nDTEND:20260901T100000Z\r\nSUMMARY:Lecture {slug}\r\n\
+BEGIN:VEVENT\r\nUID:{slug}@test\r\nDTSTAMP:{stamp}\r\n\
+DTSTART:{day}T090000Z\r\nDTEND:{day}T100000Z\r\nSUMMARY:Lecture {slug}\r\n\
 END:VEVENT\r\nEND:VCALENDAR\r\n"
     )
 }
 
-const TASK_ICS: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//caldir-test//EN\r\n\
-BEGIN:VTODO\r\nUID:hand-in@u-crawler\r\nDTSTAMP:20260801T120000Z\r\n\
-DUE:20260905T170000Z\r\nSUMMARY:Hand in the assignment\r\n\
-END:VTODO\r\nEND:VCALENDAR\r\n";
+fn task_ics() -> String {
+    let stamp = stamp();
+    let day = day_from_now(11);
+    format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//caldir-test//EN\r\n\
+BEGIN:VTODO\r\nUID:hand-in@u-crawler\r\nDTSTAMP:{stamp}\r\n\
+DUE:{day}T170000Z\r\nSUMMARY:Hand in the assignment\r\n\
+END:VTODO\r\nEND:VCALENDAR\r\n"
+    )
+}
 
 struct Sandbox {
     _tmp: tempfile::TempDir,
@@ -89,7 +114,7 @@ impl Sandbox {
         // The task is written first so it also sorts first in `read_dir`: the
         // original defect abandoned whatever followed it.
         if with_task {
-            fs::write(root.join("data/work/hand-in.ics"), TASK_ICS).unwrap();
+            fs::write(root.join("data/work/hand-in.ics"), task_ics()).unwrap();
         }
         for slug in ["a", "b"] {
             fs::write(
