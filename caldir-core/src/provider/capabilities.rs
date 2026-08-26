@@ -44,6 +44,41 @@ impl ProviderCapabilities {
 mod tests {
     use super::*;
 
+    /// `P6-03`/D-2: the nested wire shape itself, plus the fail-closed arm,
+    /// asserted together on raw JSON. Right proof: absence is only
+    /// expressible at the wire layer — a Rust-typed test cannot omit a
+    /// field, so a rebase that turned this into a flat `{"tasks_read":...}`
+    /// shape would compile and pass every typed test while breaking every
+    /// installed provider's parser.
+    #[test]
+    fn the_capabilities_wire_shape_is_frozen_and_absence_fails_closed() {
+        let full = ProviderCapabilities {
+            events: Capability {
+                read: true,
+                write: true,
+            },
+            tasks: Capability {
+                read: true,
+                write: false,
+            },
+        };
+
+        assert_eq!(
+            serde_json::to_value(full).unwrap(),
+            serde_json::json!({
+                "events": {"read": true, "write": true},
+                "tasks": {"read": true, "write": false}
+            })
+        );
+
+        let events_only: ProviderCapabilities =
+            serde_json::from_str(r#"{"events":{"read":true,"write":true}}"#)
+                .expect("an events-only payload from an older provider must still decode");
+        assert_eq!(events_only.tasks, Capability::default());
+        assert!(!events_only.tasks.read);
+        assert!(!events_only.tasks.write);
+    }
+
     /// D-2's "absent field" clause. A missing `tasks` key and a present-but-
     /// empty `tasks` object must both read `tasks.write` as `false` — absence
     /// read as `true` is the one bug in this ticket that deletes user data

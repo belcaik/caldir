@@ -133,6 +133,7 @@ impl Response<()> {
 mod tests {
     use super::*;
     use crate::CalendarItem;
+    use crate::RemoteConfigParams;
     use crate::test_utils::{VEVENT_CONTROL_ICS, VTODO_ICS};
     use serde_json::json;
 
@@ -324,6 +325,141 @@ mod tests {
 
             !before.is_some_and(is_ident) && !after.is_some_and(is_ident)
         })
+    }
+
+    /// `P6-03`/D-1: the raw envelope keys, asserted for every `Method`
+    /// variant at once. `#[serde(rename = "command")]` and
+    /// `#[serde(default)]` on `params` are two attributes a rebase could
+    /// drop without any in-tree test noticing — nothing else in this suite
+    /// reads the envelope's own JSON keys, only the typed structs behind it.
+    #[test]
+    fn the_request_envelope_shape_is_frozen() {
+        let connect = Request::from_rpc(&Connect {
+            options: Default::default(),
+            data: Default::default(),
+        })
+        .unwrap();
+        let list_calendars = Request::from_rpc(&ListCalendars {
+            account_identifier: "user@hmail.com".to_string(),
+        })
+        .unwrap();
+        let list_events = Request::from_rpc(&ListEvents {
+            remote: RemoteConfigParams::new(),
+            from: "2026-01-01T00:00:00+00:00".into(),
+            to: "2026-12-31T23:59:59+00:00".into(),
+        })
+        .unwrap();
+        let event = CalendarItem::from_single_ics_str(VEVENT_CONTROL_ICS).unwrap();
+        let create = Request::from_rpc(&CreateItem {
+            remote: RemoteConfigParams::new(),
+            event: event.clone(),
+        })
+        .unwrap();
+        let update = Request::from_rpc(&UpdateItem {
+            remote: RemoteConfigParams::new(),
+            event: event.clone(),
+        })
+        .unwrap();
+        let delete = Request::from_rpc(&DeleteItem {
+            remote: RemoteConfigParams::new(),
+            event,
+        })
+        .unwrap();
+        let capabilities = Request::from_rpc(&Capabilities {
+            remote: RemoteConfigParams::new(),
+        })
+        .unwrap();
+
+        for (request, expected_command) in [
+            (&connect, "connect"),
+            (&list_calendars, "list_calendars"),
+            (&list_events, "list_events"),
+            (&create, "create_event"),
+            (&update, "update_event"),
+            (&delete, "delete_event"),
+            (&capabilities, "capabilities"),
+        ] {
+            let value = serde_json::to_value(request).unwrap();
+            let obj = value.as_object().expect("envelope must be a JSON object");
+
+            assert_eq!(
+                obj.keys().collect::<std::collections::BTreeSet<_>>(),
+                std::collections::BTreeSet::from([&"command".to_string(), &"params".to_string()]),
+                "envelope keys must be exactly command/params, got {obj:?}"
+            );
+            assert_eq!(value["command"], expected_command);
+        }
+
+        // `params` absent from the raw JSON must still deserialize via
+        // `#[serde(default)]`, not error.
+        let no_params: Request = serde_json::from_str(r#"{"command":"connect"}"#)
+            .expect("a request with no params key must still decode");
+        assert_eq!(no_params.params, serde_json::Value::Null);
+    }
+
+    /// `P6-03`/D-1: `Response::success`/`Response::error` are the only two
+    /// producers of the response envelope; assert what they actually emit on
+    /// the wire, not the typed enum shape. The tag is internally-tagged
+    /// (`#[serde(tag = "status", rename_all = "snake_case")]`) — a
+    /// `rename_all` change flips `Success` to `"Success"` and every
+    /// provider's parser fails at once, with no compile error anywhere.
+    #[test]
+    fn the_response_envelope_shape_is_frozen() {
+        let success = Response::success(serde_json::json!({"ok": true}));
+        let success: serde_json::Value = serde_json::from_str(&success).unwrap();
+        assert_eq!(
+            success,
+            serde_json::json!({"status": "success", "data": {"ok": true}})
+        );
+
+        let error = Response::<()>::error("boom", None);
+        let error: serde_json::Value = serde_json::from_str(&error).unwrap();
+        assert_eq!(error["status"], "error");
+        assert_eq!(error["error"], "boom");
+    }
+
+    /// `P6-03`/D-3/C-16/§18: the compiler cannot see a change from `Ics` to
+    /// `ItemIcs` in the emitted bytes — only a byte assertion can. Freezes
+    /// the event-write request body as `{"remote": …, "event": "<ICS>"}`
+    /// with the ICS equal to `Event::to_ics_string`, across all three
+    /// outbound write RPCs.
+    #[test]
+    fn an_event_write_request_still_serializes_as_the_event_field() {
+        let event = CalendarItem::from_single_ics_str(VEVENT_CONTROL_ICS).unwrap();
+        let expected_ics = match &event {
+            CalendarItem::Event(e) => e.to_ics_string(),
+            other => panic!("fixture must be an event, got {other:?}"),
+        };
+
+        let mut remote = RemoteConfigParams::new();
+        remote.insert(
+            "hooli_account".to_string(),
+            toml::Value::String("user@hmail.com".to_string()),
+        );
+
+        let create = CreateItem {
+            remote: remote.clone(),
+            event: event.clone(),
+        }
+        .to_json()
+        .unwrap();
+        let update = UpdateItem {
+            remote: remote.clone(),
+            event: event.clone(),
+        }
+        .to_json()
+        .unwrap();
+        let delete = DeleteItem {
+            remote: remote.clone(),
+            event,
+        }
+        .to_json()
+        .unwrap();
+
+        for params in [&create["params"], &update["params"], &delete["params"]] {
+            assert_eq!(params["hooli_account"], "user@hmail.com");
+            assert_eq!(params["event"], expected_ics);
+        }
     }
 
     /// `T-36`, inverted by this ticket: `CreateItem`/`UpdateItem`/`DeleteItem`
