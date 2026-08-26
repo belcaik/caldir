@@ -159,16 +159,17 @@ fn pluralize(word: &str, count: usize) -> &str {
 
 /// Extended rendering for CalendarDiff with directional output
 pub trait CalendarDiffRender {
-    fn render(&self, verbose: bool, caldir: &Caldir) -> String;
+    fn render(&self, verbose: bool, caldir: &Caldir, provider: Option<&str>) -> String;
     fn render_pull(&self, verbose: bool, caldir: &Caldir) -> String;
-    fn render_push(&self, verbose: bool, caldir: &Caldir) -> String;
-    fn render_discard(&self, verbose: bool, caldir: &Caldir) -> String;
+    fn render_push(&self, verbose: bool, caldir: &Caldir, provider: Option<&str>) -> String;
+    fn render_discard(&self, verbose: bool, caldir: &Caldir, provider: Option<&str>) -> String;
 }
 
 fn render_bidirectional(
     diff: &CalendarDiff,
     verbose: bool,
     caldir: &Caldir,
+    provider: Option<&str>,
     push_label: &str,
     pull_label: &str,
 ) -> String {
@@ -178,6 +179,7 @@ fn render_bidirectional(
         Withheld {
             task_deletes: diff.suppressed_task_deletes(),
             task_pushes: diff.withheld_task_pushes(),
+            provider,
         },
         verbose,
         caldir.config().time_format(),
@@ -189,14 +191,18 @@ fn render_bidirectional(
 /// What caldir kept back on this run, carried together so the two notices
 /// cannot drift apart at a call site.
 #[derive(Clone, Copy)]
-struct Withheld {
+struct Withheld<'a> {
     /// The version-skew belt withheld an incoming task delete: the remote
     /// reported no tasks at all, which core refuses to read as "every task
     /// was deleted".
     task_deletes: bool,
-    /// How many outgoing changes were withheld for being tasks: the push wire
-    /// carries events only, so a task can never ride it.
+    /// How many outgoing changes were withheld because the remote provider
+    /// does not advertise `tasks.write`.
     task_pushes: usize,
+    /// The provider that could not take the task, for naming it in the
+    /// notice. `None` for a local-only calendar — there is no provider to
+    /// name, and `task_pushes` is always `0` in that case.
+    provider: Option<&'a str>,
 }
 
 /// The bidirectional body, over the diff's contents rather than the diff.
@@ -219,7 +225,11 @@ fn render_sections(
     // suppression the accessor exists to prevent.
     let warnings: Vec<String> = suppression_warning(withheld.task_deletes)
         .into_iter()
-        .chain(withheld_warning(withheld.task_pushes, "pushed"))
+        .chain(withheld_warning(
+            withheld.task_pushes,
+            "pushed",
+            withheld.provider,
+        ))
         .collect();
 
     if outgoing.is_empty() && incoming.is_empty() {
@@ -270,27 +280,38 @@ indistinguishable from a provider that cannot list them. No task file was remove
 /// silence.
 ///
 /// Same `⚠` in the same yellow as the version-skew belt above — one affordance
-/// for "caldir kept something back", not two. An event-only calendar can never
-/// reach this, so no existing situation changes text.
-fn withheld_warning(withheld_task_pushes: usize, verb: &str) -> Option<String> {
+/// for "caldir kept something back", not two. An event-only calendar, or one
+/// whose provider advertises `tasks.write`, can never reach this, so no
+/// existing situation changes text.
+///
+/// `provider` names the remote that could not take the task (§16). It is only
+/// absent when `withheld_task_pushes` is `0` — a local-only calendar has no
+/// provider and also withholds nothing — so the fallback here is defensive,
+/// never the expected path.
+fn withheld_warning(
+    withheld_task_pushes: usize,
+    verb: &str,
+    provider: Option<&str>,
+) -> Option<String> {
     (withheld_task_pushes > 0).then(|| {
         format!(
-            "   {} {} task {} not {}: tasks are pull-only — caldir cannot push tasks to a \
-remote yet.",
+            "   {} {} task {} not {}: Provider \"{}\" does not support task writes.",
             "⚠".yellow(),
             withheld_task_pushes,
             pluralize("change", withheld_task_pushes),
             verb,
+            provider.unwrap_or("this calendar's remote"),
         )
     })
 }
 
 impl CalendarDiffRender for CalendarDiff {
-    fn render(&self, verbose: bool, caldir: &Caldir) -> String {
+    fn render(&self, verbose: bool, caldir: &Caldir, provider: Option<&str>) -> String {
         render_bidirectional(
             self,
             verbose,
             caldir,
+            provider,
             "Local changes (to push)",
             "Remote changes (to pull)",
         )
@@ -305,7 +326,7 @@ impl CalendarDiffRender for CalendarDiff {
         )
     }
 
-    fn render_push(&self, verbose: bool, caldir: &Caldir) -> String {
+    fn render_push(&self, verbose: bool, caldir: &Caldir, provider: Option<&str>) -> String {
         render_outgoing(
             self.outgoing(),
             self.withheld_task_pushes(),
@@ -314,10 +335,11 @@ impl CalendarDiffRender for CalendarDiff {
             None,
             "pushed",
             "   No changes to push",
+            provider,
         )
     }
 
-    fn render_discard(&self, verbose: bool, caldir: &Caldir) -> String {
+    fn render_discard(&self, verbose: bool, caldir: &Caldir, provider: Option<&str>) -> String {
         render_outgoing(
             self.outgoing(),
             self.withheld_task_pushes(),
@@ -326,6 +348,7 @@ impl CalendarDiffRender for CalendarDiff {
             Some("Local changes (to discard)"),
             "discarded",
             "   Nothing to discard",
+            provider,
         )
     }
 }
@@ -336,6 +359,7 @@ impl CalendarDiffRender for CalendarDiff {
 /// withheld-task notice — and, like the version-skew belt on the incoming side, it
 /// survives an otherwise-empty set: a calendar whose only pending change was
 /// a task would otherwise read as "No changes to push".
+#[allow(clippy::too_many_arguments)]
 fn render_outgoing(
     outgoing: &[EventChange],
     withheld_task_pushes: usize,
@@ -344,8 +368,9 @@ fn render_outgoing(
     header: Option<&str>,
     verb: &str,
     empty: &str,
+    provider: Option<&str>,
 ) -> String {
-    let warning = withheld_warning(withheld_task_pushes, verb);
+    let warning = withheld_warning(withheld_task_pushes, verb, provider);
 
     if outgoing.is_empty() {
         return match warning {
@@ -1005,6 +1030,7 @@ mod tests {
             Withheld {
                 task_deletes: suppressed,
                 task_pushes: 0,
+                provider: None,
             },
             verbose,
             TimeFormat::H24,
@@ -1302,32 +1328,37 @@ mod tests {
         );
     }
     const WITHHELD_PUSH: &str = concat!(
-        "   \u{1b}[33m⚠\u{1b}[39m 1 task change not pushed: tasks are pull-only — ",
-        "caldir cannot push tasks to a remote yet."
+        "   \u{1b}[33m⚠\u{1b}[39m 1 task change not pushed: ",
+        "Provider \"webcal\" does not support task writes."
     );
 
     /// R70's withholding, on the surface the wedge happened on. The events go
     /// out and the task is named as kept back, in the same `⚠` affordance the
-    /// R49 belt uses — one "caldir kept something back" line, not two.
+    /// R49 belt uses — one "caldir kept something back" line, not two. The
+    /// old sentence must be gone entirely, not merely joined by the new one.
     #[test]
-    fn a_withheld_task_push_is_reported_beneath_the_pushed_events() {
+    fn a_withheld_task_push_names_the_provider_that_cannot_take_it() {
+        let rendered = render_outgoing(
+            &event_only_incoming(),
+            1,
+            true,
+            TimeFormat::H24,
+            None,
+            "pushed",
+            "   No changes to push",
+            Some("webcal"),
+        );
+
         assert_eq!(
-            render_outgoing(
-                &event_only_incoming(),
-                1,
-                true,
-                TimeFormat::H24,
-                None,
-                "pushed",
-                "   No changes to push",
-            ),
+            rendered,
             concat!(
                 "   \u{1b}[31m-\u{1b}[39m \u{1b}[31m(Untitled)\u{1b}[39m ",
                 "\u{1b}[2mWed Mar 6 2019, all-day\u{1b}[0m\n",
-                "   \u{1b}[33m⚠\u{1b}[39m 1 task change not pushed: tasks are pull-only — ",
-                "caldir cannot push tasks to a remote yet."
+                "   \u{1b}[33m⚠\u{1b}[39m 1 task change not pushed: ",
+                "Provider \"webcal\" does not support task writes."
             )
         );
+        assert!(!rendered.contains("cannot push tasks to a remote yet"));
     }
 
     /// A **task-only** calendar: the withholding empties the outgoing set, so
@@ -1342,6 +1373,7 @@ mod tests {
             None,
             "pushed",
             "   No changes to push",
+            Some("webcal"),
         );
         assert_eq!(rendered, WITHHELD_PUSH);
         assert!(!rendered.contains("No changes to push"));
@@ -1360,6 +1392,7 @@ mod tests {
                 None,
                 "pushed",
                 "   No changes to push",
+                Some("webcal"),
             ),
             "\u{1b}[2m   No changes to push\u{1b}[0m"
         );
@@ -1372,15 +1405,38 @@ mod tests {
                 Some("Local changes (to discard)"),
                 "discarded",
                 "   Nothing to discard",
+                Some("webcal"),
             ),
             "\u{1b}[2m   Nothing to discard\u{1b}[0m"
         );
     }
 
-    /// `discard` reverts the outgoing set, so a withheld task is untouched
-    /// there too — and the verb has to say so, not claim a push.
+    /// AC 3: a provider that advertises `tasks.write` never withholds a task
+    /// push, so `withheld_task_pushes` is always `0` there — this is the
+    /// count's off-polarity, at the trait-adjacent seam a caller actually
+    /// uses. No provider name should ever be visible when nothing was kept
+    /// back.
     #[test]
-    fn discard_names_the_task_it_did_not_discard() {
+    fn a_provider_that_supports_task_writes_prints_no_withheld_notice() {
+        let rendered = render_outgoing(
+            &[],
+            0,
+            false,
+            TimeFormat::H24,
+            None,
+            "pushed",
+            "   No changes to push",
+            None,
+        );
+        assert_eq!(rendered, "\u{1b}[2m   No changes to push\u{1b}[0m");
+        assert!(!rendered.contains("Provider"));
+    }
+
+    /// `discard` reverts the outgoing set, so a withheld task is untouched
+    /// there too — and the verb has to say so, not claim a push. A count of 2
+    /// exercises pluralization alongside the provider name in the same line.
+    #[test]
+    fn discard_names_the_provider_and_the_task_it_did_not_discard() {
         assert_eq!(
             render_outgoing(
                 &[],
@@ -1390,16 +1446,19 @@ mod tests {
                 Some("Local changes (to discard)"),
                 "discarded",
                 "   Nothing to discard",
+                Some("webcal"),
             ),
             concat!(
-                "   \u{1b}[33m⚠\u{1b}[39m 2 task changes not discarded: tasks are pull-only — ",
-                "caldir cannot push tasks to a remote yet."
+                "   \u{1b}[33m⚠\u{1b}[39m 2 task changes not discarded: ",
+                "Provider \"webcal\" does not support task writes."
             )
         );
     }
 
     /// The bidirectional surface carries both belts, and R49's comes first:
     /// it is about files caldir refused to delete, which is the scarier one.
+    /// Threading a provider name through `render_sections` is exactly the
+    /// edit that could reorder or drop one of the two lines.
     #[test]
     fn both_withholding_notices_can_appear_together() {
         assert_eq!(
@@ -1409,6 +1468,7 @@ mod tests {
                 Withheld {
                     task_deletes: true,
                     task_pushes: 1,
+                    provider: Some("webcal"),
                 },
                 false,
                 TimeFormat::H24,
@@ -1419,8 +1479,8 @@ mod tests {
                 "   \u{1b}[33m⚠\u{1b}[39m task deletion withheld: the remote reported no ",
                 "tasks at all, which is indistinguishable from a provider that cannot list ",
                 "them. No task file was removed.\n",
-                "   \u{1b}[33m⚠\u{1b}[39m 1 task change not pushed: tasks are pull-only — ",
-                "caldir cannot push tasks to a remote yet."
+                "   \u{1b}[33m⚠\u{1b}[39m 1 task change not pushed: ",
+                "Provider \"webcal\" does not support task writes."
             )
         );
     }

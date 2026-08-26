@@ -4,7 +4,7 @@ use dialoguer::Confirm;
 use owo_colors::OwoColorize;
 
 use crate::output::diff::{CalendarDiffRender, Render};
-use crate::utils::{resolve_sync_range, tui};
+use crate::utils::{provider_slug, resolve_sync_range, tui};
 
 pub async fn run(
     caldir: &Caldir,
@@ -45,7 +45,11 @@ pub async fn run(
                         // ever writes to the local calendar, and dropping the
                         // task is one of the two remedies the push refusal
                         // offers. Refusing it would strand the user.
-                        println!("{}", diff.render_discard(verbose, caldir));
+                        let provider = provider_slug(&connection);
+                        println!(
+                            "{}",
+                            diff.render_discard(verbose, caldir, provider.as_deref())
+                        );
                         if !diff.outgoing().is_empty() {
                             pending.push((connection, diff));
                         }

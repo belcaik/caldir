@@ -231,14 +231,15 @@ impl CalendarDiff {
 
     /// How many outgoing changes were withheld because they are tasks.
     ///
-    /// The outbound RPC field is an `Event`, so a task cannot ride the sync
-    /// wire at all. It is therefore dropped from the outgoing set the way a
-    /// read-only calendar drops everything — never queued, never attempted —
-    /// so a mixed calendar's *events* keep syncing exactly as they would
-    /// without it. Tasks are pull-only.
+    /// A remote that does not advertise `tasks.write` cannot take a task
+    /// push, so it is dropped from the outgoing set the way a read-only
+    /// calendar drops everything — never queued, never attempted — so a
+    /// mixed calendar's *events* keep syncing exactly as they would without
+    /// it. The limitation belongs to the provider, not to caldir.
     ///
-    /// The withholding must not be silent: the CLI renders a warning
-    /// line per calendar on every surface that shows outgoing changes.
+    /// The withholding must not be silent: the CLI renders a warning line,
+    /// naming the provider, per calendar on every surface that shows
+    /// outgoing changes.
     pub fn withheld_task_pushes(&self) -> usize {
         self.withheld_task_pushes
     }

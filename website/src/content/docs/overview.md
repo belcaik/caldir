@@ -49,10 +49,10 @@ Tasks show up next to your events in `caldir events`, `caldir today` and `caldir
 
 caldir can **pull** tasks from a CalDAV server, but it cannot **push** them.
 
-A task you create or edit locally stays local. If a task file sits in a calendar that has a remote, `caldir push` and `caldir sync` hold that change back and tell you so:
+A task you create or edit locally stays local. If a task file sits in a calendar whose provider doesn't support task writes, `caldir push` and `caldir sync` hold that change back and tell you so, naming the provider:
 
 ```
-   ⚠ 1 task change not pushed: tasks are pull-only — caldir cannot push tasks to a remote yet.
+   ⚠ 1 task change not pushed: Provider "webcal" does not support task writes.
 ```
 
 The rest of that calendar pushes as usual, nothing is deleted, and no file is modified. The task keeps living in your directory, and the note comes back on every run for as long as it differs from what the server has.

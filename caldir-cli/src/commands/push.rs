@@ -3,7 +3,9 @@ use caldir_core::{Caldir, CalendarDiff, Connection, DateRange};
 use owo_colors::OwoColorize;
 
 use crate::output::diff::{CalendarDiffRender, Render};
-use crate::utils::{allow_mass_delete, connections, count_changes, resolve_sync_range, tui};
+use crate::utils::{
+    allow_mass_delete, connections, count_changes, provider_slug, resolve_sync_range, tui,
+};
 
 pub async fn run(
     caldir: &Caldir,
@@ -98,7 +100,8 @@ async fn push_connection(
         }
     };
 
-    println!("{}", diff.render_push(verbose, caldir));
+    let provider = provider_slug(connection);
+    println!("{}", diff.render_push(verbose, caldir, provider.as_deref()));
 
     if !allow_mass_delete(&diff, force) {
         return true;

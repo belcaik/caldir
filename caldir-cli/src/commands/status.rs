@@ -4,7 +4,7 @@ use owo_colors::OwoColorize;
 
 use crate::output::diff::{CalendarDiffRender, Render};
 use crate::utils::tui;
-use crate::utils::{require_calendars, resolve_sync_range};
+use crate::utils::{provider_slug, require_calendars, resolve_sync_range};
 
 pub async fn run(
     caldir: &Caldir,
@@ -54,7 +54,10 @@ async fn run_parsed(
                 println!("{}", header);
 
                 match result {
-                    Ok(diff) => println!("{}", diff.render(verbose, caldir)),
+                    Ok(diff) => {
+                        let provider = provider_slug(&connection);
+                        println!("{}", diff.render(verbose, caldir, provider.as_deref()));
+                    }
                     Err(e) => println!("   {}", e.to_string().red()),
                 }
             }
