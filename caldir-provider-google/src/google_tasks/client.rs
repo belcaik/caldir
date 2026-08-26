@@ -150,6 +150,22 @@ pub async fn insert_task(
         .context("Failed to parse Google Task create response")
 }
 
+/// `tasks.delete` — remove one task, addressed by `url` (built by
+/// `task_url`). Returns the raw response status; whether that status counts
+/// as success (including an already-gone task) is the caller's pure
+/// classifier, not this network wrapper. Never `events().delete()` (§9):
+/// this hits `tasks.googleapis.com`, not `googleapis.com/calendar`.
+pub async fn delete_task(access_token: &str, url: &str) -> Result<reqwest::StatusCode> {
+    let response = reqwest::Client::new()
+        .delete(url)
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .context("Failed to delete Google Task")?;
+
+    Ok(response.status())
+}
+
 /// `tasks.patch` — update one task, addressed by `url` (built by
 /// `task_url`). Never `events().patch()` (§9): this hits
 /// `tasks.googleapis.com`, not `googleapis.com/calendar`.
