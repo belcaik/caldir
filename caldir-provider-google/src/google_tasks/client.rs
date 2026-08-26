@@ -1,4 +1,4 @@
-//! Task-list enumeration (P4-03) and task listing (P4-04). Writes are Wave 5.
+//! Task-list enumeration and task listing. Writes are a later addition.
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -52,7 +52,7 @@ pub async fn list_task_lists(access_token: &str) -> Result<Vec<TaskList>> {
 /// Field list per `docs/vtodo/provider-sync/providers/google-tasks.md` "The
 /// Tasks surface caldir needs": `id`, `title`, `notes`, `status`, `due`,
 /// `completed`, `deleted`, `hidden`. `updated` is read but unused by this
-/// ticket's mapping (`Todo::last_modified` from this path is `P5-06` scope).
+/// mapping (`Todo::last_modified` from this path is out of scope here).
 #[derive(Debug, Clone, Deserialize)]
 pub struct Task {
     pub id: String,

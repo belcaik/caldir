@@ -17,9 +17,9 @@ use crate::remote_config::{
 };
 use crate::session::SessionStore;
 
-/// Resolves `P4-03`'s resource kind and branches once, at the top: a
+/// Resolves the remote's resource kind and branches once, at the top: a
 /// task-list remote takes the Tasks path, a calendar remote takes the
-/// Calendar path. The two never call both APIs and merge (spec §9, CROSS-6).
+/// Calendar path. The two never call both APIs and merge (spec §9).
 pub async fn handle(cmd: ListEvents) -> Result<Vec<CalendarItem>> {
     match resolve_resource_kind(&cmd.remote)? {
         GoogleResourceKind::Calendar => handle_calendar(cmd).await,
@@ -71,7 +71,7 @@ async fn handle_calendar(cmd: ListEvents) -> Result<Vec<CalendarItem>> {
 }
 
 /// The Tasks half of the split (spec §9): never touches the Calendar API,
-/// never returns anything but `CalendarItem::Todo` (CROSS-6).
+/// never returns anything but `CalendarItem::Todo`.
 async fn handle_task_list(cmd: ListEvents) -> Result<Vec<CalendarItem>> {
     let config = GoogleTaskListRemoteConfig::try_from(&cmd.remote)?;
     let account_email = &config.google_account;

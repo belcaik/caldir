@@ -20,7 +20,7 @@ pub(crate) trait WireValue: Sized {
 }
 
 /// The inbound item payload (`list_events`'s response, and now the write
-/// RPCs' response too — D-3/C-16). Infallible in both
+/// RPCs' response too — D-3). Infallible in both
 /// directions because [`ItemIcs`] already holds a decoded item.
 impl WireValue for CalendarItem {
     type Wire = ItemIcs;

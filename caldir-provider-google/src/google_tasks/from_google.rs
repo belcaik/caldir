@@ -1,9 +1,9 @@
-//! Google Task -> `caldir_core::Todo` mapping (P4-04).
+//! Google Task -> `caldir_core::Todo` mapping.
 //!
 //! Mirrors `google_event::from_google`'s shape: a private serde mirror of the
 //! remote resource (`Task`, below) and a conversion into a core type. Neither
 //! `Task` nor anything Tasks-specific ever crosses out of this module —
-//! `commands::list_events::handle` only ever sees `CalendarItem` (CROSS-6).
+//! `commands::list_events::handle` only ever sees `CalendarItem`.
 
 use anyhow::Result;
 use caldir_core::{CalendarItem, EventTime, EventUid, Todo, TodoStatus, XProperty};
@@ -16,7 +16,7 @@ use crate::constants::PROVIDER_TASK_ID_PROPERTY;
 /// caldir derives one from the Google task id — the same shape
 /// `commands::list_events::cancellation_to_event` uses for a synthetic event
 /// UID (`format!("{}@google.com", ge.recurring_event_id)`). A locally-created
-/// task keeps its own UID on push (`P5-01`); this function only fires for a
+/// task keeps its own UID on push; this function only fires for a
 /// task caldir has never seen before.
 pub fn derive_task_uid(google_task_id: &str) -> EventUid {
     EventUid::new(format!("{google_task_id}@google-tasks.com"))
@@ -80,7 +80,7 @@ pub fn task_to_calendar_item(task: Task) -> Result<Option<CalendarItem>> {
 /// can't drift (§7).
 ///
 /// The calendar date comes from the timestamp's **own** offset (RFC 3339
-/// requires one) — never from `chrono::Local`/the system zone (C-18). Google
+/// requires one) — never from `chrono::Local`/the system zone. Google
 /// always sends an explicit `Z`, so this never needs a system-zone fallback;
 /// the parsed offset is used as-is via `date_naive()`.
 fn google_due_to_date(due: &str) -> Option<EventTime> {

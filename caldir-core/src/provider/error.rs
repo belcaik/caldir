@@ -30,7 +30,7 @@ pub enum ProviderError {
     /// The provider replied that it does not recognise the RPC method sent
     /// to it (`rpc::ErrorCode::UnsupportedMethod`) — distinct from
     /// `Provider` so a caller can tell "too old to answer" from "answered
-    /// and failed" without matching on message text (§16, `CROSS-4`).
+    /// and failed" without matching on message text (§16).
     #[error("Provider does not support this method: {0}")]
     UnsupportedMethod(String),
 
@@ -40,7 +40,7 @@ pub enum ProviderError {
     UnsupportedOperation(String),
 
     /// §16 class 2: the provider's credentials lack a scope the request
-    /// needs (`GOOGLE-13`'s core half).
+    /// needs.
     #[error("Provider is missing a required authorization scope: {0}")]
     MissingAuthScope(String),
 
@@ -63,7 +63,7 @@ pub enum ProviderError {
 /// to the pre-existing generic `Provider` variant: an absent code is every
 /// provider built before this ticket, and an unrecognised one is a *newer*
 /// provider using a class this binary doesn't know yet — neither is grounds
-/// to fail (§18, C-4).
+/// to fail (§18).
 pub(crate) fn classify(error: String, code: Option<rpc::ErrorCode>) -> ProviderError {
     match code {
         Some(rpc::ErrorCode::UnsupportedMethod) => ProviderError::UnsupportedMethod(error),

@@ -38,17 +38,17 @@ impl Connection {
     pub async fn diff(&mut self, range: &DateRange) -> Result<CalendarDiff, ConnectionError> {
         let local_listing = self.local().events()?;
 
-        // C-8/D-2, fail closed: `capabilities()` never propagates an error —
+        // D-2, fail closed: `capabilities()` never propagates an error —
         // an absent, unknown, errored or timed-out answer already reads as
         // `ProviderCapabilities::default()` (all false), so the reason is
-        // only for a future surface (P2-05) and is dropped here.
+        // only for a future surface and is dropped here.
         let (capabilities, _reason) = self.remote().capabilities().await;
         let task_pushes = if capabilities.tasks.write {
             TaskPushes::Allowed
         } else {
             TaskPushes::Withheld
         };
-        // C-7/C-8: only an explicit `tasks.read = true` lifts the version-skew
+        // Only an explicit `tasks.read = true` lifts the version-skew
         // belt. Every failure mode `Remote::capabilities()` collapses to
         // `ProviderCapabilities::default()`, whose `tasks.read` is `false` —
         // read the same as an honest `false` here, no second capability path.

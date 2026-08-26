@@ -235,7 +235,7 @@ fn kind_ordinal(item: &CalendarItem) -> u8 {
 
 /// The day(s) an item should be listed under, clamped to `[range_start, range_end]`.
 ///
-/// A task has no `end` (C-2 forbids `DTEND` in a VTODO), so it is always a
+/// A task has no `end` (a VTODO forbids `DTEND`), so it is always a
 /// single day — and that day must be *inside* the window. Core is deliberately
 /// permissive and does not range-filter tasks, so a task due in 2019 reaches
 /// the renderer on a `caldir today`; without this it would open the agenda with

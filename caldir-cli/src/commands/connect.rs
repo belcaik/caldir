@@ -25,7 +25,7 @@ fn calendar_base_slug(name: Option<&str>, provider_slug: &ProviderSlug) -> Strin
 /// (spec §11: two containers can share a display name, so the CLI must not
 /// let a task list read as an ordinary Calendar). A key-suffix match keeps
 /// this provider-agnostic rather than growing a Google-specific branch here
-/// (`CROSS-2` binds caldir-core only, but there's no reason to spend the
+/// (caldir-core stays provider-agnostic, but there's no reason to spend the
 /// coupling in the CLI either).
 fn is_non_calendar_resource(config: &CalendarConfig) -> bool {
     config

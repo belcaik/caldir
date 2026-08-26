@@ -24,7 +24,7 @@ pub struct RawCalendar {
     /// did not return a privilege set (assume writable).
     pub read_only: Option<bool>,
     /// Whether the collection's `supported-calendar-component-set` names
-    /// `VTODO`. Three-valued (C-14, R92): `None` when the property could not
+    /// `VTODO`. Three-valued (R92): `None` when the property could not
     /// be read at all — absent, malformed, or the request itself failed —
     /// which must never collapse into `Some(false)`. This is advisory only
     /// and is never used to gate a request; it is recorded here purely so a
@@ -116,7 +116,7 @@ pub async fn list_calendars_raw(
 /// (absent property, malformed response, failed request) — collapsing that
 /// into `Some(false)` reproduces R91's bug, where "absent = no VTODO" wiped
 /// out task support for every existing user on upgrade. This value is
-/// recorded for later classification only; it is never a gate (C-14).
+/// recorded for later classification only; it is never a gate.
 async fn fetch_supports_tasks(caldav: &CalDavClient_, href: &str) -> Option<bool> {
     caldav
         .request(GetSupportedComponents::new(href))

@@ -23,7 +23,7 @@ pub async fn handle(cmd: CreateItem) -> Result<CalendarItem> {
             Ok(CalendarItem::Event(event))
         }
         // §8.1: a task is uploaded as VTODO calendar data, never rewritten as
-        // a VEVENT (CROSS-6). `create_item` handles both kinds, but the
+        // a VEVENT. `create_item` handles both kinds, but the
         // Event arm above stays on `create_event` unchanged.
         item @ CalendarItem::Todo(_) => {
             ops::create_event::create_item(username, password, &config.caldav_calendar_url, item)

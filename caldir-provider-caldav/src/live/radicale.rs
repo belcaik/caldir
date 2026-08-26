@@ -624,7 +624,7 @@ END:VCALENDAR\r\n";
 
 const CONTROL_EVENT_UID: &str = "window-123@u-crawler";
 
-/// A `VEVENT` carrying the *task's* UID: the same-UID pair of R65/C-1, and the
+/// A `VEVENT` carrying the *task's* UID: the same-UID pair of R65, and the
 /// shape `event_url` sends straight onto the task's href.
 const SAME_UID_EVENT_ICS: &str = "BEGIN:VCALENDAR\r\n\
 VERSION:2.0\r\n\
@@ -1159,21 +1159,21 @@ fn renaming_a_local_file_updates_the_same_resource_and_never_a_second_one() {
 }
 
 // ============================================================================
-// P3-05: mixed-component behaviour survives the write paths
+// Mixed-component behaviour survives the write paths
 // ============================================================================
 
 /// The UID a sibling task uses in
 /// [`task_writes_leave_a_sibling_event_in_the_same_collection_untouched`] —
-/// deliberately not the control event's UID (C-15: these two are not the
-/// same-UID case, just neighbours in one collection).
+/// deliberately not the control event's UID: these two are not the
+/// same-UID case, just neighbours in one collection.
 const SIBLING_TASK_UID: &str = "sibling-task-1@u-crawler";
 
-/// **P3-05**, C-9/C-15. A task create, update and delete, all through the
+/// A task create, update and delete, all through the
 /// production write paths, leave a sibling `VEVENT` in the same collection
 /// byte-identical on the server.
 ///
-/// Before `P3-02`..`P3-04` a task could not reach a `PUT` or `DELETE` at all;
-/// now both compute an href from a UID and locate resources by REPORT, both
+/// A task reaches a `PUT` or `DELETE` the same way an event does: both
+/// compute an href from a UID and locate resources by REPORT, both
 /// collection-wide operations, and a mis-scoped one takes the neighbour with
 /// it. This is a regression lock, not a claim about production shape: caldir
 /// never puts a task and an event in the same directory in practice.
@@ -1260,11 +1260,11 @@ fn task_writes_leave_a_sibling_event_in_the_same_collection_untouched() {
     event_is_untouched(&server);
 }
 
-/// **P3-05**, C-9/C-15. A `VEVENT` and a `VTODO` sharing one UID, in separate
+/// A `VEVENT` and a `VTODO` sharing one UID, in separate
 /// collections, stay distinct through a task create and update via the
 /// production path.
 ///
-/// Separate collections is the *deliberate* shape here (C-15): production's
+/// Separate collections is the *deliberate* shape here: production's
 /// task and its window event never share a UID and live in different
 /// calendar directories, so §8.5's same-UID pair is synthetic, not something
 /// production exercises. It is pinned anyway because it is the case that
@@ -1356,7 +1356,7 @@ fn a_same_uid_event_and_task_in_separate_collections_stay_distinct_through_a_tas
 }
 
 // ============================================================================
-// P3-07: the release gate — production write paths against real Radicale
+// The release gate — production write paths against real Radicale
 // ============================================================================
 
 /// Parse a single-`VTODO` document into the domain `Todo`. Panics unless the
@@ -1369,10 +1369,10 @@ fn todo_from_ics(ics: &str) -> Todo {
 }
 
 /// `deadlines/assignment-1562539.ics`, byte-identical to
-/// `caldir_core::test_utils::VTODO_COMPLETED_PRODUCTION_ICS` (P1-05). Copied
+/// `caldir_core::test_utils::VTODO_COMPLETED_PRODUCTION_ICS`. Copied
 /// rather than imported: the core fixture lives behind a `#[cfg(test)]`
 /// private module and cannot cross the crate boundary (the same reason
-/// `P3_06` copied `P1_05_OPEN_TASK_ICS` into `ops::create_event`). This is
+/// `ops::create_event` copies `P1_05_OPEN_TASK_ICS` in). This is
 /// production's completed-task shape: `STATUS:COMPLETED` alone, with
 /// **neither** `COMPLETED` nor `PERCENT-COMPLETE` — the R68 Radicale case.
 const P1_05_COMPLETED_TASK_ICS: &str = "BEGIN:VCALENDAR\r\n\
@@ -1389,11 +1389,11 @@ URL:https://lms.example.edu/courses/900222/assignments/9002295\r\n\
 END:VTODO\r\n\
 END:VCALENDAR\r\n";
 
-/// **`CALDAV-1`, R95 clauses 2–3.** The Stage 2 `u_crawler` task, pushed
+/// **R95 clauses 2–3.** The Stage 2 `u_crawler` task, pushed
 /// through caldir's own production create path for the first time in the
 /// project's history — every earlier live gate seeded a task with the
 /// harness's `curl` because no task could reach a `PUT` through production
-/// code before Wave 3. The stored resource is a single-component `VTODO` at
+/// code until now. The stored resource is a single-component `VTODO` at
 /// `{uid}.ics`, and `pull` reads back every property R95 clause 2 names.
 #[test]
 #[serial_test::serial(radicale)]
@@ -1463,7 +1463,7 @@ fn a_u_crawler_task_is_created_on_radicale_through_the_production_write_path() {
     );
 }
 
-/// **`CALDAV-7`'s create half.** Create through production, pull, re-push
+/// **The create half of the round trip.** Create through production, pull, re-push
 /// the pulled item through the production *update* path, pull again — the
 /// two pulled `Todo`s must be `==`. The equality is over **parsed domain
 /// values** (R30: Radicale re-sorts and re-folds, so a byte comparison is
@@ -1514,7 +1514,7 @@ fn a_created_task_pulled_twice_yields_the_same_task_and_a_repush_changes_nothing
     );
 }
 
-/// **`CALDAV-3`, `CALDAV-4`, `CALDAV-5`, `CALDAV-7`'s update half.** After a
+/// **The update half of the round trip.** After a
 /// create, update `SUMMARY`, `DUE` and `STATUS:COMPLETED` through the
 /// production update path. The href-count assertion is what catches an
 /// update that silently became a create.
@@ -1583,7 +1583,7 @@ fn updating_summary_due_and_status_updates_the_one_resource() {
     );
 }
 
-/// **`CALDAV-6`, §8.6's "delete -> pull -> absent".** Create, then delete
+/// **§8.6's "delete -> pull -> absent".** Create, then delete
 /// through the production delete path. Asserted as an outcome — what the
 /// collection holds — never as an HTTP status.
 #[test]
@@ -1675,7 +1675,7 @@ fn a_completed_and_an_undated_task_survive_the_production_write_paths() {
 }
 
 /// §8.6's "u_crawler fixture" row and §20's production-fixture-archive
-/// requirement: the `P1-05` fixture, pushed through the production create
+/// requirement: the redacted production fixture, pushed through the production create
 /// path, pulled, re-pushed through the production update path, pulled
 /// again — the two pulls must be `==`. Every mapping claim in this effort is
 /// made against this file rather than a hypothetical, so this is the gate

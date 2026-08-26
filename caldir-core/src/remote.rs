@@ -43,8 +43,8 @@ impl Remote {
     /// answer can fail to arrive — transport error, timeout, unknown
     /// method, unparseable payload — reads as task-less rather than
     /// propagating an error, so a caller can always gate on the returned
-    /// value. The reason is preserved alongside it for the CLI to surface
-    /// (C-8); `P1-03` is the consumer, `CalendarDiff` never sees a `Remote`.
+    /// value. The reason is preserved alongside it for the CLI to surface;
+    /// `CalendarDiff` never sees a `Remote`.
     pub async fn capabilities(&self) -> (ProviderCapabilities, Option<RemoteError>) {
         match self
             .provider
@@ -83,7 +83,7 @@ impl Remote {
                 let remote_event = self.create_item(item.clone()).await?;
                 Ok(Some(remote_event))
             }
-            // C-13: the merge is item-typed and dispatches on whichever kind
+            // The merge is item-typed and dispatches on whichever kind
             // backs the change, so a task update carries its own
             // provider-managed `X-` properties across just as an event does.
             EventChange::Update { from, to } => {

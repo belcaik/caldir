@@ -31,7 +31,7 @@ pub async fn handle(cmd: ListCalendars) -> Result<Vec<CalendarConfig>> {
 /// Pure transformation — no IO — so it can be unit-tested without a server.
 fn raw_to_config(account_id: &str, cal: RawCalendar) -> CalendarConfig {
     let mut params = CaldavRemoteConfig::new(account_id, &cal.url).into_remote_config_params();
-    // Provider-private key (C-6): the advertised component set is CalDAV
+    // Provider-private key: the advertised component set is CalDAV
     // metadata, not a core concept, so it rides the free-form remote params
     // rather than a typed `CalendarConfig` field. Omitted entirely when
     // unreadable, so a missing key means "unknown", never "false" (R91).

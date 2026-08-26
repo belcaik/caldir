@@ -27,7 +27,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Tags a [`Handler`]'s own failure with a §16 `ErrorCode` so
 /// `process_request` can put it on the wire without inspecting the message
-/// text (`CROSS-4`). The `create_item`/`update_item`/`delete_item` defaults
+/// text. The `create_item`/`update_item`/`delete_item` defaults
 /// below and the public [`classified_error`] both go through this.
 #[derive(Debug)]
 struct Classified {
@@ -46,7 +46,7 @@ impl Classified {
 
 /// Lets a `Handler` attach a §16 `ErrorCode` to an error it returns, so it
 /// arrives at the consumer as the matching `ProviderError` variant instead of
-/// the generic one (`W2-C3`). The `Handler` trait's `Result<T, Error>`
+/// the generic one. The `Handler` trait's `Result<T, Error>`
 /// signatures are unchanged — this only widens what a provider can put
 /// inside the `Err`. Additive: an error that never passes through here still
 /// degrades to `ProviderError::Provider`, exactly as before.
@@ -78,7 +78,7 @@ pub trait Handler: Send + Sync {
         Err("list_events is not supported by this provider".into())
     }
 
-    /// D-3/C-16: item-typed so a provider's `match` can serve a `Todo` arm
+    /// D-3: item-typed so a provider's `match` can serve a `Todo` arm
     /// once it has one; the wire verb stays `create_event`.
     async fn create_item(&self, _cmd: CreateItem) -> Result<CalendarItem> {
         Err(Classified::boxed(
@@ -134,7 +134,7 @@ pub async fn run_provider<H: Handler>(handler: H) {
 
 /// The subset of an envelope that decodes even when `command` is a verb this
 /// binary has never heard of. `Method`'s `Deserialize` is intentionally
-/// strict (R52/C-5: no `#[serde(other)]`, no `#[non_exhaustive]`), so the
+/// strict (R52: no `#[serde(other)]`, no `#[non_exhaustive]`), so the
 /// tolerance for an unrecognised verb lives here, one step before `Method`
 /// ever sees the string.
 #[derive(serde::Deserialize)]

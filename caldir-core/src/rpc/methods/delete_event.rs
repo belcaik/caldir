@@ -3,7 +3,7 @@ use crate::item::CalendarItem;
 use crate::rpc::{Method, Rpc};
 use serde::{Deserialize, Serialize};
 
-/// C-16: the Rust name is item-typed (`DeleteItem`); the wire verb stays
+/// The Rust name is item-typed (`DeleteItem`); the wire verb stays
 /// `delete_event` (`Method::DeleteEvent`, unrenamed) and the JSON key stays
 /// `event`.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]

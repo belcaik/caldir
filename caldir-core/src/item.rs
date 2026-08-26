@@ -170,8 +170,8 @@ impl CalendarItem {
     /// and dropping it would be a silent data loss, so the narrowing has to
     /// stay fallible.
     ///
-    /// `P2-01` removed its last production caller — `Remote::apply_change`
-    /// now dispatches a task as a task instead of narrowing it here — so
+    /// `Remote::apply_change` now dispatches a task as a task instead of
+    /// narrowing it here, removing its last production caller — so
     /// this is deliberately kept as an unused-in-production backstop, not a
     /// forgotten path. Still exercised by `Event::parse_single_ics` in
     /// tests.
@@ -186,7 +186,7 @@ impl CalendarItem {
         }
     }
 
-    /// C-13: extends `Event::with_x_properties_merged_from` to both component
+    /// Extends `Event::with_x_properties_merged_from` to both component
     /// kinds, called on the item **before** `into_event`'s narrowing, so a
     /// task update never silently strips provider-managed `X-` properties.
     /// A kind mismatch (identity does not change kind in practice) leaves

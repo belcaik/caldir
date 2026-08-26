@@ -53,8 +53,8 @@ pub async fn handle(cmd: ListCalendars) -> Result<Vec<CalendarConfig>> {
     Ok(calendar_configs)
 }
 
-/// Enumerates Google Tasks lists alongside Calendar collections (spec §11,
-/// `GOOGLE-1`). The scope guard runs *before* the Tasks request — a session
+/// Enumerates Google Tasks lists alongside Calendar collections (spec §11).
+/// The scope guard runs *before* the Tasks request — a session
 /// predating the Tasks scope degrades to calendars-only rather than
 /// surfacing a bare Google 403 (§10, `docs/vtodo/provider-sync/providers/google-tasks.md`
 /// "Session migration").
@@ -79,7 +79,7 @@ async fn task_list_calendar_configs(
             let remote_config = RemoteConfig::new(ProviderSlug::from(PROVIDER_NAME), params);
 
             // Whether tasks are pushed is decided at execution time by
-            // capability negotiation (P4-05), not frozen here (D-2, S3).
+            // capability negotiation, not frozen here (D-2).
             CalendarConfig::new(
                 Some(list.title.clone()),
                 None,

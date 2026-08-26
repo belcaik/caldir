@@ -1,7 +1,6 @@
-//! Hand-rolled Google Tasks REST client (P4-01 spike decision: reqwest, no
-//! new crate). Every Tasks-specific type stays private to this module —
-//! nothing here may cross into caldir-core or the shared RPC (P4-01
-//! Containment).
+//! Hand-rolled Google Tasks REST client (a deliberate spike decision: reqwest,
+//! no new crate). Every Tasks-specific type stays private to this module —
+//! nothing here may cross into caldir-core or the shared RPC (containment).
 
 mod client;
 mod due;

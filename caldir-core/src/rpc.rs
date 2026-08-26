@@ -68,9 +68,9 @@ pub enum Response<T> {
 /// a caller needs to match on travels here instead of in the message text.
 ///
 /// `#[non_exhaustive]`: a seventh class later must not break a downstream
-/// match (C-5). `#[serde(other)]` on `Unrecognized` is the wire-level twin of
+/// match. `#[serde(other)]` on `Unrecognized` is the wire-level twin of
 /// that guarantee — a *newer* provider sending a class string this binary has
-/// never heard of must still decode, not fail parsing (§17/§18, C-4).
+/// never heard of must still decode, not fail parsing (§17/§18).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -83,8 +83,7 @@ pub enum ErrorCode {
     /// (e.g. task writes on an events-only provider).
     UnsupportedOperation,
 
-    /// §16: the provider's credentials lack the scope the request needs
-    /// (`GOOGLE-13`'s core half).
+    /// §16: the provider's credentials lack the scope the request needs.
     MissingAuthScope,
 
     /// §16: the remote object the request named does not exist.

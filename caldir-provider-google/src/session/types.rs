@@ -104,17 +104,15 @@ impl Session {
         account_email.replace(['/', '\\', ':'], "_")
     }
 
-    /// Fails closed (D-2/C-8): a session recorded with no Tasks scope — the
+    /// Fails closed (D-2): a session recorded with no Tasks scope — the
     /// state of every pre-Tasks session file — is treated as "not granted",
     /// never "unknown, assume yes". Pure and IO-free so call sites can check
     /// it before making any Tasks API request, turning what would otherwise
     /// surface as a bare Google 403 into an actionable instruction (§16
-    /// "authentication scope missing", `GOOGLE-13`).
+    /// "authentication scope missing").
     ///
-    /// No production caller yet — `P4-03`/`P4-04` are the entry points that
-    /// will call this before a Tasks request. Kept public and tested now so
-    /// those tickets wire it in rather than reinvent it.
-    #[allow(dead_code)]
+    /// Called before every Tasks request: `list_calendars`, the read path,
+    /// and the degrade-warning path all check this first.
     pub fn require_tasks_scope(&self) -> anyhow::Result<()> {
         if self
             .data

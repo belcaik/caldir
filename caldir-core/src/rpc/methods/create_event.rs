@@ -3,9 +3,9 @@ use crate::item::CalendarItem;
 use crate::rpc::{Method, Rpc};
 use serde::{Deserialize, Serialize};
 
-/// C-16: the Rust name is item-typed (`CreateItem`); the wire verb stays
+/// The Rust name is item-typed (`CreateItem`); the wire verb stays
 /// `create_event` (`Method::CreateEvent`, unrenamed) and the JSON key stays
-/// `event` — only the payload type widens, per D-3's substance/C-16's split.
+/// `event` — only the payload type widens.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct CreateItem {
     #[serde(flatten)]

@@ -60,7 +60,7 @@ impl TryFrom<&RemoteConfigParams> for GoogleRemoteConfig {
 }
 
 /// Which kind of Google container a remote points at. Recorded explicitly at
-/// discovery time (P4-03) — never inferred from an id's shape (spec §11).
+/// discovery time — never inferred from an id's shape (spec §11).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoogleResourceKind {
     Calendar,
@@ -77,8 +77,8 @@ impl GoogleResourceKind {
 }
 
 /// Resolves the resource kind from `google_resource_kind`. Absence means
-/// Calendar via the legacy `google_calendar_id`-only shape (C-6: every
-/// Google remote written before this ticket has no kind key at all).
+/// Calendar via the legacy `google_calendar_id`-only shape (every
+/// Google remote predating this key has no kind key at all).
 /// An unrecognized value is an error, never a silent fallback to Calendar
 /// (D-2 fail closed).
 pub fn resolve_resource_kind(params: &RemoteConfigParams) -> Result<GoogleResourceKind> {
@@ -100,7 +100,7 @@ pub fn resolve_resource_kind(params: &RemoteConfigParams) -> Result<GoogleResour
 }
 
 /// Strongly-typed remote configuration for a Google Tasks task list.
-/// Provider-private keys inside the free-form `RemoteConfigParams` (C-6) —
+/// Provider-private keys inside the free-form `RemoteConfigParams` —
 /// no core schema change.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoogleTaskListRemoteConfig {

@@ -5,7 +5,7 @@
 //! disk loader, `VTIMEZONE` exemption included. `#[serde(with =
 //! "crate::rpc::ics::item")]` reaches it directly on every RPC struct field
 //! now that the outbound write RPCs (`CreateItem`/`UpdateItem`/`DeleteItem`)
-//! are item-typed (D-3/C-16) — the same field, one layer, no narrowing.
+//! are item-typed (D-3) — the same field, one layer, no narrowing.
 //!
 //! [`ItemIcs`] is the wire representation `CalendarItem` uses as an RPC
 //! *response* type (`WireValue`), so `list_events` and the write RPCs can

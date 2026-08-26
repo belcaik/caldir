@@ -172,7 +172,7 @@ impl Todo {
         ics.replacen("END:VTODO\r\n", &format!("{valarms}END:VTODO\r\n"), 1)
     }
 
-    /// C-13: the task-side sibling of `Event::with_x_properties_merged_from`.
+    /// The task-side sibling of `Event::with_x_properties_merged_from`.
     /// Same union-of-params merge, so an item-typed update never strips
     /// provider-managed `X-` properties just because the item is a task.
     pub fn with_x_properties_merged_from(mut self, base: &Todo) -> Self {

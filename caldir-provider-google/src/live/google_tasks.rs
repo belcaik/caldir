@@ -1,4 +1,4 @@
-//! The Google Tasks live tier: two gates against a real Google account.
+//! The Google Tasks live tier: gates against a real Google account.
 //!
 //! # How to run them
 //!
@@ -31,7 +31,7 @@
 //! next gate's cardinality assertion.
 //!
 //! **Necessary conditions vs. the proof:** `google_tasks::tests` (the
-//! non-live unit tests) checks each of `P5-01`/`P5-02`/`P5-03`'s seams in
+//! non-live unit tests) checks create's, update's and delete's seams in
 //! isolation — necessary conditions, not proof that a real second sync
 //! against Google cannot duplicate a task. Nothing in this crate can drive
 //! `caldir-core`'s actual sync loop (`Connection::diff`, `apply_outgoing_diff`
@@ -39,13 +39,13 @@
 //! provider crate), so "sync" here is modeled at the provider boundary: the
 //! *create* seam for a cycle with no known remote id, the *update* seam for
 //! every cycle after — because a correct sync only ever calls create once
-//! per item, before an id exists (`P2-02` owns that decision, not this
-//! crate). `create_sync_sync_yields_exactly_one_remote_task` is the proof
-//! that routing the same canonical item through create once and update
-//! any number of times after never produces a second remote task, live
-//! against Google — the one thing no pure function can observe, since the
-//! duplicate this ticket exists to catch is created by what a *second* call
-//! decides, not by anything the first call returns.
+//! per item, before an id exists (`caldir-core`'s sync loop owns that
+//! decision, not this crate). `create_sync_sync_yields_exactly_one_remote_task`
+//! is the proof that routing the same canonical item through create once and
+//! update any number of times after never produces a second remote task,
+//! live against Google — the one thing no pure function can observe, since
+//! the duplicate this gate exists to catch is created by what a *second*
+//! call decides, not by anything the first call returns.
 
 use anyhow::{Context, Result, bail, ensure};
 use caldir_core::provider::ProviderStorage;
@@ -327,11 +327,11 @@ async fn run_lifecycle_inner(config: &LiveConfig, task_id_out: &mut Option<Strin
 }
 
 // ============================================================================
-// GOOGLE-10 / P5-05 criterion 7
+// The due-date round trip against a real Google account
 // ============================================================================
 
-/// Closes `P5-05`'s deferred acceptance criterion 7 and `GOOGLE-10`.
-/// `P5-05` proved `google_due_date`/`date_to_due` are a fixpoint
+/// Closes a deferred acceptance gap: an earlier, non-live test proved
+/// `google_due_date`/`date_to_due` are a fixpoint
 /// **in-process**; its own test comment states plainly that this cannot
 /// show Google's own truncation agrees. Pushing `DUE:20260902T035959Z`
 /// through a real create and a real second sync, and comparing the two
@@ -401,13 +401,12 @@ async fn run_due_fixpoint_inner(
 }
 
 // ============================================================================
-// P5-07: §15's no-churn sequences, named per the ticket
+// §15's no-churn sequences
 // ============================================================================
 //
 // `create_sync_sync_yields_exactly_one_remote_task` above already drives
-// this whole lifecycle and checks cardinality (P5-04's concern) alongside
-// no-churn along the way. These three are P5-07's own, narrower proofs —
-// named exactly as the ticket's RED list requires so `P6-05` can cite them
+// this whole lifecycle and checks cardinality alongside no-churn along the
+// way. These three are narrower proofs, named so later work can cite them
 // by name — asserting *no changes*, not identity/cardinality.
 
 /// §15: local create / sync / sync — the second sync must report no
@@ -601,7 +600,7 @@ async fn run_delete_sync_inner(
 
     // "sync" after the delete: a retried delete of an already-gone task
     // must not error and must not retry into recreating it
-    // (`classify_delete_status`'s already-gone-is-success rule, C-7a).
+    // (`classify_delete_status`'s already-gone-is-success rule).
     commands::delete_event::handle(DeleteItem {
         remote: remote_config(config),
         event: CalendarItem::Todo(canonical),

@@ -173,11 +173,11 @@ pub fn test_binary(filename: &str) -> (TempDir, PathBuf) {
     (tmp, path)
 }
 
-/// `P6-02`: a real subprocess standing in for a provider binary built
+/// A real subprocess standing in for a provider binary built
 /// before `caldir-core` ever had a `capabilities` verb — its `Method` enum
-/// knows only the six pre-`P1-02` variants. Answers each of those with a
+/// knows only the six pre-capabilities variants. Answers each of those with a
 /// plain success envelope; answers anything else (in practice, only
-/// `capabilities`) exactly as a binary that predates `P1-01`'s two-stage
+/// `capabilities`) exactly as a binary that predates the two-stage
 /// envelope decode does: the whole request line fails to parse, verbatim,
 /// with no `code` field. That shape is deliberately stale — it must not be
 /// "corrected" to the newer named/coded form, or the stub stops proving
@@ -301,7 +301,7 @@ SUMMARY:Zoned deadline\r\n\
 END:VTODO\r\n\
 END:VCALENDAR\r\n";
 
-// --- P1-05 production fixtures ---
+// --- production fixtures ---
 //
 // Extracted and redacted from `docs/vtodo/caldir-vtodo-fixtures.tar.gz` (a
 // real u_crawler archive, not committed). Redaction replaces the account
@@ -311,9 +311,9 @@ END:VCALENDAR\r\n";
 
 /// `deadlines/assignment-1571380.ics`, course `202615_2562_...`. Production's
 /// open (non-completed) task shape: `UID`, `DTSTAMP`, `DUE`, `PRIORITY`,
-/// `SUMMARY`, `URL` and nothing else — the 57/57 census in P1-05's
-/// Correction 1. `DUE` is preserved byte-for-byte: a UTC instant at
-/// `T035959Z`, 23:59:59 on the previous local `America/Santiago` day (C-15).
+/// `SUMMARY`, `URL` and nothing else — the 57/57 census in the production
+/// archive. `DUE` is preserved byte-for-byte: a UTC instant at
+/// `T035959Z`, 23:59:59 on the previous local `America/Santiago` day.
 /// Redacted: account/course/assignment identifiers in `URL`; the institution
 /// hostname (a LMS product name) -> `lms.example.edu`.
 pub const VTODO_OPEN_PRODUCTION_ICS: &str = "BEGIN:VCALENDAR\r\n\
@@ -331,7 +331,7 @@ END:VCALENDAR\r\n";
 
 /// `windows/assignment-1571380.ics`, the `VEVENT` matching
 /// `VTODO_OPEN_PRODUCTION_ICS`. Production keeps distinct UIDs across the
-/// `deadlines/`/`windows/` pair for the same assignment (P1-05 Correction 2)
+/// `deadlines/`/`windows/` pair for the same assignment
 /// — this is NOT a same-UID `VEVENT`+`VTODO` case. Redacted identically to
 /// its task counterpart, with the matching assignment number.
 pub const VEVENT_WINDOW_PRODUCTION_ICS: &str = "BEGIN:VCALENDAR\r\n\
@@ -351,7 +351,7 @@ END:VCALENDAR\r\n";
 /// completed task shape: `STATUS:COMPLETED` with **neither** `COMPLETED` nor
 /// `PERCENT-COMPLETE` — R68's exact Radicale case, invisible against the
 /// richer `VTODO_ICS` above. `DUE` is preserved byte-for-byte: a UTC instant
-/// at `T035959Z` (C-15/C-18). `SUMMARY` carries non-ASCII UTF-8 ("aquí") —
+/// at `T035959Z`. `SUMMARY` carries non-ASCII UTF-8 ("aquí") —
 /// true of 40/57 production summaries and of no other shipped fixture — and
 /// its embedded `:` and non-ASCII characters are load-bearing, so neither is
 /// touched by redaction. Redacted: account/course/assignment identifiers in

@@ -21,11 +21,11 @@ pub use list_calendars::ListCalendars;
 pub use list_events::ListEvents;
 pub use update_event::UpdateItem;
 
-/// R52 keeps `Method` a closed six-verb enum (C-5, C-8 INVIOLABLE) — but
-/// `capabilities` (`P1-02`/D-2) is the one ratified exception: task
+/// R52 keeps `Method` a closed six-verb enum, inviolably — but
+/// `capabilities` (D-2) is the one ratified exception: task
 /// capability negotiation needs a seventh verb, `Method` is not
 /// `#[non_exhaustive]`, and every out-of-tree matcher (Proton included)
-/// breaks the moment it lands. `P1-01`'s graceful-skew path
+/// breaks the moment it lands. The graceful-skew path
 /// (`ErrorCode::UnsupportedMethod`) is the migration story for every
 /// provider binary built before this line landed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

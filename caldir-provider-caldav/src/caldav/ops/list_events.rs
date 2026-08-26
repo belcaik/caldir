@@ -57,7 +57,7 @@ pub async fn fetch_events(
 }
 
 /// Classify a failed `VTODO` REPORT as fatal-vs-degrade, **after** the server
-/// has already rejected it (C-14). Never a gate on whether to send the
+/// has already rejected it. Never a gate on whether to send the
 /// REPORT: the property is advisory and can be wrong (R92), so a negative
 /// hint alone must never suppress the request. This only decides whether a
 /// rejection the server already produced may be downgraded to "no tasks

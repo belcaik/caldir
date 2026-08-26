@@ -29,7 +29,7 @@ fn is_no_uid_conflict(body: &str) -> bool {
 
 /// Serialize an item to a single-component `VCALENDAR` document, from the
 /// kind's own serializer. Never routed through a shared "as event" path —
-/// that is exactly how a task would get rewritten as a `VEVENT` (CROSS-6).
+/// that is exactly how a task would get rewritten as a `VEVENT`.
 pub(super) fn item_to_ics_string(item: &CalendarItem) -> String {
     match item {
         CalendarItem::Event(event) => event.to_ics_string(),
@@ -102,7 +102,7 @@ async fn update_after_uid_conflict(
 
 /// Create a new item — event or task — on a CalDAV calendar, as its own
 /// component: a task is uploaded as `VTODO` calendar data and is never
-/// rewritten as a `VEVENT` (CROSS-6).
+/// rewritten as a `VEVENT`.
 ///
 /// Uses a raw PUT request to avoid duplicate Content-Type headers (a libdav quirk).
 /// Fetches the created item back to get server-assigned values.

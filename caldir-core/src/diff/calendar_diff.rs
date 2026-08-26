@@ -150,9 +150,9 @@ impl CalendarDiff {
                 // tasks when the remote reported none — unless the provider
                 // explicitly advertises `tasks.read`, in which case a
                 // zero-task response is a trustworthy answer, not version
-                // skew (C-7). Only `TaskReads::Advertised` lifts this; every
+                // skew. Only `TaskReads::Advertised` lifts this; every
                 // other capability outcome collapses to `NotAdvertised`
-                // upstream (C-8), never here.
+                // upstream, never here.
                 let suppressed_by_version_skew = matches!(item, CalendarItem::Todo(_))
                     && !remote_reports_tasks
                     && task_reads == TaskReads::NotAdvertised;
@@ -203,7 +203,7 @@ impl CalendarDiff {
             }
         }
 
-        // C-3: the capability flag decides whether the event-only wire's
+        // The capability flag decides whether the event-only wire's
         // withholding runs at all. `CalendarDiff` never inspects a `Remote`
         // or a provider name to get here — `Connection::diff` resolved that
         // upstream and handed down only this enum, the way `Deletes` already
@@ -329,7 +329,7 @@ enum Deletes {
     Suppressed,
 }
 
-/// Whether the provider advertises `tasks.write` (C-3). Threaded into
+/// Whether the provider advertises `tasks.write`. Threaded into
 /// `compute_with` the same way `Deletes` is: decided by the caller
 /// (`Connection::diff`, from `Remote::capabilities()`) and handed down as an
 /// opaque flag. `CalendarDiff` never sees a `Remote` or a provider name to
@@ -340,13 +340,13 @@ pub(crate) enum TaskPushes {
     Withheld,
 }
 
-/// Whether the provider advertises `tasks.read` (C-7). Threaded into
+/// Whether the provider advertises `tasks.read`. Threaded into
 /// `compute_with` the same way `TaskPushes` is: decided by the caller
 /// (`Connection::diff`, from `Remote::capabilities()`) and handed down as an
 /// opaque flag. `CalendarDiff` never sees a `Remote` or a provider name to
-/// derive this itself (C-3).
+/// derive this itself.
 ///
-/// C-8: only an explicit, successfully-decoded `tasks.read = true` produces
+/// Only an explicit, successfully-decoded `tasks.read = true` produces
 /// `Advertised`. Absent, unknown-method, errored, timed-out, or explicit
 /// `false` all collapse to `NotAdvertised` upstream — `Remote::capabilities()`
 /// and `Connection::diff` own that collapse; `#[derive(Default)]` on
