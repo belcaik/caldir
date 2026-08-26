@@ -10,9 +10,10 @@ use std::error::Error as StdError;
 use std::future::Future;
 use std::io::{self, BufRead, Write};
 
+use crate::provider::ProviderCapabilities;
 use crate::rpc::{
-    Connect, ConnectResponse, CreateEvent, DeleteEvent, ErrorCode, ListCalendars, ListEvents,
-    Method, Request, Response, Rpc, UpdateEvent, WireValue,
+    Capabilities, Connect, ConnectResponse, CreateEvent, DeleteEvent, ErrorCode, ListCalendars,
+    ListEvents, Method, Request, Response, Rpc, UpdateEvent, WireValue,
 };
 use crate::{CalendarConfig, CalendarItem, Event};
 
@@ -50,6 +51,15 @@ pub trait Handler: Send + Sync {
 
     async fn delete_event(&self, _cmd: DeleteEvent) -> Result<()> {
         Err("This provider does not support deleting events".into())
+    }
+
+    /// D-2/§18: the default every unmodified provider gets for free —
+    /// events read+write true, tasks read+write false — regardless of the
+    /// flattened remote params, so an unmodified provider's answer never
+    /// depends on config it has never read. A provider opts into a
+    /// per-remote answer (or task support) by overriding this.
+    async fn capabilities(&self, _cmd: Capabilities) -> Result<ProviderCapabilities> {
+        Ok(ProviderCapabilities::events_only())
     }
 }
 
@@ -158,6 +168,7 @@ async fn dispatch<H: Handler>(handler: &H, request: Request) -> Result<serde_jso
         Method::CreateEvent => call(params, |c| handler.create_event(c)).await,
         Method::UpdateEvent => call(params, |c| handler.update_event(c)).await,
         Method::DeleteEvent => call(params, |c| handler.delete_event(c)).await,
+        Method::Capabilities => call(params, |c| handler.capabilities(c)).await,
     }
 }
 
@@ -409,5 +420,136 @@ mod tests {
                 .unwrap()
                 .contains("Failed to parse request"),
         );
+    }
+
+    /// D-2's whole compatibility claim is that no provider crate needs
+    /// editing. If the default leaned the other way, every legacy provider
+    /// would be asked to push tasks it silently drops — and no in-tree test
+    /// would notice, because every in-tree provider gets its own override
+    /// eventually.
+    #[tokio::test]
+    async fn an_unmodified_provider_reports_events_only_capabilities() {
+        let response = process_request(&StubHandler, r#"{"command":"capabilities","params":{}}"#)
+            .await;
+
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["status"], "success");
+        assert_eq!(parsed["data"]["events"]["read"], true);
+        assert_eq!(parsed["data"]["events"]["write"], true);
+        assert_eq!(parsed["data"]["tasks"]["read"], false);
+        assert_eq!(parsed["data"]["tasks"]["write"], false);
+    }
+
+    struct TaskWritingHandler;
+
+    #[async_trait]
+    impl Handler for TaskWritingHandler {
+        async fn connect(&self, _cmd: Connect) -> Result<ConnectResponse> {
+            unreachable!()
+        }
+
+        async fn capabilities(&self, _cmd: Capabilities) -> Result<ProviderCapabilities> {
+            Ok(ProviderCapabilities {
+                events: crate::provider::Capability {
+                    read: true,
+                    write: true,
+                },
+                tasks: crate::provider::Capability {
+                    read: true,
+                    write: true,
+                },
+            })
+        }
+    }
+
+    /// The control for the default-events-only tests above: without it,
+    /// hard-coding events-only in `dispatch` would still pass every other
+    /// assertion in this ticket.
+    #[tokio::test]
+    async fn a_provider_may_advertise_task_writes() {
+        let response =
+            process_request(&TaskWritingHandler, r#"{"command":"capabilities","params":{}}"#)
+                .await;
+
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["data"]["tasks"]["write"], true);
+    }
+
+    struct PerRemoteHandler;
+
+    #[async_trait]
+    impl Handler for PerRemoteHandler {
+        async fn connect(&self, _cmd: Connect) -> Result<ConnectResponse> {
+            unreachable!()
+        }
+
+        async fn capabilities(&self, cmd: Capabilities) -> Result<ProviderCapabilities> {
+            let is_task_list = cmd
+                .remote
+                .get("google_resource_kind")
+                .and_then(|v| v.as_str())
+                == Some("tasks");
+
+            Ok(ProviderCapabilities {
+                events: crate::provider::Capability {
+                    read: true,
+                    write: true,
+                },
+                tasks: crate::provider::Capability {
+                    read: is_task_list,
+                    write: is_task_list,
+                },
+            })
+        }
+    }
+
+    /// This is the whole reason the request carries the remote at all. Every
+    /// other test in this ticket passes just as well against a binary-wide
+    /// constant — and a binary-wide constant can only ever return the
+    /// conservative floor, which makes `P4-05`'s Google task-list
+    /// declaration unreachable.
+    #[tokio::test]
+    async fn one_handler_answers_two_remotes_differently() {
+        let calendar_response = process_request(
+            &PerRemoteHandler,
+            r#"{"command":"capabilities","params":{"google_resource_kind":"calendar"}}"#,
+        )
+        .await;
+        let calendar: serde_json::Value = serde_json::from_str(&calendar_response).unwrap();
+
+        let tasks_response = process_request(
+            &PerRemoteHandler,
+            r#"{"command":"capabilities","params":{"google_resource_kind":"tasks"}}"#,
+        )
+        .await;
+        let tasks: serde_json::Value = serde_json::from_str(&tasks_response).unwrap();
+
+        assert_eq!(calendar["data"]["tasks"]["write"], false);
+        assert_eq!(tasks["data"]["tasks"]["write"], true);
+        assert_ne!(calendar["data"]["tasks"], tasks["data"]["tasks"]);
+    }
+
+    /// The guardrail for the test above: per-remote variance must be
+    /// something a provider *opts into*. A default that varied with params
+    /// would make every unmodified provider's answer depend on config it
+    /// never reads.
+    #[tokio::test]
+    async fn the_default_answers_events_only_whatever_the_remote_says() {
+        let calendar_response = process_request(
+            &StubHandler,
+            r#"{"command":"capabilities","params":{"google_resource_kind":"calendar"}}"#,
+        )
+        .await;
+        let calendar: serde_json::Value = serde_json::from_str(&calendar_response).unwrap();
+
+        let tasks_response = process_request(
+            &StubHandler,
+            r#"{"command":"capabilities","params":{"google_resource_kind":"tasks"}}"#,
+        )
+        .await;
+        let tasks: serde_json::Value = serde_json::from_str(&tasks_response).unwrap();
+
+        assert_eq!(calendar["data"], tasks["data"]);
+        assert_eq!(calendar["data"]["tasks"]["write"], false);
     }
 }

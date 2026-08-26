@@ -6,10 +6,34 @@
 //! constructed, and why each `match` carries the wildcard arm that
 //! `#[non_exhaustive]` (`B-4`) requires of every consumer outside the crate.
 
+use caldir_core::provider::ProviderCapabilities;
 use caldir_core::{
     Calendar, CalendarError, CalendarEventError, CalendarItem, ConnectionError, Event, EventError,
     EventTime, ParticipationStatus, RemoteError,
 };
+
+/// D-5's acceptance test for the whole capabilities effort: an out-of-tree
+/// provider (Proton) needs no in-repo source. A `pub(crate)` slip, or a
+/// `#[non_exhaustive]` that blocks struct-literal construction, is invisible
+/// from inside `caldir-core` and fatal from here.
+#[test]
+fn a_downstream_crate_can_name_and_construct_provider_capabilities() {
+    let capabilities = ProviderCapabilities {
+        events: caldir_core::provider::Capability {
+            read: true,
+            write: true,
+        },
+        tasks: caldir_core::provider::Capability {
+            read: true,
+            write: false,
+        },
+    };
+
+    assert!(capabilities.events.read);
+    assert!(capabilities.events.write);
+    assert!(capabilities.tasks.read);
+    assert!(!capabilities.tasks.write);
+}
 
 /// `CalendarError` is the error type of the public `Calendar::events()`,
 /// `Calendar::create()` and `SkippedEvent::error()`. Before the re-export a

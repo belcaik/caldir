@@ -3,8 +3,8 @@ mod error;
 mod event;
 
 use crate::diff::EventChange;
-use crate::provider::ProviderError;
-use crate::{DateRange, Event, Provider, rpc};
+use crate::provider::{ProviderCapabilities, ProviderError};
+use crate::{rpc, DateRange, Event, Provider};
 
 pub use config::{RemoteConfig, RemoteConfigParams};
 pub use error::RemoteError;
@@ -36,6 +36,26 @@ impl Remote {
             .collect();
 
         Ok(events)
+    }
+
+    /// D-2, fail closed: capabilities are fetched fresh on every call
+    /// (never persisted, `ConnectResponse` is unchanged) and every way the
+    /// answer can fail to arrive — transport error, timeout, unknown
+    /// method, unparseable payload — reads as task-less rather than
+    /// propagating an error, so a caller can always gate on the returned
+    /// value. The reason is preserved alongside it for the CLI to surface
+    /// (C-8); `P1-03` is the consumer, `CalendarDiff` never sees a `Remote`.
+    pub async fn capabilities(&self) -> (ProviderCapabilities, Option<RemoteError>) {
+        match self
+            .provider
+            .call(rpc::Capabilities {
+                remote: self.params.clone(),
+            })
+            .await
+        {
+            Ok(capabilities) => (capabilities, None),
+            Err(err) => (ProviderCapabilities::default(), Some(err.into())),
+        }
     }
 
     pub async fn apply_change(
@@ -101,8 +121,14 @@ impl Remote {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::transport::mock_transport::MockTransport;
+    use crate::provider::transport::ProviderTransportError;
+    use crate::provider::ProviderCapabilities;
     use crate::test_utils::{test_event, test_remote};
+    use crate::ProviderSlug;
     use pretty_assertions::assert_eq;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn apply_change_sends_create_event_for_outgoing_create() {
@@ -244,5 +270,56 @@ mod tests {
             .unwrap();
 
         assert_eq!(mock.captured_request::<rpc::DeleteEvent>().event, event);
+    }
+
+    /// D-2's core assertion: every way the answer can fail to arrive reads
+    /// as task-less, and the reason is preserved for the CLI to surface
+    /// (C-8). A test of only the honest reply proves nothing — a provider
+    /// that answers politely was never the hazard.
+    #[tokio::test]
+    async fn a_provider_that_cannot_answer_capabilities_is_read_as_task_less() {
+        let cases: Vec<(&str, Arc<MockTransport>)> = vec![
+            (
+                "transport error",
+                Arc::new(MockTransport::with_error(ProviderTransportError::Io(
+                    std::io::Error::other("pipe closed"),
+                ))),
+            ),
+            (
+                "timeout",
+                Arc::new(MockTransport::with_error(ProviderTransportError::Timeout(
+                    Duration::from_secs(15),
+                ))),
+            ),
+            (
+                "unsupported method",
+                Arc::new(MockTransport::with_response(
+                    r#"{"status":"error","error":"unknown command: capabilities","code":"unsupported_method"}"#,
+                )),
+            ),
+            (
+                "unparseable payload",
+                Arc::new(MockTransport::with_response(
+                    r#"{"status":"success","data":"not an object"}"#,
+                )),
+            ),
+        ];
+
+        for (name, transport) in cases {
+            let provider = Provider::with_transport(ProviderSlug::from("test"), transport);
+            let remote = Remote::new(provider, RemoteConfigParams::new());
+
+            let (capabilities, reason) = remote.capabilities().await;
+
+            assert_eq!(
+                capabilities,
+                ProviderCapabilities::default(),
+                "case {name}: must read as task-less (and claim nothing about events either)"
+            );
+            assert!(
+                reason.is_some(),
+                "case {name}: the reason must be preserved"
+            );
+        }
     }
 }

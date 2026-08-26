@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 pub use methods::{
-    Connect, ConnectResponse, ConnectStepKind, CreateEvent, CredentialField, CredentialsData,
-    DeleteEvent, FieldType, HostedOAuthData, ListCalendars, ListEvents, Method, OAuthData,
-    SetupData, UpdateEvent,
+    Capabilities, Connect, ConnectResponse, ConnectStepKind, CreateEvent, CredentialField,
+    CredentialsData, DeleteEvent, FieldType, HostedOAuthData, ListCalendars, ListEvents, Method,
+    OAuthData, SetupData, UpdateEvent,
 };
 
 pub(crate) use ics::Ics;
@@ -121,8 +121,15 @@ mod tests {
     /// A tripwire, not a smoke test: it must fail the day anyone adds
     /// `create_todo`. Do not relax it to a `>=` check — the exhaustive `match`
     /// is what makes a new variant impossible to add without reading this.
+    ///
+    /// `capabilities` (`P1-02`/D-2) is the one deliberate exception to R52's
+    /// "no new `Method` variant": `Method` is not `#[non_exhaustive]`
+    /// (C-5), so this variant breaks any out-of-tree matcher, Proton
+    /// included, the moment it ships. That is accepted, not an oversight —
+    /// `P1-01`'s graceful-skew path (`ErrorCode::UnsupportedMethod`) is the
+    /// migration story for every provider binary built before this line.
     #[test]
-    fn method_set_is_exactly_the_six_known_verbs() {
+    fn method_set_is_exactly_the_seven_known_verbs() {
         let all = [
             Method::Connect,
             Method::ListCalendars,
@@ -130,6 +137,7 @@ mod tests {
             Method::CreateEvent,
             Method::UpdateEvent,
             Method::DeleteEvent,
+            Method::Capabilities,
         ];
 
         // Exhaustive on purpose: a new variant breaks compilation here first.
@@ -140,7 +148,8 @@ mod tests {
                 | Method::ListEvents
                 | Method::CreateEvent
                 | Method::UpdateEvent
-                | Method::DeleteEvent => {}
+                | Method::DeleteEvent
+                | Method::Capabilities => {}
             }
         }
 
@@ -164,6 +173,7 @@ mod tests {
                 "create_event",
                 "update_event",
                 "delete_event",
+                "capabilities",
             ],
         );
     }

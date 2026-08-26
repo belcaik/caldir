@@ -1,4 +1,5 @@
 use crate::item::CalendarItem;
+use crate::provider::ProviderCapabilities;
 use crate::rpc::ics::ItemIcs;
 use crate::rpc::{ConnectResponse, Ics};
 use crate::{CalendarConfig, Event};
@@ -64,6 +65,7 @@ pub(crate) trait JsonWireValue: Serialize + DeserializeOwned {}
 impl JsonWireValue for () {}
 impl JsonWireValue for CalendarConfig {}
 impl JsonWireValue for ConnectResponse {}
+impl JsonWireValue for ProviderCapabilities {}
 
 impl<T: JsonWireValue> WireValue for T {
     type Wire = Self;

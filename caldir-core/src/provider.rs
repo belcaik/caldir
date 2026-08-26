@@ -1,4 +1,5 @@
 mod account;
+mod capabilities;
 mod error;
 mod handler;
 mod registry;
@@ -15,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use transport::{ProviderTransport, SubprocessTransport};
 
+pub use capabilities::{Capability, ProviderCapabilities};
 pub(crate) use error::ProviderError;
 pub use handler::{Error, Handler, Result, process_request, run_provider};
 pub use registry::ProviderRegistry;
