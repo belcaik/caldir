@@ -59,6 +59,10 @@ caldir connect icloud
 
 This will prompt you to enter your Apple ID and an [app-specific password](https://support.apple.com/en-us/102654) (*not* your main Apple ID password).
 
+### Tasks are untested
+
+iCloud runs the same CalDAV code as the generic provider, so pulling Reminders may work — but caldir has never been tested against a real iCloud account for this, so it isn't a supported feature. Pushing tasks is [not possible on any provider](/#tasks).
+
 ## Outlook
 
 ### Hosted auth (easy)
@@ -95,6 +99,12 @@ caldir connect caldav
 
 You'll be prompted for a server URL, username, and password.
 
+### Tasks
+
+This is the one provider where tasks (`VTODO`) sync. `caldir pull` and `caldir sync` fetch a collection's tasks alongside its events, verified against a real [Radicale](https://radicale.org) server.
+
+Pulling is all caldir does: tasks [cannot be pushed](/#tasks), on this provider or any other.
+
 ## Webcal (public ICS feeds)
 
 Subscribe to any public ICS calendar feed (`webcal://` or `https://` URLs).
@@ -104,6 +114,8 @@ caldir connect webcal
 ```
 
 Webcal subscriptions are **read-only**: you can pull events, but `caldir push` won't modify the remote feed. No credentials are stored — the feed URL itself is the only configuration.
+
+Tasks are not supported here: a `VTODO` in a feed is ignored, and only events are pulled.
 
 Common uses: public holiday calendars, sports schedules, shared team calendars published as ICS feeds.
 

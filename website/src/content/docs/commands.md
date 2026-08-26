@@ -95,6 +95,7 @@ caldir new "Sprint planning" --start 2025-03-22T10:00 --calendar work
 
 - If neither `--end` nor `--duration` is specified, new events default to being 1 hour long.
 - If `default_reminders` is set in your [global config](/configuration), those reminders are added to new events automatically.
+- `caldir new` creates events only. There is no flag for creating a task — tasks arrive by pulling them, or by writing the `.ics` file yourself.
 
 ## `caldir events`
 
@@ -108,7 +109,27 @@ caldir events --from 2025-03-01 --to 2025-03-31  # Custom range
 
 # Events from one calendar
 caldir events --calendar work
+
+# Also list undated tasks, instead of only counting them
+caldir events --undated
 ```
+
+Tasks (`VTODO`) are listed alongside events, anchored on their `DUE` date — falling back to `DTSTART` — with a status box in front of the title:
+
+```
+Fri Aug 14
+    09:00 Standup [work]
+      due [ ] File taxes [personal]
+    17:00 [~] Ship crawler patch [work]
+
++ 2 undated tasks (caldir events --undated)
+```
+
+- `[ ]` not started, `[~]` in progress, `[x]` completed. Completed tasks are still shown, dimmed; overdue ones are red; cancelled tasks are hidden.
+- A date-only `DUE` prints `due` in the time column rather than a clock time — a task is due *by* that day, it doesn't occupy it.
+- A task with neither `DUE` nor `DTSTART` belongs to no day, so it is counted in a dimmed footer instead of being listed. `--undated` (on `events`, `today` and `week`) lists them in a trailing `No date` section instead.
+
+caldir pulls tasks but cannot push them — see [Tasks](/#tasks).
 
 <details>
 <summary>Optional JSON output</summary>
@@ -173,13 +194,65 @@ Returns:
     "last_modified": "2026-08-13T10:11:12Z",
     "sequence": 2,
     "rsvp": "accepted",
-    "recurring": true
+    "recurring": true,
+    "kind": "event",
+    "due": null,
+    "completed": null,
+    "percent_complete": null,
+    "task_status": null
+  }
+]
+```
+
+A task entry has the **same keys** — only the values differ:
+
+```json
+[
+  {
+    "instance_id": "VTODO:assignment-123@u-crawler",
+    "uid": "assignment-123@u-crawler",
+    "calendar": "personal",
+    "title": "Ship crawler patch",
+    "summary": "Ship crawler patch",
+    "all_day": true,
+    "start": null,
+    "end": null,
+    "tzid": null,
+    "location": null,
+    "description": null,
+    "status": "confirmed",
+    "availability": null,
+    "visibility": null,
+    "recurrence": null,
+    "recurrence_id": null,
+    "organizer": null,
+    "attendees": [],
+    "reminders": [],
+    "url": null,
+    "attachments": [],
+    "x_properties": [],
+    "last_modified": null,
+    "sequence": 0,
+    "rsvp": null,
+    "recurring": false,
+    "kind": "todo",
+    "due": "2026-08-15",
+    "completed": "2026-08-15T09:30:00Z",
+    "percent_complete": 100,
+    "task_status": "completed"
   }
 ]
 ```
 
 - `start`/`end` are RFC 3339 timestamps with UTC offset. All-day events use date-only strings, where `end` follows the ICS exclusive-end convention (a one-day event on the 14th has `end` on the 15th).
 - `rsvp` is only set when the event is an invite addressed to the calendar's account.
+- `kind` is `"event"` or `"todo"`. It, along with `due`, `completed`, `percent_complete` and `task_status`, is present on **every** entry — the four task keys are `null` on an event.
+- These five keys were *added*: no existing key was removed, renamed or retyped, and the pre-existing keys keep their order. If your script only wants the stream it got before tasks existed, one predicate gives it back: `select(.kind == "event")`. Dropping the five new keys from that selection (`del(.kind, .due, .completed, .percent_complete, .task_status)`) reproduces the old output byte for byte.
+- `status` still uses the event value set (`confirmed`, `tentative`, `cancelled`). The real state of a task lives in `task_status`: `needs_action`, `in_process`, `completed` or `cancelled`.
+- On a task, `due` is the anchor, `end` is always `null` (a `VTODO` has no end), and `start` and `availability` are `null` unless the task carries a `DTSTART`. `null` on `start`/`availability` never happens for `kind == "event"`.
+- `completed` is encoded like every other timestamp: a UTC `COMPLETED` serializes as RFC 3339 UTC, and a floating one renders in the local zone rather than being given an invented offset.
+- `--json` always includes undated tasks, while the text view only counts them unless you pass `--undated`. The two views deliberately disagree on how many items you see; the JSON is the complete set.
+- A cancelled task is hidden from both views.
 
 </details>
 
@@ -197,6 +270,8 @@ caldir invites --all
 caldir invites --calendar work
 ```
 
+Tasks never appear in the invite list, even with `--all`.
+
 ## `caldir rsvp`
 
 Respond to pending calendar invites. Updates the local ICS file (run `caldir push` afterward to sync your response).
@@ -211,6 +286,8 @@ caldir rsvp ~/caldir/work/2025-03-20T1500__standup.ics decline
 caldir rsvp ~/caldir/work/2025-03-20T1500__standup.ics maybe
 
 ```
+
+Tasks can't be RSVP'd: pointing `caldir rsvp` at a task file fails with an error and leaves the file untouched.
 
 ## `caldir discard`
 
