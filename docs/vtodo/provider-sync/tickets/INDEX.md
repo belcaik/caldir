@@ -154,6 +154,27 @@ zero-task remote response cannot be told from a provider that cannot answer a VT
 `tasks.read=true` tells them apart. A legacy suppression MUST NOT stay active against a provider
 that explicitly advertises safe task support.
 
+**C-7a — `tasks.read=true` is a promise the provider must be able to keep. Precondition on `P3-01`/`P4-05`.**
+Established by `P2-06` (`40f93d9`), which lifted the `suppressed_task_deletes` belt for providers
+advertising `tasks.read`. `P2-06` closed the *local* incomplete-enumeration hazard: a local listing
+known to be incomplete yields `Deletes::Suppressed`, which blocks the delete independently of the
+belt. It could **not** close the *remote* half, because core has no detection signal for it —
+`Connection::diff` trusts `remote_events` wholesale once capabilities resolve.
+
+So: **a provider that advertises `tasks.read=true` and then returns a listing that silently omits
+tasks turns every local VTODO into an incoming delete.** That is C-14's measured scenario — a
+`supported-calendar-component-set` hint omitting `VTODO`, a REPORT that fails while still returning
+`200` — arriving through the capability channel instead.
+
+This is inert today: no shipped provider advertises `tasks.read=true`, so the belt is on
+everywhere. It becomes live the moment `P3-01` lands.
+
+**Binding on `P3-01` and `P4-05`:** a provider may advertise `tasks.read=true` only where it can
+*honestly answer* a task query, and it MUST report a failed or degraded task enumeration as an
+error rather than as an empty list. An empty list is an assertion that the remote holds no tasks.
+Returning one after a failed VTODO REPORT is a data-loss bug, not a graceful degradation — and it
+is the specific bug C-14 forbids gating the REPORT on a hint in order to avoid.
+
 **C-8 — no silent deletion path is acceptable, in either direction.** A provider without task-write
 support preserves local VTODOs. A capability that is absent, unknown, or errored keeps every belt on.
 
