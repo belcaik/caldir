@@ -288,6 +288,95 @@ mod tests {
         );
     }
 
+    /// `W2-C2`: `error::classify` is `Provider::call`'s only production
+    /// caller and had zero test callers — a mutation scrambling four of the
+    /// six §16 match arms left 650/650 tests passing. Drives every wire code
+    /// through the real envelope-to-typed-error path (not `classify` in
+    /// isolation), one assertion per row so a partial match can't pass.
+    #[tokio::test]
+    async fn each_wire_error_code_maps_to_its_specific_provider_error_variant() {
+        struct Case {
+            code: Option<rpc::ErrorCode>,
+            check: fn(&ProviderError) -> bool,
+            name: &'static str,
+        }
+
+        let cases = [
+            Case {
+                code: Some(rpc::ErrorCode::UnsupportedMethod),
+                check: |e| matches!(e, ProviderError::UnsupportedMethod(msg) if msg == "boom"),
+                name: "UnsupportedMethod",
+            },
+            Case {
+                code: Some(rpc::ErrorCode::UnsupportedOperation),
+                check: |e| matches!(e, ProviderError::UnsupportedOperation(msg) if msg == "boom"),
+                name: "UnsupportedOperation",
+            },
+            Case {
+                code: Some(rpc::ErrorCode::MissingAuthScope),
+                check: |e| matches!(e, ProviderError::MissingAuthScope(msg) if msg == "boom"),
+                name: "MissingAuthScope",
+            },
+            Case {
+                code: Some(rpc::ErrorCode::RemoteNotFound),
+                check: |e| matches!(e, ProviderError::RemoteNotFound(msg) if msg == "boom"),
+                name: "RemoteNotFound",
+            },
+            Case {
+                code: Some(rpc::ErrorCode::Conflict),
+                check: |e| matches!(e, ProviderError::Conflict(msg) if msg == "boom"),
+                name: "Conflict",
+            },
+            Case {
+                code: Some(rpc::ErrorCode::SemanticLimitation),
+                check: |e| matches!(e, ProviderError::SemanticLimitation(msg) if msg == "boom"),
+                name: "SemanticLimitation",
+            },
+            Case {
+                code: Some(rpc::ErrorCode::Network),
+                // Pinned specifically (§16's asymmetric row): `Network`
+                // folds into the transport error family, not a second
+                // network-flavoured `ProviderError` variant of its own.
+                check: |e| {
+                    matches!(
+                        e,
+                        ProviderError::Transport(ProviderTransportError::Network(msg))
+                            if msg == "boom"
+                    )
+                },
+                name: "Network",
+            },
+            Case {
+                code: Some(rpc::ErrorCode::Unrecognized),
+                check: |e| matches!(e, ProviderError::Provider(msg) if msg == "boom"),
+                name: "Unrecognized",
+            },
+            Case {
+                code: None,
+                check: |e| matches!(e, ProviderError::Provider(msg) if msg == "boom"),
+                name: "None",
+            },
+        ];
+
+        for case in cases {
+            let response_json = rpc::Response::<()>::error("boom", case.code);
+            let mock = Arc::new(MockTransport::with_response(&response_json));
+            let provider = provider_with_transport(mock);
+
+            let err = provider
+                .call(EchoCommand { value: "x".into() })
+                .await
+                .unwrap_err();
+
+            assert!(
+                (case.check)(&err),
+                "code {:?} (case {}) classified as {err:?}",
+                case.code,
+                case.name
+            );
+        }
+    }
+
     #[tokio::test]
     async fn call_returns_deserialize_error_on_garbage_response() {
         let mock = Arc::new(MockTransport::with_response("not json at all"));
