@@ -62,7 +62,8 @@ async fn task_list_calendar_configs(
     account_email: &str,
     session: &Session,
 ) -> Result<Vec<CalendarConfig>> {
-    if session.require_tasks_scope().is_err() {
+    if let Some(warning) = tasks_scope_warning(session) {
+        eprintln!("{warning}");
         return Ok(Vec::new());
     }
 
@@ -87,4 +88,55 @@ async fn task_list_calendar_configs(
             )
         })
         .collect())
+}
+
+/// The reauthorization warning for a session predating the Tasks scope
+/// (`require_tasks_scope`'s error, prefixed for stderr), or `None` when the
+/// scope is already granted. `None` on the happy path keeps discovery quiet
+/// — a warning that always fires is noise.
+fn tasks_scope_warning(session: &Session) -> Option<String> {
+    session
+        .require_tasks_scope()
+        .err()
+        .map(|err| format!("warning: {err:#}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::{AuthMode, SessionData};
+    use chrono::Utc;
+
+    fn session_with_scopes(scopes: Vec<String>) -> Session {
+        Session::new(
+            "alice@gmail.com",
+            &SessionData {
+                access_token: "a".to_string(),
+                refresh_token: "r".to_string(),
+                expires_at: Utc::now(),
+                auth_mode: AuthMode::Local,
+                granted_scopes: scopes,
+            },
+            AuthMode::Local,
+        )
+    }
+
+    #[test]
+    fn a_missing_tasks_scope_produces_a_warning_naming_the_account_and_the_command() {
+        let session = session_with_scopes(vec![]);
+
+        let warning = tasks_scope_warning(&session).expect("expected a warning");
+
+        assert!(warning.starts_with("warning:"));
+        assert!(warning.contains("alice@gmail.com"));
+        assert!(warning.contains("caldir connect google"));
+    }
+
+    #[test]
+    fn a_session_holding_the_tasks_scope_produces_no_warning() {
+        let session =
+            session_with_scopes(vec!["https://www.googleapis.com/auth/tasks".to_string()]);
+
+        assert!(tasks_scope_warning(&session).is_none());
+    }
 }
