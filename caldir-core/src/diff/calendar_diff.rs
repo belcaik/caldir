@@ -27,6 +27,7 @@ impl CalendarDiff {
         sync_bases: &SyncBases,
         range: &DateRange,
         task_pushes: TaskPushes,
+        task_reads: TaskReads,
     ) -> Self {
         let deletes = if local_listing.is_incomplete() {
             Deletes::Suppressed
@@ -41,6 +42,7 @@ impl CalendarDiff {
             range,
             deletes,
             task_pushes,
+            task_reads,
         )
     }
 
@@ -51,6 +53,7 @@ impl CalendarDiff {
         range: &DateRange,
         deletes: Deletes,
         task_pushes: TaskPushes,
+        task_reads: TaskReads,
     ) -> Self {
         // Keyed by the kind-carrying identity: a VEVENT and a VTODO
         // sharing a UID are two entries on each side, so `.collect()` cannot
@@ -144,9 +147,15 @@ impl CalendarDiff {
 
             if sync_bases.get(&id).is_some() {
                 // Suppressed when the local listing is incomplete, and for
-                // tasks when the remote reported none.
-                let suppressed_by_version_skew =
-                    matches!(item, CalendarItem::Todo(_)) && !remote_reports_tasks;
+                // tasks when the remote reported none — unless the provider
+                // explicitly advertises `tasks.read`, in which case a
+                // zero-task response is a trustworthy answer, not version
+                // skew (C-7). Only `TaskReads::Advertised` lifts this; every
+                // other capability outcome collapses to `NotAdvertised`
+                // upstream (C-8), never here.
+                let suppressed_by_version_skew = matches!(item, CalendarItem::Todo(_))
+                    && !remote_reports_tasks
+                    && task_reads == TaskReads::NotAdvertised;
 
                 // Recorded only where a delete was actually withheld, so the
                 // signal means "the belt cost you something", not merely "the
@@ -284,6 +293,7 @@ impl CalendarDiff {
             range,
             Deletes::Allowed,
             TaskPushes::Withheld,
+            TaskReads::NotAdvertised,
         )
     }
 
@@ -328,6 +338,23 @@ enum Deletes {
 pub(crate) enum TaskPushes {
     Allowed,
     Withheld,
+}
+
+/// Whether the provider advertises `tasks.read` (C-7). Threaded into
+/// `compute_with` the same way `TaskPushes` is: decided by the caller
+/// (`Connection::diff`, from `Remote::capabilities()`) and handed down as an
+/// opaque flag. `CalendarDiff` never sees a `Remote` or a provider name to
+/// derive this itself (C-3).
+///
+/// C-8: only an explicit, successfully-decoded `tasks.read = true` produces
+/// `Advertised`. Absent, unknown-method, errored, timed-out, or explicit
+/// `false` all collapse to `NotAdvertised` upstream — `Remote::capabilities()`
+/// and `Connection::diff` own that collapse; `#[derive(Default)]` on
+/// `Capability` must never be read as `Advertised` here or anywhere else.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TaskReads {
+    Advertised,
+    NotAdvertised,
 }
 
 enum UpdateDirection {
@@ -383,9 +410,14 @@ mod tests {
     use super::*;
     use crate::Event;
     use crate::calendar::{CalendarError, CalendarListing};
+    use crate::connection::Connection;
     use crate::event::{EventInstanceId, EventTime, Status};
-    use crate::test_utils::{test_calendar, test_calendar_event, test_event, test_event_time};
+    use crate::test_utils::{
+        test_caldir, test_calendar, test_calendar_event, test_event, test_event_time,
+        test_mock_provider, test_remote_config, test_remote_params,
+    };
     use crate::todo::{Todo, TodoStatus};
+    use crate::{CalendarConfig, rpc};
     use chrono::{DateTime, TimeZone, Utc};
     use pretty_assertions::assert_eq;
 
@@ -1163,6 +1195,7 @@ mod tests {
             &sync_bases,
             &DateRange::default(),
             TaskPushes::Withheld,
+            TaskReads::NotAdvertised,
         );
 
         let outgoing_deletes: Vec<_> = diff
@@ -1207,6 +1240,7 @@ mod tests {
             &sync_bases,
             &DateRange::default(),
             TaskPushes::Withheld,
+            TaskReads::NotAdvertised,
         );
 
         assert_eq!(
@@ -1551,6 +1585,7 @@ mod tests {
             &DateRange::default(),
             Deletes::Allowed,
             TaskPushes::Allowed,
+            TaskReads::NotAdvertised,
         );
 
         assert_eq!(
@@ -1581,6 +1616,7 @@ mod tests {
             &DateRange::default(),
             Deletes::Allowed,
             TaskPushes::Allowed,
+            TaskReads::NotAdvertised,
         );
 
         assert_eq!(
@@ -1610,6 +1646,7 @@ mod tests {
             &DateRange::default(),
             Deletes::Allowed,
             TaskPushes::Allowed,
+            TaskReads::NotAdvertised,
         );
 
         assert_eq!(
@@ -1637,6 +1674,7 @@ mod tests {
             &DateRange::default(),
             Deletes::Allowed,
             TaskPushes::Withheld,
+            TaskReads::NotAdvertised,
         );
 
         assert_eq!(diff.outgoing, vec![EventChange::Create(event.into())]);
@@ -1659,6 +1697,7 @@ mod tests {
                 &DateRange::default(),
                 Deletes::Allowed,
                 task_pushes,
+                TaskReads::NotAdvertised,
             );
 
             assert_eq!(diff.outgoing, vec![EventChange::Create(event.into())]);
@@ -1681,6 +1720,7 @@ mod tests {
             &DateRange::default(),
             Deletes::Allowed,
             TaskPushes::Allowed,
+            TaskReads::NotAdvertised,
         );
         assert_eq!(diff.withheld_task_pushes, 0);
 
@@ -1688,6 +1728,274 @@ mod tests {
 
         assert!(diff.outgoing.is_empty());
         assert_eq!(diff.withheld_task_pushes(), 0);
+    }
+
+    /// P2-06/C-7, the ticket's deliverable. A provider that explicitly
+    /// advertises `tasks.read` has told core it can honestly enumerate
+    /// tasks, so a zero-task response is a genuine deletion, not version
+    /// skew — the belt must not report a suppression it did not perform.
+    #[test]
+    fn a_task_reading_provider_reporting_no_tasks_deletes_the_local_task() {
+        let (_tmp, calendar) = test_calendar();
+
+        let task = Todo::new("Renew the parking permit");
+        let local_task = CalendarEvent::create(&calendar, task.clone()).unwrap();
+        let event = test_event();
+        let local_event = calendar.create_event(event.clone()).unwrap();
+
+        let mut sync_bases = SyncBases::new();
+        sync_bases.insert_event_base(CalendarItem::from(task.clone()).instance_id(), task.clone());
+
+        // The remote response carries only the (untouched) event — no tasks
+        // at all — which is exactly the shape `tasks.read=true` makes
+        // trustworthy.
+        let diff = CalendarDiff::compute_with(
+            vec![local_task, local_event],
+            vec![RemoteEvent::new(event.clone())],
+            &sync_bases,
+            &DateRange::default(),
+            Deletes::Allowed,
+            TaskPushes::Withheld,
+            TaskReads::Advertised,
+        );
+
+        assert_eq!(
+            diff.incoming,
+            vec![EventChange::Delete(CalendarItem::Todo(task))],
+            "C-7: an advertised tasks.read makes a zero-task response an honest delete",
+        );
+        assert!(
+            !diff.suppressed_task_deletes(),
+            "the belt did not withhold anything here, so the signal must be false",
+        );
+    }
+
+    /// P2-06/C-8, "two guards, not one". `tasks.read=true` lifts the
+    /// version-skew veto; it must not be mistaken for lifting the
+    /// `sync_bases.get(&id).is_some()` guard that actually authorises a
+    /// delete. A task with no base is a never-synced item, not a delete,
+    /// regardless of capability.
+    #[test]
+    fn a_task_reading_provider_still_does_not_delete_a_never_synced_task() {
+        let (_tmp, calendar) = test_calendar();
+        let task = Todo::new("Brand new, never synced");
+        let local_task = CalendarEvent::create(&calendar, task.clone()).unwrap();
+
+        let diff = CalendarDiff::compute_with(
+            vec![local_task],
+            vec![],
+            &SyncBases::new(),
+            &DateRange::default(),
+            Deletes::Allowed,
+            TaskPushes::Allowed,
+            TaskReads::Advertised,
+        );
+
+        assert_eq!(
+            diff.outgoing,
+            vec![EventChange::Create(CalendarItem::Todo(task))],
+            "a never-synced task must become an outgoing create, never a delete",
+        );
+        assert!(!diff.suppressed_task_deletes());
+    }
+
+    /// P2-06/C-8's incomplete-enumeration hazard, the local-listing half:
+    /// `Deletes::Suppressed` already vetoes every delete when the local
+    /// listing is known-incomplete, and that veto must survive a lifted
+    /// task-read belt untouched. Lifting one guard must never be read as
+    /// lifting both (see the never-synced-task test above for the other
+    /// guard).
+    #[test]
+    fn a_task_reading_provider_does_not_delete_tasks_when_the_local_listing_is_incomplete() {
+        let (_tmp, calendar) = test_calendar();
+
+        let task = Todo::new("Renew the parking permit");
+        let local_task_event = CalendarEvent::create(&calendar, task.clone()).unwrap();
+
+        let mut sync_bases = SyncBases::new();
+        sync_bases.insert_event_base(CalendarItem::from(task.clone()).instance_id(), task.clone());
+
+        let mut listing = CalendarListing::default();
+        listing.push_event(local_task_event);
+        listing.push_skipped(
+            calendar.path().join("broken.ics"),
+            CalendarError::MasterNotFound("broken".to_string()),
+        );
+        assert!(listing.is_incomplete());
+
+        // A remote response with no tasks at all, from a provider that
+        // explicitly advertises `tasks.read` — the shape that, absent the
+        // local-listing guard, `a_task_reading_provider_reporting_no_tasks_deletes_the_local_task`
+        // proves core is now willing to read as a real delete.
+        let diff = CalendarDiff::compute_from_listing(
+            listing,
+            vec![],
+            &sync_bases,
+            &DateRange::default(),
+            TaskPushes::Withheld,
+            TaskReads::Advertised,
+        );
+
+        assert!(
+            !diff
+                .incoming
+                .iter()
+                .chain(diff.outgoing.iter())
+                .any(|c| matches!(c, EventChange::Delete(CalendarItem::Todo(_)))),
+            "an unreadable local file must keep every task delete withheld even when \
+tasks.read=true, got incoming {:?} outgoing {:?}",
+            diff.incoming,
+            diff.outgoing,
+        );
+    }
+
+    fn task_reading_calendar_config() -> CalendarConfig {
+        CalendarConfig::new(
+            Some("P2-06 test".to_string()),
+            None,
+            Some(false),
+            Some(test_remote_config("test-provider")),
+        )
+    }
+
+    /// P2-06/C-8, belt-stays-on #1. A capabilities payload with no `tasks`
+    /// object at all — the shape a partially-upgraded provider sends. Reading
+    /// absence as support is the exact deletion C-8 forbids: the belt must
+    /// stay on exactly as it would for an honest `tasks.read=false`.
+    #[tokio::test]
+    async fn an_absent_tasks_read_capability_keeps_the_belt_on() {
+        let (_tmp, caldir) = test_caldir();
+        let mut calendar = caldir
+            .create_calendar("writable-cal", Some(task_reading_calendar_config()))
+            .unwrap();
+
+        let task = Todo::new("Renew the parking permit");
+        let event = test_event();
+        calendar.create_event(task.clone()).unwrap();
+        calendar.create_event(event.clone()).unwrap();
+        calendar
+            .record_sync_bases(vec![
+                CalendarItem::Todo(task.clone()),
+                CalendarItem::Event(event.clone()),
+            ])
+            .unwrap();
+
+        let mock = test_mock_provider();
+        // Older-shape payload: an `events` object, no `tasks` object.
+        mock.reply_raw_data(serde_json::json!({
+            "events": { "read": true, "write": true },
+        }));
+        mock.reply::<rpc::ListEvents>(vec![CalendarItem::Event(event)]);
+        let remote = crate::Remote::new(mock.provider(), test_remote_params());
+
+        let mut connection = Connection::new(calendar, remote);
+        let diff = connection.diff(&DateRange::default()).await.unwrap();
+
+        assert!(
+            !diff
+                .incoming()
+                .iter()
+                .chain(diff.outgoing())
+                .any(|c| matches!(c, EventChange::Delete(CalendarItem::Todo(_)))),
+            "an absent tasks field must not be read as tasks.read=true, got incoming {:?} \
+outgoing {:?}",
+            diff.incoming(),
+            diff.outgoing(),
+        );
+        assert!(
+            diff.suppressed_task_deletes(),
+            "the belt must report that it withheld a delete here",
+        );
+    }
+
+    /// P2-06/C-8, belt-stays-on #2. A capabilities transport failure is the
+    /// mode most likely to be handled with `unwrap_or_default()` — and
+    /// `Default` on `Capability` is `false` for both `read` and `write`; only
+    /// an explicit test says which reading actually shipped.
+    #[tokio::test]
+    async fn an_errored_capability_lookup_keeps_the_belt_on() {
+        use crate::provider::transport::ProviderTransportError;
+
+        let (_tmp, caldir) = test_caldir();
+        let mut calendar = caldir
+            .create_calendar("writable-cal", Some(task_reading_calendar_config()))
+            .unwrap();
+
+        let task = Todo::new("Renew the parking permit");
+        calendar.create_event(task.clone()).unwrap();
+        calendar
+            .record_sync_bases(vec![CalendarItem::Todo(task.clone())])
+            .unwrap();
+
+        let mock = test_mock_provider();
+        mock.reply_error(ProviderTransportError::Io(std::io::Error::other(
+            "pipe closed",
+        )));
+        mock.reply::<rpc::ListEvents>(vec![]);
+        let remote = crate::Remote::new(mock.provider(), test_remote_params());
+
+        let mut connection = Connection::new(calendar, remote);
+        let diff = connection.diff(&DateRange::default()).await.unwrap();
+
+        assert!(
+            !diff
+                .incoming()
+                .iter()
+                .chain(diff.outgoing())
+                .any(|c| matches!(c, EventChange::Delete(CalendarItem::Todo(_)))),
+            "a capabilities transport error must keep the belt on, got incoming {:?} \
+outgoing {:?}",
+            diff.incoming(),
+            diff.outgoing(),
+        );
+        assert!(diff.suppressed_task_deletes());
+    }
+
+    /// P2-06/C-8/C-4, belt-stays-on #3, the real old-binary path. Every
+    /// provider binary installed today answers `capabilities` with
+    /// `unsupported_method` — if that deleted, the first upgrade would delete
+    /// every user's tasks against every un-upgraded provider.
+    #[tokio::test]
+    async fn an_unknown_capabilities_method_keeps_the_belt_on() {
+        use crate::ProviderSlug;
+        use crate::provider::Provider;
+        use crate::provider::transport::mock_transport::MockTransport;
+        use std::sync::Arc;
+
+        let (_tmp, caldir) = test_caldir();
+        let mut calendar = caldir
+            .create_calendar("writable-cal", Some(task_reading_calendar_config()))
+            .unwrap();
+
+        let task = Todo::new("Renew the parking permit");
+        calendar.create_event(task.clone()).unwrap();
+        calendar
+            .record_sync_bases(vec![CalendarItem::Todo(task.clone())])
+            .unwrap();
+
+        let transport = Arc::new(MockTransport::empty());
+        transport.set_response(
+            r#"{"status":"error","error":"unknown command: capabilities","code":"unsupported_method"}"#,
+        );
+        transport.set_response(serde_json::json!({"status": "success", "data": []}).to_string());
+        let provider = Provider::with_transport(ProviderSlug::from("test-provider"), transport);
+        let remote = crate::Remote::new(provider, test_remote_params());
+
+        let mut connection = Connection::new(calendar, remote);
+        let diff = connection.diff(&DateRange::default()).await.unwrap();
+
+        assert!(
+            !diff
+                .incoming()
+                .iter()
+                .chain(diff.outgoing())
+                .any(|c| matches!(c, EventChange::Delete(CalendarItem::Todo(_)))),
+            "an unknown capabilities method must keep the belt on, got incoming {:?} \
+outgoing {:?}",
+            diff.incoming(),
+            diff.outgoing(),
+        );
+        assert!(diff.suppressed_task_deletes());
     }
 
     /// T-27 (R99, A-5). Absence stays meaningful. The remote response is
@@ -2038,6 +2346,7 @@ mod tests {
             &DateRange::default(),
             Deletes::Allowed,
             TaskPushes::Withheld,
+            TaskReads::NotAdvertised,
         );
 
         let via_from_changes = CalendarDiff::from_changes(

@@ -3,7 +3,7 @@ mod error;
 use std::collections::HashMap;
 
 use crate::calendar::{CalendarError, SyncBases};
-use crate::diff::{EventChange, TaskPushes};
+use crate::diff::{EventChange, TaskPushes, TaskReads};
 use crate::event::EventInstanceId;
 use crate::item::CalendarItem;
 use crate::{Calendar, CalendarDiff, CalendarEvent, DateRange, Remote, RemoteEvent};
@@ -48,6 +48,15 @@ impl Connection {
         } else {
             TaskPushes::Withheld
         };
+        // C-7/C-8: only an explicit `tasks.read = true` lifts the version-skew
+        // belt. Every failure mode `Remote::capabilities()` collapses to
+        // `ProviderCapabilities::default()`, whose `tasks.read` is `false` —
+        // read the same as an honest `false` here, no second capability path.
+        let task_reads = if capabilities.tasks.read {
+            TaskReads::Advertised
+        } else {
+            TaskReads::NotAdvertised
+        };
 
         let remote_events = self.remote().list_events(range).await?;
 
@@ -71,6 +80,7 @@ impl Connection {
             sync_bases,
             range,
             task_pushes,
+            task_reads,
         );
 
         if self.read_only() {
