@@ -46,7 +46,7 @@ async fn handle_todo(remote: RemoteConfigParams, todo: Todo) -> Result<Todo> {
         .await
         .with_context(|| format!("Failed to create task: {}", body.title))?;
 
-    todo_from_create_response(todo, response)
+    merge_canonical_task_response(todo, response)
 }
 
 /// Pure request-building half of a task create: the Tasks list-scoped
@@ -64,11 +64,16 @@ fn task_insert_request(
     (google_tasks::tasks_url(task_list_id), body)
 }
 
-/// The response seam: returns the canonical item Google's `insert` response
-/// describes, never the request `todo` unchanged (§7, §15) — but keeps the
-/// local `uid` and every field Google cannot represent, since the caller
-/// overwrites the local `.ics` file with exactly what this returns.
-fn todo_from_create_response(local: Todo, response: google_tasks::Task) -> Result<Todo> {
+/// The response seam, shared by create and update: returns the canonical
+/// item Google's response describes, never the request `todo` unchanged
+/// (§7, §15) — but keeps the local `uid` and every field Google cannot
+/// represent, since the caller overwrites the local `.ics` file with exactly
+/// what this returns. `commands::update_event` reuses this rather than
+/// writing a second merge that can drift from it.
+pub(crate) fn merge_canonical_task_response(
+    local: Todo,
+    response: google_tasks::Task,
+) -> Result<Todo> {
     let canonical = google_tasks::task_to_calendar_item(response)?
         .ok_or_else(|| anyhow!("Google task create response reported the task as deleted"))?;
 
@@ -378,7 +383,7 @@ mod tests {
             hidden: false,
         };
 
-        let returned = todo_from_create_response(local.clone(), response).unwrap();
+        let returned = merge_canonical_task_response(local.clone(), response).unwrap();
 
         assert_eq!(returned.uid, local.uid);
         assert!(returned.x_properties.contains(&XProperty::new(

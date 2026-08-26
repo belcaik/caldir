@@ -7,9 +7,9 @@ mod client;
 mod from_google;
 mod to_google;
 
-pub use client::{Task, insert_task, list_task_lists, list_tasks, tasks_url};
+pub use client::{Task, insert_task, list_task_lists, list_tasks, patch_task, task_url, tasks_url};
 pub use from_google::task_to_calendar_item;
-pub use to_google::{GoogleTaskInsert, ToGoogle};
+pub use to_google::{GoogleTaskInsert, GoogleTaskPatch, ToGoogle, ToGooglePatch};
 
 /// `Todo` has no `x_property()` accessor (that's `Event`-only) — this reads
 /// `x_properties` directly rather than adding one to `caldir-core`.

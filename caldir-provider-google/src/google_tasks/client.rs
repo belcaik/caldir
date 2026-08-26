@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-use super::to_google::GoogleTaskInsert;
+use super::to_google::{GoogleTaskInsert, GoogleTaskPatch};
 
 const TASKLISTS_URL: &str = "https://tasks.googleapis.com/tasks/v1/users/@me/lists";
 
@@ -90,6 +90,11 @@ pub fn tasks_url(task_list_id: &str) -> String {
     format!("https://tasks.googleapis.com/tasks/v1/lists/{task_list_id}/tasks")
 }
 
+/// URL of one task within a list — the PATCH target for an update.
+pub fn task_url(task_list_id: &str, task_id: &str) -> String {
+    format!("{}/{task_id}", tasks_url(task_list_id))
+}
+
 pub async fn list_tasks(access_token: &str, task_list_id: &str) -> Result<Vec<Task>> {
     let response = reqwest::Client::new()
         .get(tasks_url(task_list_id))
@@ -143,4 +148,28 @@ pub async fn insert_task(
         .json()
         .await
         .context("Failed to parse Google Task create response")
+}
+
+/// `tasks.patch` — update one task, addressed by `url` (built by
+/// `task_url`). Never `events().patch()` (§9): this hits
+/// `tasks.googleapis.com`, not `googleapis.com/calendar`.
+pub async fn patch_task(access_token: &str, url: &str, body: &GoogleTaskPatch) -> Result<Task> {
+    let response = reqwest::Client::new()
+        .patch(url)
+        .bearer_auth(access_token)
+        .json(body)
+        .send()
+        .await
+        .context("Failed to update Google Task")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("Failed to update Google Task ({status}): {body}");
+    }
+
+    response
+        .json()
+        .await
+        .context("Failed to parse Google Task update response")
 }

@@ -31,6 +31,46 @@ pub struct GoogleTaskInsert {
     pub completed: Option<String>,
 }
 
+/// Patch-request body for `tasks.patch`. Distinct from `GoogleTaskInsert`:
+/// Google Tasks patch semantics treat an omitted field as "leave alone" and
+/// require an explicit `null` to clear it, so `notes`/`due`/`completed` never
+/// skip serialization here the way the insert body's do.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct GoogleTaskPatch {
+    pub title: String,
+    pub notes: Option<String>,
+    pub status: String,
+    pub due: Option<String>,
+    pub completed: Option<String>,
+}
+
+pub trait ToGooglePatch {
+    /// See `ToGoogle::to_google` — same `zone` parameter, same faithful set,
+    /// patch shape instead of insert shape.
+    fn to_google_patch<Tz: TimeZone>(&self, zone: &Tz) -> GoogleTaskPatch;
+}
+
+impl ToGooglePatch for Todo {
+    fn to_google_patch<Tz: TimeZone>(&self, zone: &Tz) -> GoogleTaskPatch {
+        let status = match self.status {
+            TodoStatus::Completed => "completed",
+            _ => "needsAction",
+        }
+        .to_string();
+
+        GoogleTaskPatch {
+            title: self.summary.clone().unwrap_or_default(),
+            notes: self.description.clone(),
+            status,
+            due: self.due.as_ref().map(|due| due_to_google(due, zone)),
+            completed: self
+                .completed
+                .as_ref()
+                .map(|completed| completed_to_google(completed, zone)),
+        }
+    }
+}
+
 pub trait ToGoogle {
     /// `zone` is the caller's chosen zone, taken explicitly rather than the
     /// function reaching for `chrono::Local` itself — the minimum needed to
