@@ -41,9 +41,9 @@
 //! # One test was renamed
 //!
 //! `T-58`'s pinned name, `renaming_a_local_task_file_updates_the_same_resource`,
-//! is **refused as unreachable** and the gate ships as
-//! [`renaming_a_local_file_updates_the_same_resource_and_never_a_second_one`],
-//! on the VEVENT control. The reason is the R70 gap below. The other five keep
+//! is now reachable and is still **declined, deliberately** — see the refusal
+//! note on [`renaming_a_local_file_updates_the_same_resource_and_never_a_second_one`],
+//! which the gate still ships as, on the VEVENT control. The other five keep
 //! their R105-pinned names.
 //!
 //! # Two forbidden assertions
@@ -88,16 +88,15 @@
 //! R69 is settled only by running these same probes against a real iCloud
 //! account.
 //!
-//! # R70 / R69: what actually round-trips, and what cannot
+//! # R70 / R69: what round-trips, and what still does not
 //!
-//! caldir can **pull** tasks from CalDAV and cannot **push** them. The
-//! outbound RPC field is still `Event` (R70), and `ops::create_event` /
-//! `ops::update_event` take an `Event`, so no task can reach a PUT through
-//! production code — a task push aborts earlier with
-//! `expected 1 event(s) in ICS, found 0`. Consequently every PUT of a task
-//! below is issued by this harness (raw ICS, or bytes from
-//! `Todo::to_ics_string`), never by `ops`, and the pull half alone is
-//! caldir's transport under test. This is stated on each affected gate too.
+//! caldir can now both **pull** and **push** tasks through production code:
+//! `ops::create_event::create_item` / `ops::update_event::update_item` /
+//! `ops::delete_event` are item-typed and kind-aware, so a `Todo` reaches a
+//! real `PUT`/`DELETE` the same way an `Event` does. The gates below this
+//! point exercise that write path directly; the six gates above it predate
+//! it and still seed/mutate tasks with the harness's raw `curl`, which is
+//! noted on each of them individually.
 
 use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
@@ -158,8 +157,15 @@ fn live_gate(test: &str) -> Option<RadicaleServer> {
 // The container
 // ============================================================================
 
-/// Radicale 3.7.6. Pinned by tag because the probe measured this image.
-const IMAGE: &str = "tomsquest/docker-radicale:latest";
+/// Radicale 3.7.6, pinned by digest so a tag repoint can never make a green
+/// gate meaningless or a red one unreproducible. Resolved from
+/// `tomsquest/docker-radicale:latest` on 2026-08-26 via:
+///
+/// ```text
+/// docker pull tomsquest/docker-radicale:latest
+/// docker inspect --format='{{index .RepoDigests 0}}' tomsquest/docker-radicale:latest
+/// ```
+const IMAGE: &str = "tomsquest/docker-radicale@sha256:45f92956a16dc139ab741a56612082723bfd09977b4b97764760532767be7448";
 
 const USERNAME: &str = "testuser";
 const PASSWORD: &str = "testpass";
@@ -683,11 +689,10 @@ fn task_with_uid(items: &[CalendarItem], uid: &str) -> Todo {
 /// values**; nothing here compares PUT bytes against GET bytes (R30), and
 /// nothing looks at an ETag (R31).
 ///
-/// **R70 gap.** The two PUTs are issued by this harness. `ops::create_event`
-/// and `ops::update_event` take an `Event`, so a task cannot reach a PUT
-/// through production code at all — a task push aborts with
-/// `expected 1 event(s) in ICS, found 0`. What is proven live here is caldir's
-/// **pull** path and its codec against a real server, not a caldir push.
+/// **Predates the task write path.** The two PUTs here are issued by this
+/// harness, not by `ops`. What is proven by this gate is caldir's **pull**
+/// path and its codec against a real server; the write path is proven
+/// separately by the production-write-path gates below.
 #[test]
 #[serial_test::serial(radicale)]
 fn a_u_crawler_task_round_trips_through_radicale_preserving_identity_and_semantics() {
@@ -898,10 +903,9 @@ fn get_pass_two_equals_get_pass_one() {
 /// Asserted as an **outcome** (an error, and the task still intact), never as
 /// a status code.
 ///
-/// **R70 gap.** The pair is built the only way it can be: the task is seeded
-/// by the harness, and the push under test is the *event*. caldir cannot push
-/// a task, so the mirror-image case — a task push landing on an event's href —
-/// is unreachable and untested.
+/// **Scope.** The push under test here is the *event*; the mirror-image
+/// case — a task push landing on an event's href — is reachable now that
+/// tasks have a write path, but is not exercised by this gate.
 #[test]
 #[serial_test::serial(radicale)]
 fn pushing_a_same_uid_pair_into_one_collection_surfaces_an_error() {
@@ -1054,14 +1058,16 @@ fn the_server_injects_no_non_x_properties_onto_a_task() {
 /// **T-58, renamed.** A-9 / R103: a local `.ics` rename never creates a second
 /// resource for the same UID; the push updates the one already there.
 ///
-/// **The ticket's name was `renaming_a_local_task_file_updates_the_same_resource`
-/// and is REFUSED as unreachable.** A local rename reaches a CalDAV server
-/// only through a push, and caldir has no push path for a task: the outbound
-/// RPC field is `Event` (R70) and `ops::create_event` / `ops::update_event`
-/// take an `Event`, so a task push aborts with
-/// `expected 1 event(s) in ICS, found 0` long before any href is computed.
-/// Naming this test after a task would assert a capability that does not
-/// exist, so it runs on the VEVENT control and says so.
+/// **The name `renaming_a_local_task_file_updates_the_same_resource` is now
+/// reachable and is still declined, deliberately.** A task push now reaches a
+/// real `PUT` through `ops::update_event::update_item`, so the mechanism
+/// could be re-run on a `Todo`. It is not, because the href in both cases
+/// comes from `event_url(calendar_url, uid)` alone — the local filename never
+/// crosses the provider boundary for either kind (see below) — so a
+/// task-flavoured copy of this gate would re-run the identical assertion
+/// against the identical function and prove nothing a VEVENT run does not
+/// already prove. `updating_summary_due_and_status_updates_the_one_resource`
+/// separately pins the href-stability invariant for tasks under an update.
 ///
 /// What transfers to tasks, and what does not: the href comes from
 /// `event_url(calendar_url, uid)`, which takes the UID and nothing else — the
@@ -1347,4 +1353,370 @@ fn a_same_uid_event_and_task_in_separate_collections_stay_distinct_through_a_tas
 
     let fetched_task = task_with_uid(&pull(&server, "deadlines"), U_CRAWLER_UID);
     assert_eq!(fetched_task.summary.as_deref(), Some("Deadline, updated"));
+}
+
+// ============================================================================
+// P3-07: the release gate — production write paths against real Radicale
+// ============================================================================
+
+/// Parse a single-`VTODO` document into the domain `Todo`. Panics unless the
+/// document holds exactly one `VTODO` — every fixture below does.
+fn todo_from_ics(ics: &str) -> Todo {
+    match CalendarItem::from_single_ics_str(ics).expect("the fixture parses") {
+        CalendarItem::Todo(todo) => todo,
+        other => panic!("the fixture must be a VTODO, got {other:?}"),
+    }
+}
+
+/// `deadlines/assignment-1562539.ics`, byte-identical to
+/// `caldir_core::test_utils::VTODO_COMPLETED_PRODUCTION_ICS` (P1-05). Copied
+/// rather than imported: the core fixture lives behind a `#[cfg(test)]`
+/// private module and cannot cross the crate boundary (the same reason
+/// `P3_06` copied `P1_05_OPEN_TASK_ICS` into `ops::create_event`). This is
+/// production's completed-task shape: `STATUS:COMPLETED` alone, with
+/// **neither** `COMPLETED` nor `PERCENT-COMPLETE` — the R68 Radicale case.
+const P1_05_COMPLETED_TASK_ICS: &str = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+PRODID:-//u_crawler//calendar-sync//EN\r\n\
+BEGIN:VTODO\r\n\
+UID:u_crawler-todo-9002295@u-crawler.local\r\n\
+DTSTAMP:20260701T040020Z\r\n\
+DUE:20260708T035959Z\r\n\
+PRIORITY:1\r\n\
+STATUS:COMPLETED\r\n\
+SUMMARY:Sube aquí tu Certificado: Mentalidad digital\r\n\
+URL:https://lms.example.edu/courses/900222/assignments/9002295\r\n\
+END:VTODO\r\n\
+END:VCALENDAR\r\n";
+
+/// **`CALDAV-1`, R95 clauses 2–3.** The Stage 2 `u_crawler` task, pushed
+/// through caldir's own production create path for the first time in the
+/// project's history — every earlier live gate seeded a task with the
+/// harness's `curl` because no task could reach a `PUT` through production
+/// code before Wave 3. The stored resource is a single-component `VTODO` at
+/// `{uid}.ics`, and `pull` reads back every property R95 clause 2 names.
+#[test]
+#[serial_test::serial(radicale)]
+fn a_u_crawler_task_is_created_on_radicale_through_the_production_write_path() {
+    let Some(server) =
+        live_gate("a_u_crawler_task_is_created_on_radicale_through_the_production_write_path")
+    else {
+        return;
+    };
+
+    server.mkcalendar("deadlines");
+    let collection_url = server.collection_url("deadlines");
+
+    let todo = todo_from_ics(U_CRAWLER_TASK_ICS);
+    block_on(ops::create_event::create_item(
+        USERNAME,
+        PASSWORD,
+        &collection_url,
+        CalendarItem::Todo(todo),
+    ))
+    .expect("the production create lands");
+
+    let filename = format!("{U_CRAWLER_UID}.ics");
+    assert_eq!(
+        server.resource_hrefs("deadlines"),
+        vec![url_to_href(&server.resource_url("deadlines", &filename))],
+        "the collection must hold exactly one resource, at {{uid}}.ics"
+    );
+
+    let stored = server.get_ics("deadlines", &filename);
+    assert!(
+        stored.contains("BEGIN:VTODO"),
+        "the stored resource must be a VTODO, got:\n{stored}"
+    );
+    assert!(
+        !stored.contains("BEGIN:VEVENT"),
+        "CROSS-6: no VTODO push may become a VEVENT anywhere in the chain, got:\n{stored}"
+    );
+
+    let pulled = task_with_uid(&pull(&server, "deadlines"), U_CRAWLER_UID);
+    assert_eq!(pulled.uid.as_str(), U_CRAWLER_UID);
+    assert_eq!(
+        pulled.due,
+        Some(EventTime::DateTimeUtc(
+            "2026-08-15T23:59:00Z".parse().expect("an RFC3339 instant")
+        ))
+    );
+    assert_eq!(
+        pulled.summary.as_deref(),
+        Some("Assignment 3 - Recursive descent parser")
+    );
+    assert_eq!(
+        pulled.description.as_deref(),
+        Some("Submit the parser and a short report via the course portal.")
+    );
+    assert_eq!(
+        pulled.url.as_deref(),
+        Some("https://example.edu/courses/cs101/assignments/123")
+    );
+    assert_eq!(pulled.priority, Some(1));
+    assert_eq!(pulled.status, TodoStatus::Completed);
+    assert_eq!(
+        pulled.completed,
+        Some(EventTime::DateTimeUtc(
+            "2026-08-14T12:00:00Z".parse().expect("an RFC3339 instant")
+        ))
+    );
+}
+
+/// **`CALDAV-7`'s create half.** Create through production, pull, re-push
+/// the pulled item through the production *update* path, pull again — the
+/// two pulled `Todo`s must be `==`. The equality is over **parsed domain
+/// values** (R30: Radicale re-sorts and re-folds, so a byte comparison is
+/// permanently red) and never over an `ETag` (R31: caldir re-stamps
+/// `DTSTAMP` on every serialize, so an ETag moves on every push regardless of
+/// content). This is the sync-base round trip's live proof: a second pull
+/// after a push that changed nothing must converge, not churn.
+#[test]
+#[serial_test::serial(radicale)]
+fn a_created_task_pulled_twice_yields_the_same_task_and_a_repush_changes_nothing() {
+    let Some(server) =
+        live_gate("a_created_task_pulled_twice_yields_the_same_task_and_a_repush_changes_nothing")
+    else {
+        return;
+    };
+
+    server.mkcalendar("deadlines");
+    let collection_url = server.collection_url("deadlines");
+
+    block_on(ops::create_event::create_item(
+        USERNAME,
+        PASSWORD,
+        &collection_url,
+        CalendarItem::Todo(todo_from_ics(U_CRAWLER_TASK_ICS)),
+    ))
+    .expect("the production create lands");
+
+    let first_pull = task_with_uid(&pull(&server, "deadlines"), U_CRAWLER_UID);
+
+    block_on(crate::caldav::ops::update_event::update_item(
+        USERNAME,
+        PASSWORD,
+        &collection_url,
+        CalendarItem::Todo(first_pull.clone()),
+    ))
+    .expect("re-pushing the unchanged pulled item lands");
+
+    let second_pull = task_with_uid(&pull(&server, "deadlines"), U_CRAWLER_UID);
+
+    assert_eq!(
+        first_pull, second_pull,
+        "a repush of an unchanged pulled task must converge, not churn"
+    );
+    assert_eq!(
+        server.resource_hrefs("deadlines").len(),
+        1,
+        "the repush must update the one resource, never add a second one"
+    );
+}
+
+/// **`CALDAV-3`, `CALDAV-4`, `CALDAV-5`, `CALDAV-7`'s update half.** After a
+/// create, update `SUMMARY`, `DUE` and `STATUS:COMPLETED` through the
+/// production update path. The href-count assertion is what catches an
+/// update that silently became a create.
+#[test]
+#[serial_test::serial(radicale)]
+fn updating_summary_due_and_status_updates_the_one_resource() {
+    let Some(server) = live_gate("updating_summary_due_and_status_updates_the_one_resource") else {
+        return;
+    };
+
+    server.mkcalendar("deadlines");
+    let collection_url = server.collection_url("deadlines");
+
+    block_on(ops::create_event::create_item(
+        USERNAME,
+        PASSWORD,
+        &collection_url,
+        CalendarItem::Todo(todo_from_ics(U_CRAWLER_TASK_ICS)),
+    ))
+    .expect("the production create lands");
+
+    let filename = format!("{U_CRAWLER_UID}.ics");
+    let hrefs_before = server.resource_hrefs("deadlines");
+    assert_eq!(
+        hrefs_before,
+        vec![url_to_href(&server.resource_url("deadlines", &filename))]
+    );
+
+    let mut todo = task_with_uid(&pull(&server, "deadlines"), U_CRAWLER_UID);
+    todo.summary = Some("Assignment 3 - resubmission".to_string());
+    todo.due = Some(EventTime::DateTimeUtc(
+        "2026-09-01T23:59:00Z".parse().expect("an RFC3339 instant"),
+    ));
+    todo.status = TodoStatus::Completed;
+    block_on(crate::caldav::ops::update_event::update_item(
+        USERNAME,
+        PASSWORD,
+        &collection_url,
+        CalendarItem::Todo(todo),
+    ))
+    .expect("the production update lands");
+
+    let hrefs_after = server.resource_hrefs("deadlines");
+    assert_eq!(
+        hrefs_after, hrefs_before,
+        "an update must touch the one existing resource, never add a second one"
+    );
+
+    let first_update_pull = task_with_uid(&pull(&server, "deadlines"), U_CRAWLER_UID);
+    assert_eq!(
+        first_update_pull.summary.as_deref(),
+        Some("Assignment 3 - resubmission")
+    );
+    assert_eq!(
+        first_update_pull.due,
+        Some(EventTime::DateTimeUtc(
+            "2026-09-01T23:59:00Z".parse().expect("an RFC3339 instant")
+        ))
+    );
+    assert_eq!(first_update_pull.status, TodoStatus::Completed);
+
+    let second_update_pull = task_with_uid(&pull(&server, "deadlines"), U_CRAWLER_UID);
+    assert_eq!(
+        first_update_pull, second_update_pull,
+        "a second pull after the update must converge, not churn"
+    );
+}
+
+/// **`CALDAV-6`, §8.6's "delete -> pull -> absent".** Create, then delete
+/// through the production delete path. Asserted as an outcome — what the
+/// collection holds — never as an HTTP status.
+#[test]
+#[serial_test::serial(radicale)]
+fn deleting_the_local_task_removes_the_radicale_resource() {
+    let Some(server) = live_gate("deleting_the_local_task_removes_the_radicale_resource") else {
+        return;
+    };
+
+    server.mkcalendar("deadlines");
+    let collection_url = server.collection_url("deadlines");
+
+    block_on(ops::create_event::create_item(
+        USERNAME,
+        PASSWORD,
+        &collection_url,
+        CalendarItem::Todo(todo_from_ics(U_CRAWLER_TASK_ICS)),
+    ))
+    .expect("the production create lands");
+    assert_eq!(server.resource_hrefs("deadlines").len(), 1);
+
+    block_on(ops::delete_event(
+        USERNAME,
+        PASSWORD,
+        &collection_url,
+        U_CRAWLER_UID,
+        ComponentKind::Todo,
+    ))
+    .expect("the production delete lands");
+
+    assert!(
+        server.resource_hrefs("deadlines").is_empty(),
+        "the collection must hold no resource after the delete"
+    );
+
+    let items = pull(&server, "deadlines");
+    assert!(
+        !items
+            .iter()
+            .any(|item| item.uid().as_str() == U_CRAWLER_UID),
+        "the deleted task must be absent from a pull, got {items:?}"
+    );
+}
+
+/// §8.6's "completed VTODO" and "undated VTODO" rows, through a *write*
+/// cycle. `U_CRAWLER_TASK_ICS` (`STATUS:COMPLETED`) and
+/// `UNDATED_COMPLETED_TASK_ICS` (no `DTSTART`, no `DUE`, no `CREATED`) are
+/// both pushed through the production create path and pulled back. This
+/// re-proves the bare-`VTODO` `calendar-query` (RFC 4791 §9.9) through a
+/// write cycle: the undated fixture's only date property is a `COMPLETED`
+/// older than the window start, so a time-ranged query would make a
+/// compliant server omit it — and core would read that absence as a delete
+/// of the user's file.
+#[test]
+#[serial_test::serial(radicale)]
+fn a_completed_and_an_undated_task_survive_the_production_write_paths() {
+    let Some(server) =
+        live_gate("a_completed_and_an_undated_task_survive_the_production_write_paths")
+    else {
+        return;
+    };
+
+    server.mkcalendar("deadlines");
+    let collection_url = server.collection_url("deadlines");
+
+    block_on(ops::create_event::create_item(
+        USERNAME,
+        PASSWORD,
+        &collection_url,
+        CalendarItem::Todo(todo_from_ics(U_CRAWLER_TASK_ICS)),
+    ))
+    .expect("the completed task's production create lands");
+    block_on(ops::create_event::create_item(
+        USERNAME,
+        PASSWORD,
+        &collection_url,
+        CalendarItem::Todo(todo_from_ics(UNDATED_COMPLETED_TASK_ICS)),
+    ))
+    .expect("the undated task's production create lands");
+
+    let items = pull(&server, "deadlines");
+
+    let completed = task_with_uid(&items, U_CRAWLER_UID);
+    assert_eq!(completed.status, TodoStatus::Completed);
+
+    let undated = task_with_uid(&items, UNDATED_COMPLETED_UID);
+    assert_eq!(undated.status, TodoStatus::Completed);
+    assert_eq!(undated.due, None);
+}
+
+/// §8.6's "u_crawler fixture" row and §20's production-fixture-archive
+/// requirement: the `P1-05` fixture, pushed through the production create
+/// path, pulled, re-pushed through the production update path, pulled
+/// again — the two pulls must be `==`. Every mapping claim in this effort is
+/// made against this file rather than a hypothetical, so this is the gate
+/// that runs it against a real server rather than only wiremock.
+#[test]
+#[serial_test::serial(radicale)]
+fn the_production_fixture_round_trips_through_the_write_paths() {
+    let Some(server) = live_gate("the_production_fixture_round_trips_through_the_write_paths")
+    else {
+        return;
+    };
+
+    server.mkcalendar("deadlines");
+    let collection_url = server.collection_url("deadlines");
+    let todo = todo_from_ics(P1_05_COMPLETED_TASK_ICS);
+    let uid = todo.uid.as_str().to_string();
+
+    block_on(ops::create_event::create_item(
+        USERNAME,
+        PASSWORD,
+        &collection_url,
+        CalendarItem::Todo(todo),
+    ))
+    .expect("the P1-05 fixture's production create lands");
+
+    let first_pull = task_with_uid(&pull(&server, "deadlines"), &uid);
+    assert_eq!(first_pull.status, TodoStatus::Completed);
+    assert_eq!(first_pull.completed, None);
+    assert_eq!(first_pull.percent_complete, None);
+
+    block_on(crate::caldav::ops::update_event::update_item(
+        USERNAME,
+        PASSWORD,
+        &collection_url,
+        CalendarItem::Todo(first_pull.clone()),
+    ))
+    .expect("re-pushing the P1-05 fixture through the update path lands");
+
+    let second_pull = task_with_uid(&pull(&server, "deadlines"), &uid);
+    assert_eq!(
+        first_pull, second_pull,
+        "the P1-05 fixture must round-trip identically through create then update"
+    );
 }
