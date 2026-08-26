@@ -3,11 +3,11 @@
 //! These functions are provider-agnostic and can be used by any CalDAV-based
 //! provider (iCloud, generic CalDAV, etc.).
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use caldir_core::{CalendarItem, ComponentKind};
-use http::{Method, Request, Uri};
+use http::{Method, Request, StatusCode, Uri};
 use libdav::caldav::GetCalendarResources;
-use libdav::dav::make_relative_url;
+use libdav::dav::{WebDavError, make_relative_url};
 use libdav::requests::{DavRequest, ParseResponseError};
 
 use crate::caldav::{CalDavClient_, event_url, url_to_href};
@@ -155,7 +155,7 @@ pub(super) async fn find_event_location(
     calendar_url: &str,
     uid: &str,
     kind: ComponentKind,
-) -> Result<EventLocation> {
+) -> Result<EventLocation, LocateError> {
     // Fast path: try {uid}.ics directly
     let uid_href = url_to_href(&event_url(calendar_url, uid));
     if let Some(location) = location_at_href(caldav, calendar_href, &uid_href, kind).await {
@@ -163,10 +163,49 @@ pub(super) async fn find_event_location(
     }
 
     // Fallback: query by UID (handles servers with non-standard resource filenames)
-    caldav
+    match caldav
         .request(FindEventByUid::new(calendar_href, uid, kind))
         .await
-        .context("Failed to find event on server - it may have been deleted")
+    {
+        Ok(location) => Ok(location),
+        Err(WebDavError::BadStatusCode(status)) if status == StatusCode::NOT_FOUND => {
+            Err(LocateError::NotFound)
+        }
+        Err(e) => Err(LocateError::Failed(
+            anyhow::Error::new(e).context("Failed to find event on server"),
+        )),
+    }
+}
+
+/// Why `find_event_location` could not resolve a location — told apart so a
+/// caller can decide whether a failed lookup is a no-op or a real error.
+///
+/// `NotFound` covers both a genuine `404` and the synthesized `BadStatusCode`
+/// a `207 Multi-Status` with no matching `<response>` produces: both mean "no
+/// resource anywhere holds this UID/kind". Anything else — network, 5xx,
+/// auth, a malformed multistatus — is `Failed` and must propagate.
+#[derive(Debug)]
+pub(super) enum LocateError {
+    NotFound,
+    Failed(anyhow::Error),
+}
+
+impl std::fmt::Display for LocateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LocateError::NotFound => write!(f, "event not found on server"),
+            LocateError::Failed(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for LocateError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            LocateError::NotFound => None,
+            LocateError::Failed(e) => Some(e.as_ref()),
+        }
+    }
 }
 
 /// The resource at `href`, but only if it really holds an item of `kind`.
@@ -442,6 +481,7 @@ SUMMARY:File the tax return\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
             kind,
         )
         .await
+        .map_err(anyhow::Error::from)
     }
 
     /// The UID-lookup REPORT body the double received. Panics if none was sent.

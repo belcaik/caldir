@@ -5,7 +5,7 @@ use caldir_core::ComponentKind;
 
 use crate::caldav::{create_caldav_client, url_to_href};
 
-use super::find_event_location;
+use super::{LocateError, find_event_location};
 
 /// Delete an item from a CalDAV calendar.
 ///
@@ -29,10 +29,12 @@ pub async fn delete_event(
 
     let href = match location {
         Ok(loc) => loc.href,
-        Err(_) => {
-            // Event not found on server — treat as already deleted
-            return Ok(());
-        }
+        // Genuinely absent — deleting it already achieved the goal.
+        Err(LocateError::NotFound) => return Ok(()),
+        // The lookup itself failed (network, 5xx, auth, malformed
+        // response) — nothing was deleted or confirmed absent, so this
+        // must surface rather than report a silent success.
+        Err(LocateError::Failed(e)) => return Err(e),
     };
 
     let result = caldav
@@ -55,7 +57,9 @@ pub async fn delete_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::caldav::ops::test_dav::{calendar_url, mount_report, multistatus};
+    use crate::caldav::ops::test_dav::{
+        calendar_url, mount_report, mount_report_status, multistatus,
+    };
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -222,6 +226,38 @@ SUMMARY:Team sync\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
         let deletes = deletes(&server).await;
         assert_eq!(deletes.len(), 1, "exactly one DELETE for an event delete");
         assert_eq!(deletes[0].url.path(), EVENT_HREF);
+    }
+
+    /// A genuine lookup failure — a 500 on the fallback UID-filtered REPORT —
+    /// is not an absence. It must propagate as an error, never as a
+    /// successful delete: nothing was deleted, and nothing was confirmed
+    /// gone.
+    #[tokio::test]
+    async fn a_failed_lookup_reports_an_error_not_a_successful_delete() {
+        let server = MockServer::start().await;
+
+        // No calendar-multiget double: {uid}.ics falls through to the
+        // fallback, which the server fails with a transient 500.
+        mount_report_status(&server, r#"<C:comp-filter name="VTODO">"#, 500).await;
+
+        let result = delete_event(
+            "user",
+            "pass",
+            &calendar_url(&server),
+            "task-1@caldir",
+            ComponentKind::Todo,
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "a genuine lookup failure must not be reported as a successful delete"
+        );
+        assert_eq!(
+            deletes(&server).await.len(),
+            0,
+            "a failed lookup must never trigger a DELETE"
+        );
     }
 
     /// **AC 4 (R60, R61).** The UID-lookup REPORT for a delete is
