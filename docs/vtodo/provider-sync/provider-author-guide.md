@@ -5,10 +5,10 @@ capability declaration against `caldir-core`. You should not need to open
 `caldir-provider-caldav` or `caldir-provider-google` to follow this — that is this document's
 acceptance test (D-5).
 
-This covers **capability declaration and error behaviour end to end.** It does not cover the task
-write lifecycle (create/update/delete RPCs), provider identity metadata, canonicalization rules, or
-a reference implementation — those sections are named below as **`P6-01`, not yet written**, so a
-gap you find here is either that (deliberate) or a bug in this document (not deliberate).
+This covers capability declaration, error behaviour, the task write lifecycle (create/update/delete),
+provider identity metadata, canonicalization rules, and a minimal reference implementation — the
+full contract §17 requires. If you find a gap after reading this file, `capabilities.md`, and
+[`docs/vtodo/spec.md`](../spec.md) in full, it is a bug in this document, not a deliberate omission.
 
 For the VTODO domain model (what a task is, its fields, its identity) see
 [`docs/vtodo/spec.md`](../spec.md). For the sync contract this guide implements against, see
@@ -73,8 +73,9 @@ provider only ever serves one kind of remote, ignore `cmd.remote` and return a c
 1. *What does `capabilities` return if I implement nothing?* `events: { read: true, write: true
    }`, `tasks: { read: false, write: false }` — locked by
    `an_unmodified_provider_reports_events_only_capabilities`.
-2. *What happens to my tasks if I return `tasks.write=false`?* caldir never calls your (not-yet-
-   specified — `P6-01`) task-write RPCs against this remote; your local task data is left alone.
+2. *What happens to my tasks if I return `tasks.write=false`?* caldir never calls your
+   `create_item`/`update_item`/`delete_item` (see "Create contract" etc. below) against this
+   remote; your local task data is left alone.
 3. *What if I return `tasks.write=true` but only implemented create?* Don't. `tasks.write=true` is
    one bit that promises create, update **and** delete are all coherent (§4 of the sync spec); there
    is no partial-support field.
@@ -117,6 +118,116 @@ upgrading caldir against your unmodified binary degrades gracefully instead of b
 providers dispatch through `Handler` and never do), add a wildcard arm defensively; a future verb
 added to `caldir-core` is source-incompatible with an exhaustive match, by design (see
 [`capabilities.md` §7](capabilities.md#7-protocol-versioning-and-old-binary-behaviour)).
+
+## List/pull contract
+
+`list_events` (wire verb `list_events`, type `rpc::ListEvents`) is how caldir asks for everything —
+events and tasks alike — in a window. There is no separate `list_tasks` verb and there will not be
+one: §5 requires the existing item-oriented protocol to be extended rather than duplicated per
+component kind.
+
+```rust
+pub struct ListEvents {
+    pub remote: RemoteConfigParams, // flattened; see "Provider identity metadata" below
+    pub from: String,
+    pub to: String,
+}
+```
+
+You return `Result<Vec<CalendarItem>>`. `CalendarItem` is `Event(Event)` or `Todo(Todo)`
+(`caldir_core::CalendarItem`, `caldir-core/src/item.rs`) — a task is a `VTODO` ICS document on the
+wire exactly like an event is a `VEVENT` one; both travel as plain ICS strings inside the same
+`Vec`. If you advertise `tasks.read=true`, put your `Todo`s in the same vector as your `Event`s;
+caldir sorts identity out on its side by component kind (see "Provider identity metadata" below).
+
+`from`/`to` are advisory bounds, not a hard contract you must filter to exactly. Returning items
+slightly outside the window is harmless — caldir applies its own window logic — but returning
+*fewer* tasks than actually exist inside the window is not: see "tasks.read is a promise" under
+Error behaviour below for why an incomplete answer must be an error, never a short list.
+
+## Create contract
+
+`create_item` (wire verb `create_event`, wire payload key `"event"` — see C-16 above) receives
+`rpc::CreateItem`:
+
+```rust
+pub struct CreateItem {
+    pub remote: RemoteConfigParams,
+    pub event: CalendarItem, // may be Event or Todo
+}
+```
+
+You return `Result<CalendarItem>`. **The return value is not an acknowledgement — it is the item
+that becomes the sync base for this cycle.** After a successful create, `push_outgoing_changes`
+(`caldir-core/src/connection.rs`) writes whatever you returned back over the user's local file and
+records it as the next sync base. Concretely:
+
+- If your remote assigns its own ID, mutates a timestamp, reformats a description, or otherwise
+  changes anything about the item on write, your response must reflect the *post-write* remote
+  state — not an echo of `cmd.event` unchanged. Returning the request unmodified when the remote
+  actually altered it means the next sync compares the local file against a base that doesn't match
+  what the remote holds, and creates a duplicate.
+- The returned item's identity (uid/recurrence-id/kind — see "Provider identity metadata") must
+  match `cmd.event`'s, unless your remote is one of the rare providers that reassigns UIDs
+  server-side; `push_outgoing_changes` looks the original item up by its *pre-write* identity to
+  apply your response, so a returned item with the wrong identity is silently dropped rather than
+  causing an obvious error.
+- See "Canonicalization rules" below for exactly which fields you're allowed to leave untouched
+  versus which you must overwrite from the remote's own response.
+
+If you can't create the item — wrong capability, missing scope, remote rejected the payload —
+return a classified error (see "Error behaviour" below) rather than a best-effort partial write.
+
+## Update contract
+
+`update_item` (wire verb `update_event`) receives `rpc::UpdateItem`, the same two-field shape as
+`CreateItem`. Two rules specific to update:
+
+- **Resolve the target by stored provider identity, never by summary/title or any other mutable
+  field.** The provider's own id — round-tripped through an `X-`-prefixed property, see "Provider
+  identity metadata" — is the only stable handle you have across edits; a task's summary can and
+  will change out from under you between syncs.
+- Return the canonicalized item, exactly as for create: whatever the remote's write actually
+  produced, not `cmd.event` echoed back. The same second-sync-duplicate/silent-drop hazard applies.
+
+## Delete contract
+
+`delete_item` (wire verb `delete_event`) receives `rpc::DeleteItem` (same shape again) and returns
+`Result<()>` — there is no item to canonicalize on a delete.
+
+Resolve the target the same way as update: by stored provider identity. **An already-absent remote
+item is a success, not an error.** If the remote object named by `cmd.event`'s provider id is
+already gone — deleted out-of-band, or a retried delete after a dropped response — return `Ok(())`.
+Treating "not found" as a failure here would leave a task local caldir believes it deleted stuck in
+a retry loop against a remote that has nothing left to delete.
+
+## Provider identity metadata
+
+The RFC `UID` (plus recurrence id, plus `ComponentKind` — see the note below) is caldir's logical
+identity and you never replace it, reuse it for your own resource id, or treat it as optional.
+`CalendarItem::instance_id()` (`caldir-core/src/item.rs`) returns an `EventInstanceId`
+(`caldir-core/src/event/instance_id.rs`) built from exactly those three parts — **identity has three
+parts, not two.** `EventInstanceId::todo(uid, recurrence_id)` sets `ComponentKind::Todo`; an event
+and a task that happen to share a `UID` are still distinct items, because the kind is part of the
+identity, not an afterthought. A guide (or a provider) that treats identity as `(uid,
+recurrence_id)` alone will collide an event and a task that share a UID.
+
+Your own remote-assigned id (a CalDAV href, a Google Task id, whatever your API calls it) does not
+go in the `UID`. It round-trips through an `X-`-prefixed custom property on the `Todo`/`Event`'s
+`x_properties: Vec<XProperty>` (`caldir_core::XProperty`, `caldir-core/src/event/x_property.rs`),
+under a name you own — the shipped convention is `X-{PROVIDER}-{KIND}-ID` (`X-GOOGLE-EVENT-ID`,
+`X-GOOGLE-TASK-ID`), but the naming is yours to choose; nothing else depends on the string. This is
+how you find the right remote object on `update_item`/`delete_item`, and it is why the create
+contract above requires your returned item to carry the property: **if it's missing from the item
+you return from `create_item`, it never reaches the sync base, and the next sync — having no
+provider id to resolve against — creates a duplicate remote object instead of updating the one that
+already exists.**
+
+Remote-scoped settings that aren't part of the task itself (an account id, a task-list id, a
+provider-private feature flag) belong in `RemoteConfigParams` — the free-form, flattened map every
+RPC's `remote` field carries (`caldir_core::RemoteConfigParams`, `caldir-core/src/remote/config.rs`,
+backed by a `BTreeMap<String, toml::Value>`). It is written into the calendar's `[remote]` TOML
+table, and caldir neither validates nor interprets its contents — every key is yours.
 
 ## The six failure classes (§16)
 
@@ -168,6 +279,22 @@ The `unsupported_method` class from the section above is a different thing: it i
 signal that your binary was asked a verb it has never heard of, not one of the six §16 classes, and
 you never produce it yourself.
 
+### `tasks.read=true` is a promise, not a hope
+
+Advertising `tasks.read=true` from `capabilities` (see "Declaring task support" above) is a
+statement that you can honestly answer a task query for that remote. Only advertise it where that's
+true — per remote, not per binary, exactly as §4 requires for `tasks.write`.
+
+**A failed or degraded task enumeration from `list_events` must be a returned error, never an empty
+or partial list.** An empty `Vec<CalendarItem>` is not "no tasks found this time" — it is read as an
+assertion that the remote holds no tasks at all. Because deletes are detected by absence against
+the stored sync base (see [`docs/vtodo/spec.md`](../spec.md) for the sync model), a provider that
+advertises `tasks.read=true` and then returns a short list because of a transient failure causes
+caldir to delete every local task that has a sync base — a class of bug that reads as "sync worked,
+data vanished," not as a visible error. If you cannot complete the enumeration, return
+`Err(classified_error(ErrorCode::Network, ..))` (or whichever class fits) from `list_events`
+instead of returning what you managed to gather.
+
 ## Types you can actually name
 
 Everything above only works if you can name and construct the types involved from outside
@@ -201,20 +328,165 @@ under the path in the `CALDIR_PROVIDER_STORAGE_DIR` environment variable, fallin
 hard-coding it. **Never write inside a calendar directory** — that tree belongs to the user's ICS
 files and caldir's own `.caldir/` sync state, not to your provider's private bookkeeping.
 
-## Not yet written (`P6-01`)
+## Canonicalization rules
 
-This guide and `capabilities.md` are continued by `P6-01`, which will add, in these same two files:
+This is the general rule the create and update contracts above both point at, stated once: **where
+your remote's representation of a task is narrower than caldir's local one — it drops a field,
+rewrites a value, assigns its own timestamp — your `create_item`/`update_item` response must return
+the canonical remote form of everything the remote actually changed, so the stored sync base matches
+what the remote holds and the next sync is quiet.** A base that doesn't match the remote produces
+spurious diffs or duplicate writes on the very next cycle; that's the whole reason the return type
+is an item and not `()`.
 
-- The create, update and delete contracts for tasks (what RPCs you implement, what shape they take,
-  what "coherent" means for `tasks.write=true` beyond the one-bit promise above).
-- Provider identity metadata.
-- Canonicalization rules.
-- A minimal reference provider you can read end to end.
+The safe pattern is: **start from the local item you were asked to write, and overwrite only the
+fields your remote's response actually canonicalizes** — never build the response from the remote's
+reply alone. Fields the remote doesn't touch, doesn't understand, or doesn't echo back must survive
+untouched from the local input; a response assembled purely from what the remote sent back silently
+destroys every field the remote is simply silent about, because whatever you return is written over
+the user's file verbatim.
 
-If you need any of those today, they do not exist yet — this is not a documentation gap to work
-around by reading `caldir-provider-caldav` or `caldir-provider-google` (doing so would defeat the
-reason this guide exists; see D-5 in the provider-sync ticket index if you want the rationale).
+This is not a hypothetical failure mode. A shipped provider once put a task's `STATUS` in the
+"overwrite from remote" list because the remote's create/update response always included a status
+value. The bug: that remote has no equivalent of an "in progress" status, so its API silently
+downgrades anything it doesn't recognize to its own default before ever echoing a value back. The
+response's status field was never new information — it was the remote parroting its own downgrade —
+but naively trusting it meant every task saved locally as in-progress reverted to not-started on
+every single push, because the provider dutifully copied that downgraded value onto the returned
+item's status field instead of keeping the status the user had actually set locally. The fix was to
+special-case exactly the values the remote cannot represent: keep the local value for those, and
+only take the remote's status for the values it genuinely round-trips. Generalized: **before you put
+a field on your "always overwrite from remote" list, ask whether the remote can actually represent
+every value that field can hold — if it can't, the remote's echo for the values it can't represent
+is not information, it's just its own lossy default reflected back at you.**
 
-Provider-specific behaviour for the in-tree providers (Google Tasks mapping, CalDAV specifics) is
-documented separately under `docs/vtodo/provider-sync/providers/`, and is not part of this
-contract — it should never be a prerequisite for implementing your own.
+## A minimal reference provider
+
+A complete `Handler` implementation for a hypothetical provider named `reference`, backed by an
+in-memory store, advertising `tasks.{read,write}=true` and nothing else. It compiles as written
+against the public API named throughout this guide, given a `Cargo.toml` with `caldir-core`,
+`async-trait`, `tokio` (with the `rt-multi-thread` and `macros` features, for `#[tokio::main]`), and
+`uuid` (with the `v4` feature) as dependencies.
+
+```rust
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+use async_trait::async_trait;
+use caldir_core::provider::{
+    self, Capability, ProviderCapabilities, classified_error, run_provider,
+};
+use caldir_core::rpc::{
+    Capabilities, Connect, ConnectResponse, CreateItem, DeleteItem, ErrorCode, ListEvents,
+    UpdateItem,
+};
+use caldir_core::{CalendarItem, Todo, XProperty};
+
+/// The name your compiled binary must carry: caldir discovers providers as
+/// `caldir-provider-{name}` on `PATH` (`PROVIDER_BINARY_PREFIX`,
+/// `provider_slug_from_filename`, `caldir-core/src/provider/slug.rs`). This
+/// binary must therefore be named `caldir-provider-reference`.
+const PROVIDER_ID_PROPERTY: &str = "X-REFERENCE-TASK-ID";
+
+#[derive(Default)]
+struct ReferenceProvider {
+    // Keyed by the provider-assigned id stored in `PROVIDER_ID_PROPERTY`.
+    tasks: Mutex<HashMap<String, Todo>>,
+}
+
+impl ReferenceProvider {
+    fn provider_id(todo: &Todo) -> Option<String> {
+        todo.x_properties
+            .iter()
+            .find(|p| p.name == PROVIDER_ID_PROPERTY)
+            .map(|p| p.value.clone())
+    }
+
+    fn as_todo(event: CalendarItem) -> provider::Result<Todo> {
+        match event {
+            CalendarItem::Todo(todo) => Ok(todo),
+            CalendarItem::Event(_) => Err(classified_error(
+                ErrorCode::UnsupportedOperation,
+                "this reference provider only serves tasks",
+            )),
+        }
+    }
+}
+
+#[async_trait]
+impl provider::Handler for ReferenceProvider {
+    async fn connect(&self, _cmd: Connect) -> provider::Result<ConnectResponse> {
+        Ok(ConnectResponse::Done {
+            account_identifier: Some("reference-account".to_string()),
+            calendars: None,
+        })
+    }
+
+    async fn list_events(&self, _cmd: ListEvents) -> provider::Result<Vec<CalendarItem>> {
+        let tasks = self.tasks.lock().unwrap();
+        Ok(tasks.values().cloned().map(CalendarItem::Todo).collect())
+    }
+
+    async fn create_item(&self, cmd: CreateItem) -> provider::Result<CalendarItem> {
+        let mut todo = Self::as_todo(cmd.event)?;
+        let id = uuid::Uuid::new_v4().to_string();
+        todo.x_properties
+            .retain(|p| p.name != PROVIDER_ID_PROPERTY);
+        todo.x_properties
+            .push(XProperty::new(PROVIDER_ID_PROPERTY, &id));
+
+        self.tasks.lock().unwrap().insert(id, todo.clone());
+        Ok(CalendarItem::Todo(todo))
+    }
+
+    async fn update_item(&self, cmd: UpdateItem) -> provider::Result<CalendarItem> {
+        let todo = Self::as_todo(cmd.event)?;
+        let id = Self::provider_id(&todo).ok_or_else(|| {
+            classified_error(ErrorCode::RemoteNotFound, "task carries no provider id")
+        })?;
+
+        let mut tasks = self.tasks.lock().unwrap();
+        if !tasks.contains_key(&id) {
+            return Err(classified_error(
+                ErrorCode::RemoteNotFound,
+                format!("no task with id {id}"),
+            ));
+        }
+        tasks.insert(id, todo.clone());
+        Ok(CalendarItem::Todo(todo))
+    }
+
+    async fn delete_item(&self, cmd: DeleteItem) -> provider::Result<()> {
+        let todo = Self::as_todo(cmd.event)?;
+        if let Some(id) = Self::provider_id(&todo) {
+            // Already absent is success, not an error — see "Delete contract" above.
+            self.tasks.lock().unwrap().remove(&id);
+        }
+        Ok(())
+    }
+
+    async fn capabilities(&self, _cmd: Capabilities) -> provider::Result<ProviderCapabilities> {
+        Ok(ProviderCapabilities {
+            events: Capability { read: false, write: false },
+            tasks: Capability { read: true, write: true },
+        })
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    run_provider(ReferenceProvider::default()).await;
+}
+```
+
+This omits `list_calendars` (its default already returns a clean "not supported" refusal, which is
+correct for a provider with exactly one implicit task list) and any actual network/disk persistence
+— add both once you have a real remote and a real multi-calendar account model to serve.
+
+## Further reading
+
+Provider-specific behaviour for the two in-tree providers — Google Tasks' field mapping and
+lossiness, CalDAV's property-fidelity table — is documented separately under
+`docs/vtodo/provider-sync/providers/` (`caldav.md`, `google-tasks.md`). It is worked example, not
+prerequisite: nothing in this guide or in `capabilities.md` requires reading either that
+documentation or the `caldir-provider-caldav`/`caldir-provider-google` source to implement your own
+provider's task support.

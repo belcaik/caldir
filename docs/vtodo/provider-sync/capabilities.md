@@ -4,8 +4,9 @@ The task-capability half of the [provider-sync spec](spec.md) (§4, §17), as sh
 `P1-02`. For the VTODO domain model itself (what a task *is*), see
 [`docs/vtodo/spec.md`](../spec.md) — this document does not restate it.
 
-The write lifecycle (create/update/delete contracts, provider identity metadata,
-canonicalization rules) is **`P6-01`, not yet written**. See "Deferred to P6-01" below.
+The write lifecycle itself — create/update/delete contracts, provider identity metadata,
+canonicalization rules, and a reference implementation — lives in the
+[provider-author guide](provider-author-guide.md); this document does not repeat it.
 
 ## 1. The shape
 
@@ -105,7 +106,8 @@ A provider opts into task support — or a per-remote answer of any kind — onl
 A provider MUST NOT return `tasks.write=true` unless create, update **and** delete are implemented
 coherently for tasks (§4). There is no field to declare partial write support (e.g. create-only);
 `tasks.write` is one bit covering all three. The write lifecycle itself — what "implemented
-coherently" requires of each of the three RPCs — is `P6-01`, not yet written.
+coherently" requires of each of the three RPCs — is §9 below and the
+[provider-author guide](provider-author-guide.md).
 
 ## 6. Fail-closed: every way the answer can fail to arrive
 
@@ -206,12 +208,21 @@ Locked by, in order of the claims above:
   used inside a `Handler` implementation (see the provider-author guide); a consumer of `Remote`
   never sees `ErrorCode` directly, only the folded `RemoteError`/fail-closed result.
 
-## Deferred to P6-01
+## 9. What `tasks.write=true` obliges
 
-Continuing these same two files, not yet written:
-- Create, update and delete contracts for tasks.
-- Provider identity metadata.
-- Canonicalization rules.
-- The minimal reference provider.
+§5's one-bit rule stated in §5 above — create, update and delete "implemented coherently" — means,
+concretely: all three of `create_item`, `update_item` and `delete_item` are overridden with real
+remote-write behaviour, each returns the canonicalized item (or, for delete, treats an
+already-absent remote object as success), and each attaches one of the six §16 error classes when
+it cannot complete. A provider that overrides only `create_item` and leaves `update_item`/
+`delete_item` on their trait defaults — a clean `unsupported_operation` refusal — has **not**
+implemented `tasks.write` coherently, and must not return `tasks.write=true`; §5 above already says
+there is no field for declaring partial support, and "coherently" is what that word cashes out to.
 
-See [`spec.md` §17](spec.md) for the full list this ticket and `P6-01` jointly satisfy.
+The full contract for each of the three RPCs — request/response shapes, the canonicalization rule,
+provider identity metadata, the error classes, and a complete reference `Handler` — is in the
+[provider-author guide](provider-author-guide.md#listpull-contract) starting at "List/pull
+contract". Read it before overriding any of the three.
+
+See [`spec.md` §17](spec.md) for the full contract-documentation list this file and the
+provider-author guide jointly satisfy.
