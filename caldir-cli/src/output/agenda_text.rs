@@ -3,7 +3,7 @@ use chrono::{Duration, NaiveDate, Utc};
 use owo_colors::OwoColorize;
 
 use crate::output::TextRender;
-use crate::output::agenda::{AgendaEntry, AgendaView, anchor};
+use crate::output::agenda::{Agenda, AgendaEntry, AgendaView, IncompleteCalendar, anchor};
 use crate::output::event::{format_event_line, format_task_line, render_participation_status};
 use crate::output::time::{format_date_label, local_date};
 
@@ -15,6 +15,50 @@ struct DisplayLine<'a> {
     day: NaiveDate,
     anchor: &'a EventTime,
     entry: &'a AgendaEntry,
+}
+
+impl TextRender for Agenda {
+    fn to_text(&self) -> String {
+        let mut lines = incomplete_lines(&self.incomplete);
+
+        if lines.is_empty() {
+            return self.view.to_text();
+        }
+
+        lines.push(String::new());
+        lines.push(self.view.to_text());
+        lines.join("\n")
+    }
+}
+
+/// R77 made visible on the agenda surfaces, not only under `doctor`.
+///
+/// Built *before* the body, and prepended rather than appended, so an agenda
+/// that is empty **because** of the skip still says why — the same reason the
+/// diff's withheld-delete notice is evaluated before its "No changes" test.
+/// Existing colour roles only: the same `⚠` in the same yellow, and the same
+/// parenthesised "run this next" hint the undated footer uses.
+///
+/// Empty when every calendar listed in full, so a clean agenda gains nothing —
+/// not even a trailing blank line (C13).
+fn incomplete_lines(incomplete: &[IncompleteCalendar]) -> Vec<String> {
+    incomplete
+        .iter()
+        .map(|calendar| {
+            let noun = if calendar.skipped == 1 {
+                "file"
+            } else {
+                "files"
+            };
+            format!(
+                "{} {} unreadable {} in {} (caldir doctor)",
+                "⚠".yellow(),
+                calendar.skipped,
+                noun,
+                calendar.calendar.as_deref().unwrap_or("(Unknown calendar)"),
+            )
+        })
+        .collect()
 }
 
 impl TextRender for AgendaView {
@@ -793,6 +837,136 @@ mod tests {
                 range_end: today,
             }
             .to_text()
+        );
+    }
+
+    fn event_only_view(today: NaiveDate) -> AgendaView {
+        AgendaView {
+            time_format: TimeFormat::H24,
+            undated: false,
+            entries: vec![entry(
+                Event::new("Sprint demo", EventTime::Date(today)),
+                None,
+            )],
+            range_start: today,
+            range_end: today,
+        }
+    }
+
+    /// F2 (R77). `Calendar::events` degrades per file instead of aborting, and
+    /// `CalendarListing` records every skip so that nothing is lost silently —
+    /// but before this the agenda was the one surface that dropped the record
+    /// on the floor, leaving `events`/`today`/`week` quietly partial with exit
+    /// 0. The notice names the calendar, counts the files, and points at the
+    /// command that spells out why each one failed.
+    #[test]
+    fn an_unreadable_file_is_named_above_the_agenda() {
+        let today = chrono::Local::now().date_naive();
+
+        let agenda = Agenda {
+            view: event_only_view(today),
+            incomplete: vec![IncompleteCalendar {
+                calendar: Some("work".to_string()),
+                skipped: 1,
+            }],
+        };
+
+        assert_eq!(
+            agenda.to_text(),
+            concat!(
+                "\u{1b}[33m⚠\u{1b}[39m 1 unreadable file in work (caldir doctor)\n",
+                "\n",
+                "\u{1b}[1mToday\u{1b}[0m\n",
+                "  all-day Sprint demo \u{1b}[2m[work]\u{1b}[0m",
+            )
+        );
+    }
+
+    /// The count is a count, not a plural template with a number in it — and
+    /// one notice per calendar, so a two-calendar run cannot pool the blame on
+    /// whichever one happened to be listed first.
+    #[test]
+    fn every_incomplete_calendar_gets_its_own_counted_notice() {
+        let today = chrono::Local::now().date_naive();
+
+        let agenda = Agenda {
+            view: event_only_view(today),
+            incomplete: vec![
+                IncompleteCalendar {
+                    calendar: Some("work".to_string()),
+                    skipped: 2,
+                },
+                IncompleteCalendar {
+                    calendar: None,
+                    skipped: 1,
+                },
+            ],
+        };
+
+        assert_eq!(
+            agenda.to_text(),
+            concat!(
+                "\u{1b}[33m⚠\u{1b}[39m 2 unreadable files in work (caldir doctor)\n",
+                "\u{1b}[33m⚠\u{1b}[39m 1 unreadable file in (Unknown calendar) (caldir doctor)\n",
+                "\n",
+                "\u{1b}[1mToday\u{1b}[0m\n",
+                "  all-day Sprint demo \u{1b}[2m[work]\u{1b}[0m",
+            )
+        );
+    }
+
+    /// The empty case is the one that used to lie the loudest: every event in
+    /// the calendar lived in the file that could not be read, so "No events
+    /// found" was the whole output. The notice is built before the body, so it
+    /// survives that.
+    #[test]
+    fn an_agenda_emptied_by_a_skip_still_says_so() {
+        let today = chrono::Local::now().date_naive();
+
+        let agenda = Agenda {
+            view: AgendaView {
+                time_format: TimeFormat::H24,
+                undated: false,
+                entries: Vec::new(),
+                range_start: today,
+                range_end: today,
+            },
+            incomplete: vec![IncompleteCalendar {
+                calendar: Some("work".to_string()),
+                skipped: 1,
+            }],
+        };
+
+        assert_eq!(
+            agenda.to_text(),
+            concat!(
+                "\u{1b}[33m⚠\u{1b}[39m 1 unreadable file in work (caldir doctor)\n",
+                "\n",
+                "\u{1b}[2mNo events found\u{1b}[0m",
+            )
+        );
+    }
+
+    /// C13, at the seam the notice was added to: a calendar that listed in
+    /// full renders the view's own bytes and nothing else — no header, no
+    /// leading blank line, no trailing one. `Agenda` must be transparent when
+    /// there is nothing to report.
+    #[test]
+    fn a_complete_agenda_renders_the_view_byte_for_byte() {
+        let today = chrono::Local::now().date_naive();
+
+        let agenda = Agenda {
+            view: event_only_view(today),
+            incomplete: Vec::new(),
+        };
+
+        assert_eq!(agenda.to_text(), event_only_view(today).to_text());
+        assert_eq!(
+            agenda.to_text(),
+            concat!(
+                "\u{1b}[1mToday\u{1b}[0m\n",
+                "  all-day Sprint demo \u{1b}[2m[work]\u{1b}[0m",
+            )
         );
     }
 }

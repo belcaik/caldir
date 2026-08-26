@@ -3,7 +3,7 @@ use caldir_core::Caldir;
 use caldir_core::DateBounds;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 
-use crate::output::agenda::AgendaView;
+use crate::output::agenda::Agenda;
 use crate::utils::parse_date;
 use crate::utils::{require_calendars, resolve_calendars};
 
@@ -13,7 +13,7 @@ pub fn run(
     from: Option<String>,
     to: Option<String>,
     undated: bool,
-) -> Result<AgendaView> {
+) -> Result<Agenda> {
     require_calendars(caldir)?;
 
     let calendars = resolve_calendars(caldir, calendar.as_deref())?;
@@ -26,7 +26,7 @@ pub fn run(
         to.as_deref(),
     )?;
 
-    AgendaView::collect(caldir, calendars, from, to, undated)
+    Agenda::collect(caldir, calendars, from, to, undated)
 }
 
 fn resolve_range<Tz: TimeZone>(

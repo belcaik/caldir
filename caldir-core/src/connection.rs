@@ -65,15 +65,7 @@ impl Connection {
 
     // pull
     pub fn apply_incoming_diff(&mut self, diff: &CalendarDiff) -> Result<(), ConnectionError> {
-        let mut events_by_instance_id: HashMap<EventInstanceId, CalendarEvent> = self
-            .local
-            .events()?
-            .into_events()
-            .into_iter()
-            // Keyed by the kind-carrying identity (R36), so a task is
-            // reachable here and an event/task UID pair never collides.
-            .map(|e| (e.item().instance_id(), e))
-            .collect();
+        let mut events_by_instance_id = self.events_by_instance_id()?;
 
         let mut sync_bases = Vec::new();
 
@@ -93,12 +85,21 @@ impl Connection {
         Ok(())
     }
 
-    // push
-    pub async fn apply_outgoing_diff(
-        &mut self,
-        diff: &CalendarDiff,
-    ) -> Result<(), ConnectionError> {
-        let mut events_by_instance_id: HashMap<EventInstanceId, CalendarEvent> = self
+    /// Refuse the whole outgoing push if it holds a change the wire cannot
+    /// carry — before anything is sent, and before a caller renders the diff
+    /// as work about to happen.
+    ///
+    /// Public so `caldir push` can ask *first* and not paint a refused item
+    /// with the green `+` that means "pushed". `apply_outgoing_diff` runs the
+    /// same guard regardless, so skipping this can never push a partial diff.
+    pub fn check_outgoing(&self, diff: &CalendarDiff) -> Result<(), ConnectionError> {
+        refuse_unpushable(diff, &self.events_by_instance_id()?)
+    }
+
+    fn events_by_instance_id(
+        &self,
+    ) -> Result<HashMap<EventInstanceId, CalendarEvent>, ConnectionError> {
+        Ok(self
             .local
             .events()?
             .into_events()
@@ -106,7 +107,15 @@ impl Connection {
             // Keyed by the kind-carrying identity (R36), so a task is
             // reachable here and an event/task UID pair never collides.
             .map(|e| (e.item().instance_id(), e))
-            .collect();
+            .collect())
+    }
+
+    // push
+    pub async fn apply_outgoing_diff(
+        &mut self,
+        diff: &CalendarDiff,
+    ) -> Result<(), ConnectionError> {
+        let mut events_by_instance_id = self.events_by_instance_id()?;
 
         let mut sync_bases = Vec::new();
 
@@ -128,15 +137,7 @@ impl Connection {
 
     // discard
     pub fn discard_outgoing_diff(&self, diff: &CalendarDiff) -> Result<(), ConnectionError> {
-        let mut events_by_instance_id: HashMap<EventInstanceId, CalendarEvent> = self
-            .local
-            .events()?
-            .into_events()
-            .into_iter()
-            // Keyed by the kind-carrying identity (R36), so a task is
-            // reachable here and an event/task UID pair never collides.
-            .map(|e| (e.item().instance_id(), e))
-            .collect();
+        let mut events_by_instance_id = self.events_by_instance_id()?;
 
         for change in diff.outgoing() {
             match change {
@@ -239,11 +240,7 @@ fn same_uid_pair(diff: &CalendarDiff) -> Option<EventUid> {
     let mut kinds_by_uid: HashMap<&EventUid, ComponentKind> = HashMap::new();
 
     for change in diff.outgoing() {
-        // The item the change *writes*: an update's `to`, never its `from`.
-        let item = match change {
-            EventChange::Create(item) | EventChange::Delete(item) => item,
-            EventChange::Update { to, .. } => to,
-        };
+        let item = written_item(change);
         let kind = item.instance_id().kind();
 
         match kinds_by_uid.insert(item.uid(), kind) {
@@ -255,19 +252,73 @@ fn same_uid_pair(diff: &CalendarDiff) -> Option<EventUid> {
     None
 }
 
+/// The item a change *writes*: an update's `to`, never its `from`.
+fn written_item(change: &EventChange) -> &CalendarItem {
+    match change {
+        EventChange::Create(item) | EventChange::Delete(item) => item,
+        EventChange::Update { to, .. } => to,
+    }
+}
+
+/// The first outgoing change the event-only wire cannot carry (R70/R71).
+///
+/// Keyed on the kind, not on the Rust type: anything that is not a `VEVENT`
+/// is refused, so a component kind added later is stopped here rather than
+/// smuggled onto the wire — or, worse, abandoning the changes behind it.
+fn unpushable_item(diff: &CalendarDiff) -> Option<&CalendarItem> {
+    diff.outgoing()
+        .iter()
+        .map(written_item)
+        .find(|item| item.instance_id().kind() != ComponentKind::Event)
+}
+
+/// The whole-push pre-flight, run before *any* RPC.
+///
+/// Both refusals share one reason: a half-pushed calendar is the destructive
+/// outcome, so the push either happens completely or not at all.
+///
+/// - R65 — one collection cannot hold a same-UID event/task pair, and at the
+///   same href the server answers a silent `204` overwrite rather than an
+///   error, so it will not protect the user here.
+/// - R70/R71 — the outbound RPC field is an `Event`, so a task aborts the
+///   loop. Aborting *mid-loop* silently abandoned every change queued behind
+///   it, in `read_dir` order, on every run.
+fn refuse_unpushable(
+    diff: &CalendarDiff,
+    events_by_instance_id: &HashMap<EventInstanceId, CalendarEvent>,
+) -> Result<(), ConnectionError> {
+    if let Some(uid) = same_uid_pair(diff) {
+        return Err(ConnectionError::SameUidPair { uid });
+    }
+
+    if let Some(item) = unpushable_item(diff) {
+        let unpushable = diff
+            .outgoing()
+            .iter()
+            .filter(|change| written_item(change).instance_id().kind() != ComponentKind::Event)
+            .count();
+
+        return Err(ConnectionError::UnpushableTask {
+            uid: item.uid().clone(),
+            // A delete's file is already gone; the message falls back to the
+            // UID rather than inventing a path.
+            file: events_by_instance_id
+                .get(&item.instance_id())
+                .map(|e| e.path().to_path_buf()),
+            pending: diff.outgoing().len() - unpushable,
+        });
+    }
+
+    Ok(())
+}
+
 async fn push_outgoing_changes(
     remote: &Remote,
     diff: &CalendarDiff,
     events_by_instance_id: &mut HashMap<EventInstanceId, CalendarEvent>,
     sync_bases: &mut Vec<CalendarItem>,
 ) -> Result<(), ConnectionError> {
-    // Before *any* RPC (R65): one collection cannot hold a same-UID
-    // event/task pair, and a half-pushed pair is the destructive outcome —
-    // at the same href the server answers a silent `204` overwrite rather
-    // than an error, so it will not protect the user here.
-    if let Some(uid) = same_uid_pair(diff) {
-        return Err(ConnectionError::SameUidPair { uid });
-    }
+    refuse_unpushable(diff, events_by_instance_id)?;
 
     for change in diff.outgoing() {
         if let Some(remote_event) = remote.apply_change(change).await? {
@@ -745,6 +796,12 @@ mod tests {
     /// **no VEVENT is synthesized for a task anywhere in the chain**. Proven
     /// end to end here — real scan, real diff, real apply — by the transport
     /// having seen nothing at all.
+    ///
+    /// The *error* the user reads changed with the pre-flight guard: the abort
+    /// now happens before the loop, so this seam reports the refusal, not the
+    /// wire's arity message. The arity message is unchanged and still locked
+    /// where it is raised — `remote::tests::
+    /// a_task_change_aborts_instead_of_reaching_the_provider`.
     #[tokio::test]
     async fn a_task_push_aborts_and_never_reaches_the_provider_as_a_vevent() {
         let (_tmp, mock, mut connection) = writable_connection();
@@ -757,13 +814,12 @@ mod tests {
             .await
             .expect_err("a task must never be pushed over the event-only wire");
 
-        let ConnectionError::Remote(remote_err) = err else {
-            panic!("expected a remote error, got {err:?}");
+        let ConnectionError::UnpushableTask { uid, file, pending } = &err else {
+            panic!("expected the pre-flight refusal, got {err:?}");
         };
-        assert_eq!(
-            remote_err.to_string(),
-            "expected 1 event(s) in ICS, found 0"
-        );
+        assert_eq!(uid, &todo.uid);
+        assert_eq!(file.as_deref(), Some(path.as_path()));
+        assert_eq!(*pending, 0, "the task was the only outgoing change");
 
         assert!(
             !mock.received_a_request(),
@@ -778,11 +834,19 @@ mod tests {
     }
 
     /// `T-50` — R56, the first accepted skew failure: **new core + old
-    /// provider**. Pinned as a *failure*, never a quiet no-op. A task in the
-    /// outgoing set aborts the rest of that calendar's push, and the accepted
-    /// price is "ugly", not "destructive": every local file survives byte-for-
-    /// byte-equivalent, the delete queued behind the task never reaches the
-    /// wire, and the base recorded before the abort is still flushed (AC 4).
+    /// provider**. Pinned as a *failure*, never a quiet no-op.
+    ///
+    /// This test used to pin the *partial* abort: the first event really was
+    /// created remotely and its base flushed, then the task aborted the loop
+    /// and everything behind it was abandoned. QA reproduced the consequence
+    /// against Radicale — 6 events + 1 task edit, 4 pushed, 2 silently
+    /// abandoned, in `read_dir` order — so what it pinned was the defect.
+    ///
+    /// The contract now: the task fails the calendar **whole**. Nothing is
+    /// pushed, no base is flushed for anything, and the delete queued behind
+    /// the task is still pending rather than lost. Every no-data-loss
+    /// assertion below is unchanged; the "one event got through" assertions
+    /// became their opposite, which is the fix.
     #[tokio::test]
     async fn pushing_a_task_to_a_task_less_provider_fails_that_calendar_without_data_loss() {
         let (_tmp, mock, mut connection) = writable_connection();
@@ -805,8 +869,8 @@ mod tests {
             .path()
             .to_path_buf();
 
-        // Only the first change ever reaches the wire; queueing exactly one
-        // reply is itself the assertion that the other two do not.
+        // A reply is queued for the event, so the transport *could* accept it.
+        // Nothing may consume it.
         mock.reply::<rpc::CreateEvent>(event.clone());
 
         let diff = CalendarDiff::from_changes(
@@ -824,20 +888,28 @@ mod tests {
 
         let err = result.expect_err("the task push must fail the calendar");
 
-        // `L6-01`/R71: the ugly message is a *contract*, not an accident. The
-        // ADR-07 cut was accepted on the basis that this text is what ships,
-        // so making it nicer here would silently re-open that decision.
-        let ConnectionError::Remote(remote_err) = &err else {
-            panic!("expected a remote error, got {err:?}");
+        // `L6-01`/R71: the pre-flight refusal, not the wire's arity message.
+        // The arity message stays byte-locked where it is raised (`remote::
+        // tests::a_task_change_aborts_instead_of_reaching_the_provider`); a
+        // user who upgraded to fix that string must not be shown its twin.
+        let ConnectionError::UnpushableTask { uid, file, pending } = &err else {
+            panic!("expected the pre-flight refusal, got {err:?}");
         };
+        assert_eq!(uid, &todo.uid);
+        assert_eq!(file.as_deref(), Some(todo_path.as_path()));
         assert_eq!(
-            remote_err.to_string(),
-            "expected 1 event(s) in ICS, found 0"
+            *pending, 2,
+            "the event create and the delete are still pending"
         );
-        // What the user actually reads, via `caldir push`'s renderer.
-        assert_eq!(
-            err.to_string(),
-            "Remote error: expected 1 event(s) in ICS, found 0"
+
+        // What the user actually reads, via `caldir push`'s renderer. It names
+        // the offending file, so the fix is actionable without guesswork.
+        let message = err.to_string();
+        let filename = todo_path.file_name().unwrap().to_string_lossy();
+        assert!(message.contains(&*filename), "got {message:?}");
+        assert!(
+            !message.contains("expected 1 event(s) in ICS"),
+            "got {message:?}"
         );
 
         // Not data loss: both files are still there, and still themselves.
@@ -850,21 +922,21 @@ mod tests {
             "the failed item's file must be byte-identical to before the push",
         );
 
-        // The delete queued behind the task never happened. `captured_request`
-        // asserts the method of the *last* request, so this is exactly "no
-        // DeleteEvent was ever sent".
-        assert_eq!(mock.captured_request::<rpc::CreateEvent>().event, event);
-
-        // AC 4: the base recorded before the abort still reached disk.
-        let reloaded = Calendar::load(connection.local().path()).unwrap();
-        assert_eq!(
-            reloaded.state().sync_base(&event.event_instance_id()),
-            Some(&event),
+        // Nothing at all reached the wire: not the event create ahead of the
+        // task, and not the delete queued behind it.
+        assert!(
+            !mock.received_a_request(),
+            "a refused push may not apply a single change",
         );
 
-        // ...but nothing was recorded for the item that failed, nor for the
-        // delete queued behind it. A base or known-id entry for either would
-        // make the *next* run read the failure as "already synced".
+        // No base for the event either. Recording one for a change that was
+        // never pushed is what would make the *next* run read it as synced.
+        let reloaded = Calendar::load(connection.local().path()).unwrap();
+        let event_id = event.event_instance_id();
+        assert_eq!(reloaded.state().sync_bases().get(&event_id), None);
+        assert!(!reloaded.state().synced_event_ids().contains(&event_id));
+
+        // Same for the item that failed and the delete queued behind it.
         let todo_id = CalendarItem::Todo(todo).instance_id();
         assert_eq!(reloaded.state().sync_bases().get(&todo_id), None);
         assert!(!reloaded.state().synced_event_ids().contains(&todo_id));
@@ -1159,13 +1231,12 @@ END:VJOURNAL\r\nEND:VCALENDAR\r\n";
             .await
             .expect_err("a task delete must never ride the event-only wire");
 
-        let ConnectionError::Remote(remote_err) = err else {
-            panic!("expected a remote error, got {err:?}");
+        // Refused by the pre-flight, so the `Delete` never reaches the loop at
+        // all — which is also why the `unreachable!` below it stays safe.
+        let ConnectionError::UnpushableTask { uid, .. } = &err else {
+            panic!("expected the pre-flight refusal, got {err:?}");
         };
-        assert_eq!(
-            remote_err.to_string(),
-            "expected 1 event(s) in ICS, found 0"
-        );
+        assert_eq!(uid, &task.uid);
 
         assert!(
             !mock.received_a_request(),
@@ -1173,6 +1244,95 @@ END:VJOURNAL\r\nEND:VCALENDAR\r\n";
         );
         assert!(task_path.is_file(), "the local file must survive the abort");
         assert_eq!(CalendarItem::load(&task_path).unwrap(), task.into());
+    }
+
+    /// **L6-01 / QA.** The silent-abandonment lock.
+    ///
+    /// Reproduced against real Radicale: a calendar holding one task plus
+    /// several pending event pushes pushed *some* of the events, aborted on
+    /// the task, and abandoned the rest — silently, and in `read_dir` order,
+    /// so *which* changes survived was arbitrary. Every later run repeated it,
+    /// because the task fails identically forever.
+    ///
+    /// The contract this pins: an outgoing set the event-only wire cannot
+    /// carry is refused **whole, before the first RPC**. Not one change is
+    /// applied, so there is no partial push and nothing to reconcile.
+    ///
+    /// Without the pre-flight guard this test fails on the very first
+    /// assertion: the transport receives the event creates that happen to sort
+    /// before the task.
+    #[tokio::test]
+    async fn a_task_in_the_outgoing_set_refuses_the_whole_push_before_the_first_rpc() {
+        let (_tmp, mock, mut connection) = writable_connection();
+
+        // QA's shape: six event pushes queued behind (and around) one task.
+        let events: Vec<Event> = (0..6)
+            .map(|i| Event::new(format!("Lecture {i}"), test_event_time()))
+            .collect();
+        let todo = Todo::new("Hand in the assignment");
+
+        for event in &events {
+            connection.local().create_event(event.clone()).unwrap();
+        }
+        let todo_path = connection
+            .local()
+            .create_event(todo.clone())
+            .unwrap()
+            .path()
+            .to_path_buf();
+
+        // Replies are queued for every event, so the transport *could* accept
+        // them all. Nothing may consume one.
+        for event in &events {
+            mock.reply::<rpc::CreateEvent>(event.clone());
+        }
+
+        let mut changes: Vec<EventChange> = events
+            .iter()
+            .map(|e| EventChange::Create(e.clone().into()))
+            .collect();
+        // Mid-set, not last: the bug abandoned whatever followed the task.
+        changes.insert(3, EventChange::Create(todo.clone().into()));
+
+        let before = ics_snapshot(connection.local().path());
+
+        let err = connection
+            .apply_outgoing_diff(&CalendarDiff::from_changes(changes, vec![]))
+            .await
+            .expect_err("an outgoing set holding a task must be refused whole");
+
+        assert!(
+            !mock.received_a_request(),
+            "not one change may reach the wire when the push is refused",
+        );
+
+        // The error names the offending item by file, not merely by type.
+        let ConnectionError::UnpushableTask { .. } = &err else {
+            panic!("expected the pre-flight refusal, got {err:?}");
+        };
+        let message = err.to_string();
+        let filename = todo_path.file_name().unwrap().to_string_lossy();
+        assert!(
+            message.contains(&*filename),
+            "the message must name the offending file, got {message:?}",
+        );
+
+        // Distinct from the wire-level arity abort, which stays byte-locked at
+        // the `Remote` seam and must not be what the user reads here.
+        assert!(
+            !message.contains("expected 1 event(s) in ICS"),
+            "the pre-flight refusal must not wear the arity error's message, got {message:?}",
+        );
+
+        // Nothing moved on disk, and no base was recorded for anything: a base
+        // for an event would make the next run read it as already pushed.
+        assert_eq!(ics_snapshot(connection.local().path()), before);
+        let reloaded = Calendar::load(connection.local().path()).unwrap();
+        for event in &events {
+            let id = event.event_instance_id();
+            assert_eq!(reloaded.state().sync_bases().get(&id), None, "{id}");
+            assert!(!reloaded.state().synced_event_ids().contains(&id), "{id}");
+        }
     }
 
     /// **R65.** A same-UID event/task pair is a perfectly good *local*
@@ -1483,6 +1643,16 @@ END:VCALENDAR\r\n";
             .collect();
         snapshot.sort_by(|a, b| a.0.cmp(&b.0));
         snapshot
+    }
+
+    /// `calendar_snapshot` restricted to calendar data. The sync-state file is
+    /// created by the empty-vec flush even on a refused push, and its presence
+    /// is not a change to any event.
+    fn ics_snapshot(path: &std::path::Path) -> Vec<(String, Option<CalendarItem>)> {
+        calendar_snapshot(path)
+            .into_iter()
+            .filter(|(name, _)| name.ends_with(".ics"))
+            .collect()
     }
 
     fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {

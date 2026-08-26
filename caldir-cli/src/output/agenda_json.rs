@@ -7,7 +7,18 @@ use caldir_core::{
 use chrono::SecondsFormat;
 use serde::{Serialize, Serializer};
 
-use crate::output::agenda::{AgendaEntry, AgendaView, anchor};
+use crate::output::agenda::{Agenda, AgendaEntry, AgendaView, anchor};
+
+/// `--json` is the item stream and nothing else: the skipped-file notice is a
+/// text-view affordance, so the schema is byte-identical to before (C13).
+impl Serialize for Agenda {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.view.serialize(serializer)
+    }
+}
 
 impl Serialize for AgendaView {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
@@ -139,8 +150,10 @@ struct ItemJson<'a> {
     due: Option<String>,
     /// `COMPLETED`. `null` on an event.
     completed: Option<String>,
-    /// `PERCENT-COMPLETE`, 0–100. `null` on an event.
-    percent_complete: Option<u8>,
+    /// `PERCENT-COMPLETE`. Normally 0–100, but the raw RFC 5545 `INTEGER` is
+    /// what the task carries: an out-of-range value round-trips verbatim
+    /// rather than being clamped or dropped (F-4). `null` on an event.
+    percent_complete: Option<i32>,
     /// The task's own `STATUS`, which is where the truth lives once `status`
     /// has been mapped onto the event value set. `null` on an event.
     task_status: Option<TodoStatus>,

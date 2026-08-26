@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 pub use config::CalendarConfig;
 pub use error::CalendarError;
 pub use event::{CalendarEvent, CalendarEventError};
-pub use listing::{CalendarListing, SkippedEvent};
+pub use listing::{CalendarListing, ExpandedItems, SkippedEvent};
 pub use state::CalendarState;
 pub(crate) use state::SyncBases;
 
@@ -361,21 +361,37 @@ impl Calendar {
     /// List every item to show for `[from, to)`: events expanded into their
     /// occurrences, tasks as themselves.
     ///
-    /// Tasks are **modelled, never expanded** (R89) and never dated (R46) — a
-    /// recurring task yields its master and nothing else, an undated one
-    /// passes through untouched. They are also not filtered by the range here:
-    /// listing is not window membership (the sync predicate is R44, and
-    /// suppressing a task from a view is the CLI's job, ADR-10), so this path
-    /// is deliberately permissive rather than dropping items it cannot place.
+    /// Tasks are **modelled, never expanded** (R89) — a recurring task yields
+    /// its master and nothing else. They are still *windowed*, by the R44
+    /// predicate `Todo::occurs_in_range`: the window is the query, and the
+    /// `--json` renderer has no second filter behind it, so a task placed
+    /// outside `[from, to)` would otherwise escape the range the caller asked
+    /// for (ADR-10 D5). An **undated** task is unconditionally in-window there
+    /// (R46, INVIOLABLE) — no date is invented to make the predicate work.
     pub fn expanded_events_in_range(
         &self,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
     ) -> Result<Vec<CalendarItem>, CalendarError> {
+        Ok(self.expanded_items_in_range(from, to)?.items)
+    }
+
+    /// `expanded_events_in_range`, plus the `.ics` files it could not read.
+    ///
+    /// A listing is never silently short (R77), and a view that drops the
+    /// skips is exactly that. The caller that shows the items to a user is the
+    /// caller that must show the skips, so the two arrive together.
+    pub fn expanded_items_in_range(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<ExpandedItems, CalendarError> {
+        let (calendar_events, skipped) = self.events()?.into_parts();
+
         let mut events = Vec::new();
         let mut tasks = Vec::new();
 
-        for calendar_event in self.events()?.into_events() {
+        for calendar_event in calendar_events {
             match calendar_event.into_item() {
                 CalendarItem::Event(event) => events.push(event),
                 item => tasks.push(item),
@@ -387,9 +403,14 @@ impl Calendar {
             .map(CalendarItem::Event)
             .collect();
 
-        items.extend(tasks);
+        items.extend(tasks.into_iter().filter(|item| match item {
+            CalendarItem::Todo(todo) => todo.occurs_in_range(from, to),
+            // Unreachable: `events` took every `Event` above. Kept in-window
+            // rather than dropped, so a future item kind is never lost here.
+            CalendarItem::Event(_) => true,
+        }));
 
-        Ok(items)
+        Ok(ExpandedItems { items, skipped })
     }
 
     /// Create a new item in the calendar, of whichever supported kind.
@@ -1454,9 +1475,43 @@ END:VTODO\r\nEND:VCALENDAR\r\n";
         }
     }
 
+    /// F-1 (ADR-10 D5). The window is the query, and `--json` has no second
+    /// filter behind it, so a task whose `DUE` lies outside `[from, to)` must
+    /// not be listed. The undated task in the same calendar is the control:
+    /// R46 makes it unconditionally in-window, and applying a window to tasks
+    /// must never be implemented by inventing a date for it.
+    #[test]
+    fn a_dated_task_outside_the_window_is_not_listed_but_an_undated_one_is() {
+        use crate::test_utils::{VTODO_ICS, write_ics};
+
+        let undated_task = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VTODO\r\nUID:someday@u-crawler\r\nSUMMARY:Read the RFC\r\n\
+END:VTODO\r\nEND:VCALENDAR\r\n";
+
+        let (_tmp, cal) = test_calendar();
+        // DUE 2026-08-15, five months past the window below.
+        write_ics(cal.path(), "assignment-123.ics", VTODO_ICS);
+        write_ics(cal.path(), "someday.ics", undated_task);
+
+        let items = cal
+            .expanded_events_in_range(t(2026, 4, 1, 0, 0), t(2026, 4, 5, 0, 0))
+            .unwrap();
+
+        let summaries: Vec<&str> = items.iter().filter_map(|i| i.summary()).collect();
+        assert_eq!(
+            summaries,
+            vec!["Read the RFC"],
+            "the August task escaped an April window"
+        );
+    }
+
     /// Control (R1/R2): the expansion of an event-only calendar is unchanged —
     /// a recurring master still yields one occurrence per day in the window,
     /// and a task in the same calendar does not disturb them.
+    ///
+    /// The task's `DUE` sits inside the queried window on purpose: since F-1 a
+    /// task outside it is not listed at all, which is a different property
+    /// (pinned above) and would hide the one this test is for.
     #[test]
     fn task_presence_does_not_change_event_expansion() {
         use crate::test_utils::{VTODO_ICS, write_ics};
@@ -1468,7 +1523,8 @@ END:VTODO\r\nEND:VCALENDAR\r\n";
             "FREQ=DAILY",
         ))
         .unwrap();
-        write_ics(cal.path(), "assignment-123.ics", VTODO_ICS);
+        let in_window_task = VTODO_ICS.replace("DUE:20260815T235900Z", "DUE:20260402T235900Z");
+        write_ics(cal.path(), "assignment-123.ics", &in_window_task);
 
         let items = cal
             .expanded_events_in_range(t(2026, 4, 1, 0, 0), t(2026, 4, 4, 0, 0))

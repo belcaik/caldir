@@ -23,6 +23,14 @@ pub enum EventError {
     #[error("event is missing a UID")]
     MissingUid,
 
+    /// A property is present but its value cannot be read. Never a silent drop
+    /// (R19): on a task an unparseable `DUE` would otherwise become "no DUE",
+    /// which R46 makes unconditionally in-window — a typo silently changing an
+    /// item's sync visibility. The event codec's own equivalent stays
+    /// `MissingStart`, which is unreachable for a task (R20), unchanged (R1/R2).
+    #[error("property {name} has an unparseable value: {value}")]
+    UnparseableProperty { name: String, value: String },
+
     #[error("no attendee matching {email}")]
     AttendeeNotFound { email: String },
 }

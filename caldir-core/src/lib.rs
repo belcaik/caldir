@@ -17,7 +17,7 @@ mod test_utils;
 pub use caldir::{Caldir, CaldirConfig, CaldirError, TimeFormat};
 pub use calendar::{
     Calendar, CalendarConfig, CalendarError, CalendarEvent, CalendarEventError, CalendarListing,
-    SkippedEvent,
+    ExpandedItems, SkippedEvent,
 };
 pub use connection::Connection;
 pub use diff::{CalendarDiff, EventChange};

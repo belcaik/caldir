@@ -15,13 +15,21 @@ impl TryFrom<&icalendar::Todo> for Todo {
         // No `MissingStart` mirror: a task legitimately has neither DTSTART nor
         // DUE (R20). `EventTime::from` is what normalizes an inbound TZID to
         // IANA, so both go through it (R21).
-        let start = value.get_start().map(EventTime::from);
-        let due = value.get_due().map(EventTime::from);
+        //
+        // `present_or_unparseable` is what keeps *absent* (legal, `None`) apart
+        // from *present but unreadable* (an error, F-2). The crate leaves the
+        // raw property on the component either way, so without it a malformed
+        // DUE turned a dated task into an undated one — silently, and R46 makes
+        // undated unconditionally in-window.
+        let start =
+            present_or_unparseable(value, "DTSTART", value.get_start().map(EventTime::from))?;
+        let due = present_or_unparseable(value, "DUE", value.get_due().map(EventTime::from))?;
 
         // COMPLETED is read from the raw property: `get_completed()` returns
         // `None` for a non-UTC value while leaving the property in place, so a
         // floating COMPLETED would vanish (R22).
-        let completed = raw_date_time(value, "COMPLETED");
+        let completed =
+            present_or_unparseable(value, "COMPLETED", raw_date_time(value, "COMPLETED"))?;
 
         // STATUS is read from the raw property: `get_status()` silently drops
         // any value outside its own enum. NEEDS-ACTION is the RFC 5545 default
@@ -35,10 +43,10 @@ impl TryFrom<&icalendar::Todo> for Todo {
 
         // PRIORITY raw: `Component::priority()` clamps to 0..=10 and
         // `get_priority()` returns None above it, so an out-of-range value
-        // (legal input, RFC range is 0..=9) would be destroyed.
-        let priority = value
-            .property_value("PRIORITY")
-            .and_then(|p| p.parse().ok());
+        // (legal input, RFC range is 0..=9) would be destroyed. The field is an
+        // `i32` — RFC 5545 `INTEGER` — so `256` and `-1` round-trip rather than
+        // failing to fit the type and vanishing (F-4).
+        let priority = integer_property(value, "PRIORITY")?;
 
         // The same filter events use (R23). Only `X-` properties are
         // captured; nothing else is ever put into a passthrough bag.
@@ -86,10 +94,9 @@ impl TryFrom<&icalendar::Todo> for Todo {
             status,
             completed,
             // Raw, and never synthesized from STATUS — nor STATUS from it
-            // (R68, R46).
-            percent_complete: value
-                .property_value("PERCENT-COMPLETE")
-                .and_then(|p| p.parse().ok()),
+            // (R68, R46). Same `INTEGER` treatment as PRIORITY, so the two
+            // behave identically at the edge (F-4).
+            percent_complete: integer_property(value, "PERCENT-COMPLETE")?,
             priority,
             url: value.property_value("URL").map(ToString::to_string),
             recurrence,
@@ -140,6 +147,38 @@ fn non_empty(s: Option<&str>) -> Option<String> {
 // zoned value survives instead of being dropped by a UTC-only accessor.
 fn raw_date_time(value: &icalendar::Todo, name: &str) -> Option<EventTime> {
     DatePerhapsTime::from_property(value.properties().get(name)?).map(EventTime::from)
+}
+
+// `None` from a reader means one of two very different things: the property was
+// absent, or it was there and could not be read. The crate keeps the raw
+// property in the second case, which is how they are told apart (R19).
+fn present_or_unparseable<T>(
+    value: &icalendar::Todo,
+    name: &str,
+    parsed: Option<T>,
+) -> Result<Option<T>, EventError> {
+    match (parsed, value.properties().get(name)) {
+        (None, Some(property)) => Err(EventError::UnparseableProperty {
+            name: name.to_string(),
+            value: property.value().to_string(),
+        }),
+        (parsed, _) => Ok(parsed),
+    }
+}
+
+// An RFC 5545 `INTEGER` property, read raw and never clamped. Out of the
+// property's own documented range is legal input and round-trips verbatim
+// (R13); not an integer at all is an error, never a silent drop (R19).
+fn integer_property(value: &icalendar::Todo, name: &str) -> Result<Option<i32>, EventError> {
+    value
+        .property_value(name)
+        .map(|raw| {
+            raw.parse().map_err(|_| EventError::UnparseableProperty {
+                name: name.to_string(),
+                value: raw.to_string(),
+            })
+        })
+        .transpose()
 }
 
 #[cfg(test)]
@@ -364,6 +403,112 @@ END:VCALENDAR\r\n";
                 tzid: "Europe/Berlin".to_string(),
             })
         );
+    }
+
+    fn vtodo(body: &str) -> String {
+        format!(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VTODO\r\nUID:t-1@caldir\r\n\
+DTSTAMP:20260801T090000Z\r\n{body}END:VTODO\r\nEND:VCALENDAR\r\n"
+        )
+    }
+
+    fn vevent(body: &str) -> icalendar::Event {
+        let ics = format!(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:e-1@caldir\r\n\
+DTSTAMP:20260801T090000Z\r\n{body}END:VEVENT\r\nEND:VCALENDAR\r\n"
+        );
+        let calendar: icalendar::Calendar = ics.parse().expect("fixture parses");
+        calendar
+            .components
+            .iter()
+            .find_map(icalendar::CalendarComponent::as_event)
+            .expect("one VEVENT")
+            .clone()
+    }
+
+    /// **F-2**, the whole asymmetry in one table. Every one of these values is
+    /// retained on the component by the crate and returns `None` from the
+    /// accessor caldir reads it through, so the pre-fix parser turned each one
+    /// into "property absent" — and for `DUE`/`DTSTART` that silently
+    /// converted a **dated** task into an **undated** one, which R46 makes
+    /// unconditionally in-window. A typo must not move an item's sync
+    /// visibility (R19: no silent drops).
+    ///
+    /// The event control is `errors_when_ical_event_missing_start`: a `VEVENT`
+    /// with `DTSTART:notadate` is `Err(MissingStart)`. Tasks now error too;
+    /// they need their own variant only because an *absent* `DTSTART` is legal
+    /// on a task (R20) and must stay `None`.
+    #[test]
+    fn an_unparseable_property_is_an_error_rather_than_a_silent_drop() {
+        for (name, body) in [
+            ("DUE", "DUE:notadate\r\n"),
+            ("DUE", "DUE:20260815T2359\r\n"),
+            ("DTSTART", "DTSTART:garbage\r\n"),
+            ("COMPLETED", "COMPLETED:oops\r\n"),
+            ("PRIORITY", "PRIORITY:high\r\n"),
+            ("PERCENT-COMPLETE", "PERCENT-COMPLETE:most\r\n"),
+        ] {
+            let ics = vtodo(body);
+            let component = parse_icalendar_todo(&ics);
+
+            // The trap is live: the crate really kept the raw property, so a
+            // parser that dropped it dropped data rather than reading nothing.
+            assert!(
+                component.properties().contains_key(name),
+                "fixture must actually carry {name} for this test to mean anything"
+            );
+
+            let err = Todo::try_from(&component)
+                .expect_err(&format!("{body:?} must not parse into a task"));
+
+            match &err {
+                EventError::UnparseableProperty { name: got, .. } => assert_eq!(got, name),
+                other => panic!("expected UnparseableProperty for {body:?}, got {other:?}"),
+            }
+            assert!(err.to_string().contains(name), "{err}");
+        }
+    }
+
+    /// The one property that stays lenient, and why: the **event** path already
+    /// treats an unparseable `SEQUENCE` as the RFC 5545 default of `0`
+    /// (`event/from_icalendar.rs`, `.and_then(|s| s.parse().ok()).unwrap_or(0)`).
+    /// `SEQUENCE` carries no user data — it is a sync tie-break — and erroring
+    /// on a task where an event shrugs would be the same asymmetry F-2 is
+    /// about, pointing the other way. Both halves are asserted here so the two
+    /// cannot drift apart.
+    #[test]
+    fn an_unparseable_sequence_is_lenient_on_a_task_exactly_as_it_is_on_an_event() {
+        let todo = Todo::try_from(&parse_icalendar_todo(&vtodo("SEQUENCE:x\r\n"))).unwrap();
+        assert_eq!(todo.sequence, 0);
+
+        let event =
+            crate::event::Event::try_from(&vevent("DTSTART:20260810T090000Z\r\nSEQUENCE:x\r\n"))
+                .unwrap();
+        assert_eq!(event.sequence, 0);
+    }
+
+    /// **F-4** (R13 PRIORITY row: *"Out-of-range MUST round-trip verbatim"*).
+    /// `T-15` only ever used `42`, which fits `u8`; the two values that do not
+    /// were dropped. `PERCENT-COMPLETE` is asserted alongside because the two
+    /// raw `INTEGER` fields must behave identically at the edge.
+    #[test]
+    fn an_out_of_range_integer_round_trips_verbatim_rather_than_vanishing() {
+        for (body, priority, percent) in [
+            ("PRIORITY:256\r\n", Some(256), None),
+            ("PRIORITY:-1\r\n", Some(-1), None),
+            ("PERCENT-COMPLETE:250\r\n", None, Some(250)),
+            ("PERCENT-COMPLETE:-5\r\n", None, Some(-5)),
+        ] {
+            let todo = Todo::try_from(&parse_icalendar_todo(&vtodo(body))).unwrap();
+
+            assert_eq!(todo.priority, priority, "{body:?}");
+            assert_eq!(todo.percent_complete, percent, "{body:?}");
+            assert!(
+                todo.to_ics_string().contains(body.trim_end()),
+                "{body:?} must survive back out verbatim, got {}",
+                todo.to_ics_string()
+            );
+        }
     }
 
     // T-13 (R21/R22). TZ-marked: must pass under UTC, Europe/Stockholm and

@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use super::error::CalendarError;
 use super::event::CalendarEvent;
+use crate::CalendarItem;
 
 /// An `.ics` file that could not be loaded, and why.
 #[derive(Debug)]
@@ -50,6 +51,11 @@ impl CalendarListing {
         self.events
     }
 
+    /// Both halves at once, for a caller that must not drop either.
+    pub(crate) fn into_parts(self) -> (Vec<CalendarEvent>, Vec<SkippedEvent>) {
+        (self.events, self.skipped)
+    }
+
     /// The files that failed to load. Empty means the listing is complete.
     pub fn skipped(&self) -> &[SkippedEvent] {
         &self.skipped
@@ -69,4 +75,12 @@ impl CalendarListing {
     pub fn is_empty(&self) -> bool {
         self.events.is_empty()
     }
+}
+
+/// The items to show for a window, plus the `.ics` files that could not be
+/// read. Kept together so a view cannot render one without the other.
+#[derive(Debug)]
+pub struct ExpandedItems {
+    pub items: Vec<CalendarItem>,
+    pub skipped: Vec<SkippedEvent>,
 }

@@ -1007,3 +1007,55 @@ None currently carries it - verified, not assumed.
 L8-04 flagged it as outside its file scope. §6 still says "A single value
 survives unmodelled", contradicting R15, T-17 and the shipped codec
 (RELATED-TO is DROPPED). Route to whoever closes out L8-02/L8-03.
+
+## QA STAGE — seven defects found by independent agents, all invisible to 906 green tests
+Four independent QA agents drove the REAL BINARY (one built a baseline
+binary from the merge-base to separate new defects from pre-existing
+behaviour). Every serious defect sat in a gap between what a test
+asserted and what a user would actually do.
+
+FIXED:
+ F-1 expanded_events_in_range never applied its window to tasks, so
+     --json leaked tasks outside --from/--to. This was MY unclosed
+     decision: at L2-07 I accepted core being permissive because
+     "suppression is L7's job", and L7-02 implemented that for the TEXT
+     renderer only. Todo::occurs_in_range already existed and was never
+     called on that path.
+ F-2 unparseable DUE/DTSTART/COMPLETED/PRIORITY/PERCENT-COMPLETE
+     silently discarded; a malformed DUE turned a DATED task into an
+     UNDATED one, which is unconditionally in-window. Events errored
+     loudly for the same input. SEQUENCE deliberately stays lenient
+     BECAUSE the event codec is lenient - symmetry in both directions.
+ F-3 one task silently abandoned every other pending push in that
+     calendar, chosen by inode order; exit 0; error on stdout; the task
+     rendered with a green + as if it succeeded.
+ F-4 PRIORITY:256/-1 silently dropped. R13 says out-of-range MUST
+     round-trip verbatim while typing the field Option<u8>, which cannot
+     hold either value - the requirement and the type contradicted each
+     other. Widened to Option<i32>, and percent_complete with it, since
+     fixing only one replaces an old inconsistency with a new one.
+ F-6 skipped files were silently swallowed in the agenda -
+     is_incomplete() had ZERO CLI consumers.
+ TZ  two tests failed at UTC+13/+14 and UTC-11, outside CI's matrix.
+     One caught the Local->Utc mutation in ZERO zones before the fix.
+
+NOT FIXED, deliberately:
+ F-8 ~1000 nested BEGIN: -> stack overflow, SIGABRT, core dump.
+     Reproduced identically with VEVENT on the BASELINE binary, so
+     pre-existing and unrelated. Fixing it means changing parser
+     recursion for all component types. Ship report, known limitations.
+
+## RULING — the three inverted Connection tests are CORRECTED, not weakened
+Audited by me against HEAD. `pushing_a_task_to_a_task_less_provider_...`
+previously asserted `captured_request::<CreateEvent>().event == event`
+and that the event's sync base WAS flushed - i.e. it ENCODED THE PARTIAL
+PUSH AS EXPECTED. That is the defect QA reproduced. It now asserts
+`!received_a_request()` and no base recorded. Every data-loss assertion
+survived unchanged; four new ones were added. The other two swapped
+`Remote` for `UnpushableTask` and gained uid/file/pending assertions.
+All three are strengthenings.
+
+## MY SCOPING ERROR — sync and discard were left out
+I scoped the CLI reporting fix to `caldir push`. `sync.rs` and
+`discard.rs` carry the identical shape, and `sync` is the command users
+actually run. Dispatched separately.

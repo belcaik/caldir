@@ -41,12 +41,15 @@ pub struct Todo {
     /// `COMPLETED`. `EventTime`, not `DateTime<Utc>`: a floating value is legal
     /// and must survive (R22).
     pub completed: Option<EventTime>,
-    /// `PERCENT-COMPLETE`.
-    pub percent_complete: Option<u8>,
-    /// `PRIORITY`, raw. Values above 9 are legal input and round-trip verbatim,
-    /// so this must never be routed through `icalendar::Component::priority()`,
-    /// which clamps to `0..=10`.
-    pub priority: Option<u8>,
+    /// `PERCENT-COMPLETE`, raw. `i32` is RFC 5545's `INTEGER`, not the 0..=100
+    /// the property is *supposed* to hold: out-of-range is legal input that
+    /// round-trips verbatim, exactly as for `priority` (F-4).
+    pub percent_complete: Option<i32>,
+    /// `PRIORITY`, raw. Values outside `0..=9` are legal input and round-trip
+    /// verbatim, so this must never be routed through
+    /// `icalendar::Component::priority()`, which clamps to `0..=10` — and must
+    /// not be a `u8` either, which cannot hold `256` or `-1` (F-4).
+    pub priority: Option<i32>,
     pub url: Option<String>,
     /// `RRULE`/`EXDATE`/`RDATE`, modelled but never expanded. Master only.
     pub recurrence: Option<Recurrence>,

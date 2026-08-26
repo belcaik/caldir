@@ -1,6 +1,7 @@
 use crate::calendar::CalendarError;
 use crate::event::EventUid;
 use crate::remote::RemoteError;
+use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectionError {
@@ -22,4 +23,35 @@ pub enum ConnectionError {
         uid.as_str()
     )]
     SameUidPair { uid: EventUid },
+
+    /// An outgoing change the event-only sync wire cannot carry (R70/R71).
+    ///
+    /// Raised by the pre-flight, before the first RPC, for the same reason as
+    /// `SameUidPair`: a half-pushed calendar is the destructive outcome. The
+    /// loop used to abort *mid-push* on the same item, leaving whatever
+    /// happened to sort after it silently abandoned — and, since a task fails
+    /// identically forever, abandoned on every subsequent run too.
+    ///
+    /// Deliberately worded apart from the wire-level arity abort
+    /// (`expected 1 event(s) in ICS, found 0`), which stays byte-locked at the
+    /// `Remote` seam: a user who upgraded to fix that message must not be
+    /// shown its twin.
+    #[error(
+        "Cannot push {}: caldir cannot push tasks to a remote calendar yet — the sync wire carries events only. Nothing was pushed, so this calendar is unchanged locally and remotely, and its other {pending} pending change(s) are still waiting. Move the task to a local-only calendar (one with no remote) to unblock them.",
+        locate(file.as_ref(), uid)
+    )]
+    UnpushableTask {
+        uid: EventUid,
+        file: Option<PathBuf>,
+        pending: usize,
+    },
+}
+
+/// How the refused item is pointed at: its file when one is on disk, its UID
+/// when the change is a delete and the file is already gone.
+fn locate(file: Option<&PathBuf>, uid: &EventUid) -> String {
+    match file.and_then(|p| p.file_name()) {
+        Some(name) => name.to_string_lossy().into_owned(),
+        None => format!("UID {}", uid.as_str()),
+    }
 }

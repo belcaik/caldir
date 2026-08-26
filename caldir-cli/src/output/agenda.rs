@@ -23,7 +23,29 @@ pub struct AgendaEntry {
     pub rsvp: Option<ParticipationStatus>,
 }
 
-impl AgendaView {
+/// A calendar whose listing came back short, and by how many files.
+///
+/// `CalendarListing` records every `.ics` file it could not read precisely so
+/// that nothing is lost silently (R77). `doctor` is not the only surface that
+/// owes the user that: an agenda rendered from a short listing is a partial
+/// agenda, and says so.
+pub(crate) struct IncompleteCalendar {
+    pub(crate) calendar: Option<String>,
+    pub(crate) skipped: usize,
+}
+
+/// An agenda as a command produces it: the view, plus every calendar the view
+/// could not be built from in full.
+///
+/// A wrapper rather than another `AgendaView` field: the view is the *ordered
+/// items*, and every renderer and every test that builds one by hand means
+/// exactly that. What could not be read is not an item.
+pub struct Agenda {
+    pub(crate) view: AgendaView,
+    pub(crate) incomplete: Vec<IncompleteCalendar>,
+}
+
+impl Agenda {
     pub fn collect(
         caldir: &Caldir,
         calendars: Vec<Calendar>,
@@ -31,15 +53,16 @@ impl AgendaView {
         to: DateTime<Utc>,
         undated: bool,
     ) -> AnyhowResult<Self> {
-        Ok(Self::assemble(
-            collect_entries(calendars, from, to),
-            from,
-            to,
-            caldir.config().time_format(),
-            undated,
-        ))
-    }
+        let (entries, incomplete) = collect_entries_and_skips(calendars, from, to);
 
+        Ok(Self {
+            view: AgendaView::assemble(entries, from, to, caldir.config().time_format(), undated),
+            incomplete,
+        })
+    }
+}
+
+impl AgendaView {
     /// Everything `collect` does that does not need a `Caldir`: the local
     /// window, the total order, and the view's own flags. Split out so the
     /// assembly is reachable from a test — `Caldir`'s test constructor is
@@ -120,22 +143,30 @@ fn sort_entries(entries: &mut [AgendaEntry]) {
 /// A calendar that fails to list contributes nothing and is otherwise ignored:
 /// one unreadable calendar must never blank out the others' events. Entries stay
 /// in calendar order so the caller's sort sees the same sequence as before.
-fn collect_entries(
+fn collect_entries_and_skips(
     calendars: Vec<Calendar>,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
-) -> Vec<AgendaEntry> {
+) -> (Vec<AgendaEntry>, Vec<IncompleteCalendar>) {
     let mut entries = Vec::new();
+    let mut incomplete = Vec::new();
 
     for calendar in calendars {
         let calendar_slug = calendar.slug().map(str::to_owned);
         let remote_email = calendar.remote_email().map(str::to_owned);
 
-        let Ok(items) = calendar.expanded_events_in_range(from, to) else {
+        let Ok(listing) = calendar.expanded_items_in_range(from, to) else {
             continue;
         };
 
-        for item in items {
+        if !listing.skipped.is_empty() {
+            incomplete.push(IncompleteCalendar {
+                calendar: calendar_slug.clone(),
+                skipped: listing.skipped.len(),
+            });
+        }
+
+        for item in listing.items {
             if !is_item_visible(&item) {
                 continue;
             }
@@ -150,7 +181,18 @@ fn collect_entries(
         }
     }
 
-    entries
+    (entries, incomplete)
+}
+
+/// The entries alone. Every caller that shows them to a user wants the skips
+/// too, so this exists for the tests that are only about the entries.
+#[cfg(test)]
+fn collect_entries(
+    calendars: Vec<Calendar>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Vec<AgendaEntry> {
+    collect_entries_and_skips(calendars, from, to).0
 }
 
 /// A task has no invite semantics, so it never carries an RSVP (R81, ADR-10
@@ -300,17 +342,28 @@ SUMMARY:Assignment 3\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
     /// in exactly that order: all four sort rules at once, including rule 4
     /// putting the event ahead of the task at an identical instant.
     ///
-    /// TZ-sensitive: rule 1 is `local_date`, so the 09:00Z pair has to land on
-    /// the same local day in every CI zone. 09:00Z is 05:00 in New York and
-    /// 11:00 in Stockholm, so it does.
+    /// TZ-sensitive: rule 1 is `local_date`, so the timed pair has to land on
+    /// the same local day as the two DATE-valued items. No single UTC instant
+    /// does that everywhere — the inhabited zones span more than 24 hours — so
+    /// the pair is pinned at 09:00 *local* and written out as the `Z` instant
+    /// that means, which keeps both values UTC-valued as before.
     #[test]
     fn event_task_and_all_day_on_one_day_order_correctly() {
         const DATE_DUE_TASK_ICS: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
 BEGIN:VTODO\r\nUID:patch@u-crawler\r\nDUE;VALUE=DATE:20260814\r\n\
 SUMMARY:Ship crawler patch\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
-        const TIMED_TASK_ICS: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
-BEGIN:VTODO\r\nUID:report@u-crawler\r\nDUE:20260814T090000Z\r\n\
-SUMMARY:Draft Q3 report\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
+
+        let nine_local = chrono::Local
+            .with_ymd_and_hms(2026, 8, 14, 9, 0, 0)
+            .single()
+            .expect("mid-August has no DST transition")
+            .with_timezone(&Utc);
+        let timed_task_ics = format!(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VTODO\r\nUID:report@u-crawler\r\nDUE:{}\r\n\
+SUMMARY:Draft Q3 report\r\nEND:VTODO\r\nEND:VCALENDAR\r\n",
+            nine_local.format("%Y%m%dT%H%M%SZ")
+        );
 
         let tmp = tempfile::tempdir().unwrap();
         let cal = calendar(tmp.path(), "work");
@@ -319,13 +372,10 @@ SUMMARY:Draft Q3 report\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
             EventTime::Date(NaiveDate::from_ymd_opt(2026, 8, 14).unwrap()),
         ))
         .unwrap();
-        cal.create_event(Event::new(
-            "Standup",
-            EventTime::DateTimeUtc(Utc.with_ymd_and_hms(2026, 8, 14, 9, 0, 0).unwrap()),
-        ))
-        .unwrap();
+        cal.create_event(Event::new("Standup", EventTime::DateTimeUtc(nine_local)))
+            .unwrap();
         std::fs::write(cal.path().join("patch.ics"), DATE_DUE_TASK_ICS).unwrap();
-        std::fs::write(cal.path().join("report.ics"), TIMED_TASK_ICS).unwrap();
+        std::fs::write(cal.path().join("report.ics"), &timed_task_ics).unwrap();
 
         let from = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
         let to = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
@@ -526,6 +576,38 @@ SUMMARY:Draft Q3 report\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
         );
     }
 
+    /// F2 (R77) at the collection seam: an unreadable file is *counted*, per
+    /// calendar, and the healthy events of that same calendar still list. The
+    /// tally is what the notice reads out, so it has to be the real number of
+    /// skipped files and not "the calendar was short".
+    #[test]
+    fn an_unreadable_file_is_counted_against_its_own_calendar() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let work = calendar(tmp.path(), "work");
+        let start = EventTime::Date(NaiveDate::from_ymd_opt(2026, 8, 14).unwrap());
+        work.create_event(Event::new("Healthy", start)).unwrap();
+        std::fs::write(work.path().join("broken.ics"), "not an ics file at all").unwrap();
+        std::fs::write(work.path().join("empty.ics"), "").unwrap();
+
+        let clean = calendar(tmp.path(), "clean");
+
+        let from = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+        let to = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+        let (entries, incomplete) = collect_entries_and_skips(vec![work, clean], from, to);
+
+        assert_eq!(
+            entries
+                .iter()
+                .filter_map(|entry| entry.item.summary())
+                .collect::<Vec<_>>(),
+            vec!["Healthy"]
+        );
+        assert_eq!(incomplete.len(), 1, "only the short calendar is reported");
+        assert_eq!(incomplete[0].calendar.as_deref(), Some("work"));
+        assert_eq!(incomplete[0].skipped, 2);
+    }
+
     /// AC 6: an undated task has no anchor, so it is never placed in a day
     /// group and never given an invented date — but it is *kept*. Rust's
     /// `Ord for Option` puts `None` first; these must sort last.
@@ -555,14 +637,35 @@ SUMMARY:Draft Q3 report\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
     ///
     /// Also assembly's other two jobs, neither of which had a test: the local
     /// window (which decides whether a dated task is in range at all) and the
-    /// sort. Midday UTC on two different days, so the two window dates differ
-    /// — and are those two calendar days — in each of the three CI zones.
+    /// sort.
+    ///
+    /// The window is a **local** window, so the two instants are stated in
+    /// local time and the expected dates are the two calendar days that were
+    /// named, in every zone. Stating them in UTC instead would assert a UTC
+    /// date against a local-date conversion, which only agrees between UTC-11
+    /// and UTC+12.
+    ///
+    /// The two hours are deliberately lopsided rather than both midday: just
+    /// after local midnight for `from` and just before it for `to`, so that in
+    /// any zone east of UTC the *start* falls on the previous UTC day and in
+    /// any zone west of UTC the *end* falls on the next one. Dropping the
+    /// local conversion is therefore caught everywhere except in UTC itself,
+    /// where it is genuinely the same thing. Mid-August has no DST transition
+    /// in any zone, so neither local time is ambiguous or skipped.
     #[test]
     fn assemble_sorts_and_carries_the_window_and_the_undated_flag() {
         use crate::output::TextRender;
+        use chrono::Local;
 
-        let from = Utc.with_ymd_and_hms(2026, 8, 14, 12, 0, 0).unwrap();
-        let to = Utc.with_ymd_and_hms(2026, 8, 16, 12, 0, 0).unwrap();
+        let local = |day, hour, minute| {
+            Local
+                .with_ymd_and_hms(2026, 8, day, hour, minute, 0)
+                .single()
+                .expect("mid-August has no DST transition")
+                .with_timezone(&Utc)
+        };
+        let from = local(14, 0, 30);
+        let to = local(16, 23, 30);
         let timed = |day, hour| {
             EventTime::DateTimeFloating(
                 NaiveDate::from_ymd_opt(2026, 8, day)
@@ -655,18 +758,19 @@ SUMMARY:Someday: rewrite installer\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
         assert_eq!(anchor(&entries[0].item), None);
     }
 
-    /// A consequence inherited from L2-07, recorded here because it is
-    /// discovered at render time otherwise: core is deliberately permissive
-    /// and does **not** range-filter tasks, so every task in the calendar
-    /// reaches the CLI — undated *and* dated far outside the window. R44's
-    /// window predicate is applied in the diff, not in the listing.
+    /// Inverted by **F-1**. L2-07 left core permissive and this test recorded
+    /// the consequence: a task dated far outside the window reached the CLI,
+    /// and only L7-02's `item_display_days` kept it off the text agenda —
+    /// `--json`, which does not go through that path, emitted it anyway.
+    /// Core now applies R44's `Todo::occurs_in_range` in the listing, so a
+    /// dated out-of-window task never reaches `entries` at all and both
+    /// renderers agree. L7-02's own check is now a redundant second gate on
+    /// the text path, harmless and unchanged.
     ///
-    /// L7-01 keeps them in `entries` and simply does not render them.
-    /// **L7-02's suppression rule must therefore cover dated out-of-window
-    /// tasks too, not only undated ones** — an anchored task from 2019 would
-    /// otherwise open a `caldir today` with a 2019 day header.
+    /// The *undated* case is the opposite and is pinned separately above: R46
+    /// makes it unconditionally in-window, so it still arrives here.
     #[test]
-    fn a_task_dated_outside_the_window_still_reaches_the_entries() {
+    fn a_task_dated_outside_the_window_does_not_reach_the_entries() {
         const FAR_PAST_TASK_ICS: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
 BEGIN:VTODO\r\nUID:ancient@u-crawler\r\nDUE:20190101T090000Z\r\n\
 SUMMARY:Ancient task\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
@@ -681,7 +785,7 @@ SUMMARY:Ancient task\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
 
         assert_eq!(
             entries.iter().map(summary).collect::<Vec<_>>(),
-            vec!["Ancient task"]
+            Vec::<&str>::new()
         );
     }
 
