@@ -85,11 +85,7 @@ impl Provider {
 
         match response {
             rpc::Response::Success { data } => Ok(rpc::WireValue::from_wire(data)),
-            rpc::Response::Error {
-                error,
-                code: Some(rpc::ErrorCode::UnsupportedMethod),
-            } => Err(ProviderError::UnsupportedMethod(error)),
-            rpc::Response::Error { error, code: _ } => Err(ProviderError::Provider(error)),
+            rpc::Response::Error { error, code } => Err(error::classify(error, code)),
         }
     }
 

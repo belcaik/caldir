@@ -67,15 +67,47 @@ pub enum Response<T> {
 /// `format_chain` flattens the source chain into `error` itself, so anything
 /// a caller needs to match on travels here instead of in the message text.
 ///
-/// Exactly one variant today: the one seam this ticket owns. `P2-04` extends
-/// this enum with the §16 error classes; it does not need a second wire
-/// change to do so, because this field is already additive and optional.
+/// `#[non_exhaustive]`: a seventh class later must not break a downstream
+/// match (C-5). `#[serde(other)]` on `Unrecognized` is the wire-level twin of
+/// that guarantee — a *newer* provider sending a class string this binary has
+/// never heard of must still decode, not fail parsing (§17/§18, C-4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ErrorCode {
     /// The `command` on the envelope is not a verb this provider binary
     /// understands — an old binary facing a newer core, or a typo.
     UnsupportedMethod,
+
+    /// §16: this provider does not support the write it was asked to do
+    /// (e.g. task writes on an events-only provider).
+    UnsupportedOperation,
+
+    /// §16: the provider's credentials lack the scope the request needs
+    /// (`GOOGLE-13`'s core half).
+    MissingAuthScope,
+
+    /// §16: the remote object the request named does not exist.
+    RemoteNotFound,
+
+    /// §16: a conflict or precondition failure (e.g. a stale ETag).
+    Conflict,
+
+    /// §16: the provider cannot represent what was asked of it, distinct
+    /// from an outright unsupported operation (e.g. a field the remote API
+    /// silently truncates).
+    SemanticLimitation,
+
+    /// §16: a network or API failure talking to the remote. Distinct from
+    /// `ProviderTransportError`, which models failures in the local
+    /// subprocess exchange, not the provider's own upstream call.
+    Network,
+
+    /// A class string this binary does not recognise — a provider newer
+    /// than this core. Never produced locally; only ever the result of
+    /// decoding a code this enum's variant list doesn't (yet) contain.
+    #[serde(other)]
+    Unrecognized,
 }
 
 impl<T: Serialize> Response<T> {
@@ -114,6 +146,26 @@ mod tests {
             serde_json::from_str(r#"{"status":"error","error":"boom"}"#).unwrap();
 
         assert!(matches!(decoded, Response::Error { error, .. } if error == "boom"));
+    }
+
+    /// P2-04/C-4: a *newer* provider may send a class this core has never
+    /// heard of. `#[serde(other)]` on `ErrorCode::Unrecognized` must catch it
+    /// so the envelope still decodes, mirroring `#[non_exhaustive]`'s
+    /// source-level guarantee at the wire level.
+    #[test]
+    fn an_error_code_this_binary_does_not_recognise_still_decodes() {
+        let decoded: Response<()> = serde_json::from_str(
+            r#"{"status":"error","error":"boom","code":"a_class_from_the_future"}"#,
+        )
+        .expect("an unrecognised code must not fail the decode");
+
+        assert!(matches!(
+            decoded,
+            Response::Error {
+                error,
+                code: Some(ErrorCode::Unrecognized)
+            } if error == "boom"
+        ));
     }
 
     /// `T-33` — R52/C8 (INVIOLABLE). `Method` is a closed serde enum with no

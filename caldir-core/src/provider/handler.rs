@@ -25,6 +25,33 @@ pub type Error = Box<dyn StdError + Send + Sync>;
 /// Result alias for [`Handler`] methods.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Tags a [`Handler`]'s own failure with a §16 `ErrorCode` so
+/// `process_request` can put it on the wire without inspecting the message
+/// text (`CROSS-4`). The `create_item`/`update_item`/`delete_item` defaults
+/// below are today's only producer.
+#[derive(Debug)]
+struct Classified {
+    code: ErrorCode,
+    message: String,
+}
+
+impl Classified {
+    fn boxed(code: ErrorCode, message: impl Into<String>) -> Error {
+        Box::new(Classified {
+            code,
+            message: message.into(),
+        })
+    }
+}
+
+impl std::fmt::Display for Classified {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl StdError for Classified {}
+
 /// Implemented by each provider to serve the caldir RPC protocol.
 #[async_trait]
 pub trait Handler: Send + Sync {
@@ -44,15 +71,24 @@ pub trait Handler: Send + Sync {
     /// D-3/C-16: item-typed so a provider's `match` can serve a `Todo` arm
     /// once it has one; the wire verb stays `create_event`.
     async fn create_item(&self, _cmd: CreateItem) -> Result<CalendarItem> {
-        Err("This provider does not support creating events".into())
+        Err(Classified::boxed(
+            ErrorCode::UnsupportedOperation,
+            "This provider does not support creating events",
+        ))
     }
 
     async fn update_item(&self, _cmd: UpdateItem) -> Result<CalendarItem> {
-        Err("This provider does not support updating events".into())
+        Err(Classified::boxed(
+            ErrorCode::UnsupportedOperation,
+            "This provider does not support updating events",
+        ))
     }
 
     async fn delete_item(&self, _cmd: DeleteItem) -> Result<()> {
-        Err("This provider does not support deleting events".into())
+        Err(Classified::boxed(
+            ErrorCode::UnsupportedOperation,
+            "This provider does not support deleting events",
+        ))
     }
 
     /// D-2/§18: the default every unmodified provider gets for free —
@@ -128,10 +164,13 @@ pub async fn process_request<H: Handler>(handler: &H, line: &str) -> String {
 
     match dispatch(handler, request).await {
         Ok(data) => Response::success(data),
-        Err(e) => Response::error(
-            &format!("Error handling request: {}", format_chain(&*e)),
-            None,
-        ),
+        Err(e) => {
+            let code = e.downcast_ref::<Classified>().map(|c| c.code);
+            Response::error(
+                &format!("Error handling request: {}", format_chain(&*e)),
+                code,
+            )
+        }
     }
 }
 
@@ -472,6 +511,56 @@ mod tests {
         assert_eq!(parsed["status"], "error");
         let error = parsed["error"].as_str().unwrap();
         assert!(error.contains("create_evnet"), "got: {error}");
+    }
+
+    /// P2-04's headline proof: the CLI must be able to tell "unsupported"
+    /// apart from any other failure by reading a field, never by inspecting
+    /// `parsed["error"]`'s prose. `StubHandler` never overrides `create_item`,
+    /// so the trait default — tagged `ErrorCode::UnsupportedOperation` — is
+    /// what answers here.
+    #[tokio::test]
+    async fn an_error_envelope_carries_a_machine_readable_class() {
+        let event = Event::new(
+            "Test",
+            EventTime::Date(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()),
+        );
+        let request = CreateItem {
+            remote: RemoteConfigParams::new(),
+            event: CalendarItem::Event(event),
+        }
+        .to_json()
+        .unwrap();
+
+        let response = process_request(&StubHandler, &request.to_string()).await;
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(parsed["status"], "error");
+        assert_eq!(
+            parsed["code"], "unsupported_operation",
+            "the class must be readable without inspecting the message: {parsed}"
+        );
+    }
+
+    /// §18/C-4: every provider binary shipped before this ticket emits an
+    /// error envelope with no `code` field at all. It must decode into the
+    /// unclassified/generic class with its message intact, never fail to
+    /// parse — the regression `an_error_envelope_from_an_older_provider_still_decodes`
+    /// (`rpc.rs`) pins at the wire level; this pins the same guarantee in the
+    /// vocabulary `process_request`'s caller actually sees it in.
+    #[test]
+    fn an_untyped_error_from_an_old_provider_reads_as_the_generic_class() {
+        let json = r#"{"status":"error","error":"boom"}"#;
+
+        let decoded: Response<()> =
+            serde_json::from_str(json).expect("an old provider's envelope must still decode");
+
+        match decoded {
+            Response::Error { error, code } => {
+                assert_eq!(error, "boom");
+                assert_eq!(code, None, "an absent code must read as the generic class");
+            }
+            Response::Success { .. } => panic!("expected an error envelope"),
+        }
     }
 
     #[tokio::test]

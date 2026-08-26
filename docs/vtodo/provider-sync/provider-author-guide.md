@@ -118,6 +118,33 @@ providers dispatch through `Handler` and never do), add a wildcard arm defensive
 added to `caldir-core` is source-incompatible with an exhaustive match, by design (see
 [`capabilities.md` §7](capabilities.md#7-protocol-versioning-and-old-binary-behaviour)).
 
+## The six failure classes (§16)
+
+§16 requires the CLI be able to distinguish six kinds of provider failure without parsing your
+error message. `rpc::ErrorCode` (in `caldir-core/src/rpc.rs`) carries the class alongside the
+message you already return; you get this for free if you return a plain error from a `Handler`
+method (it lands as the unclassified/generic class, exactly like today), and you can opt into a
+specific class where one applies:
+
+- `unsupported_operation` — you understood the request but do not support this kind of write (e.g.
+  task writes on an events-only provider). `create_item`/`update_item`/`delete_item`'s default
+  bodies already carry this class; you get it for free by not overriding them.
+- `missing_auth_scope` — your stored credentials lack the scope the request needs.
+- `remote_not_found` — the remote object named in the request does not exist.
+- `conflict` — a conflict or precondition failure (e.g. a stale ETag).
+- `semantic_limitation` — you cannot represent what was asked (distinct from an outright refusal).
+- `network` — your own call to the remote API failed for network reasons. Distinct from a failure
+  in the exchange between caldir and your binary, which caldir already detects on its own.
+
+`ErrorCode` is `#[non_exhaustive]` and unknown values decode as a generic "unrecognized" bucket
+rather than failing to parse — so a class added to a future `caldir-core` never breaks an older
+core reading your binary's replies, and a class your binary doesn't yet emit is not a compatibility
+requirement. Locked by `provider::error::tests::every_error_class_round_trips_over_the_wire`.
+
+The `unsupported_method` class from the section above is a different thing: it is caldir's own
+signal that your binary was asked a verb it has never heard of, not one of the six §16 classes, and
+you never produce it yourself.
+
 ## Types you can actually name
 
 Everything above only works if you can name and construct the types involved from outside
