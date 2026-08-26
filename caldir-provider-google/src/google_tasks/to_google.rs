@@ -104,7 +104,7 @@ impl ToGoogle for Todo {
 }
 
 /// `DUE` -> `due`: the calendar date under `zone` (`super::due::
-/// google_due_date`, D-4), sent as midnight UTC — the shape Google's `due`
+/// google_due_date`), sent as midnight UTC — the shape Google's `due`
 /// field expects (date precision only, §13 clause 1).
 fn due_to_google<Tz: TimeZone>(due: &EventTime, zone: &Tz) -> String {
     let date = super::due::google_due_date(due, zone);

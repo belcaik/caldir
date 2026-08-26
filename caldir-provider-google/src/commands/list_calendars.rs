@@ -79,7 +79,7 @@ async fn task_list_calendar_configs(
             let remote_config = RemoteConfig::new(ProviderSlug::from(PROVIDER_NAME), params);
 
             // Whether tasks are pushed is decided at execution time by
-            // capability negotiation, not frozen here (D-2).
+            // capability negotiation, not frozen here.
             CalendarConfig::new(
                 Some(list.title.clone()),
                 None,

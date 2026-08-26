@@ -80,7 +80,7 @@ impl GoogleResourceKind {
 /// Calendar via the legacy `google_calendar_id`-only shape (every
 /// Google remote predating this key has no kind key at all).
 /// An unrecognized value is an error, never a silent fallback to Calendar
-/// (D-2 fail closed).
+/// (fail closed).
 pub fn resolve_resource_kind(params: &RemoteConfigParams) -> Result<GoogleResourceKind> {
     let Some(value) = params.get("google_resource_kind") else {
         return Ok(GoogleResourceKind::Calendar);

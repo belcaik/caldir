@@ -78,8 +78,9 @@ pub trait Handler: Send + Sync {
         Err("list_events is not supported by this provider".into())
     }
 
-    /// D-3: item-typed so a provider's `match` can serve a `Todo` arm
-    /// once it has one; the wire verb stays `create_event`.
+    /// Item-typed (the write boundary carries `CalendarItem`, not `Event`) so
+    /// a provider's `match` can serve a `Todo` arm once it has one; the wire
+    /// verb stays `create_event`.
     async fn create_item(&self, _cmd: CreateItem) -> Result<CalendarItem> {
         Err(Classified::boxed(
             ErrorCode::UnsupportedOperation,
@@ -101,7 +102,7 @@ pub trait Handler: Send + Sync {
         ))
     }
 
-    /// D-2/§18: the default every unmodified provider gets for free —
+    /// §18: the default every unmodified provider gets for free —
     /// events read+write true, tasks read+write false — regardless of the
     /// flattened remote params, so an unmodified provider's answer never
     /// depends on config it has never read. A provider opts into a

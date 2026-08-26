@@ -38,7 +38,7 @@ impl Connection {
     pub async fn diff(&mut self, range: &DateRange) -> Result<CalendarDiff, ConnectionError> {
         let local_listing = self.local().events()?;
 
-        // D-2, fail closed: `capabilities()` never propagates an error —
+        // Fail closed: `capabilities()` never propagates an error —
         // an absent, unknown, errored or timed-out answer already reads as
         // `ProviderCapabilities::default()` (all false), so the reason is
         // only for a future surface and is dropped here.

@@ -22,7 +22,7 @@ pub use list_events::ListEvents;
 pub use update_event::UpdateItem;
 
 /// R52 keeps `Method` a closed six-verb enum, inviolably — but
-/// `capabilities` (D-2) is the one ratified exception: task
+/// `capabilities` is the one ratified exception: task
 /// capability negotiation needs a seventh verb, `Method` is not
 /// `#[non_exhaustive]`, and every out-of-tree matcher (Proton included)
 /// breaks the moment it lands. The graceful-skew path

@@ -38,7 +38,7 @@ impl Remote {
         Ok(events)
     }
 
-    /// D-2, fail closed: capabilities are fetched fresh on every call
+    /// Fail closed: capabilities are per-remote, fetched fresh on every call
     /// (never persisted, `ConnectResponse` is unchanged) and every way the
     /// answer can fail to arrive — transport error, timeout, unknown
     /// method, unparseable payload — reads as task-less rather than

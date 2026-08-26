@@ -25,7 +25,7 @@ pub struct SessionData {
     /// OAuth scopes actually granted, per the last token response. Absent
     /// on session files written before Tasks support (`#[serde(default)]`
     /// keeps them loadable) — empty means "unknown, therefore not granted"
-    /// (D-2 fail closed), never "assume yes".
+    /// (fail closed), never "assume yes".
     #[serde(default)]
     pub granted_scopes: Vec<String>,
 }
@@ -104,7 +104,7 @@ impl Session {
         account_email.replace(['/', '\\', ':'], "_")
     }
 
-    /// Fails closed (D-2): a session recorded with no Tasks scope — the
+    /// Fails closed: a session recorded with no Tasks scope — the
     /// state of every pre-Tasks session file — is treated as "not granted",
     /// never "unknown, assume yes". Pure and IO-free so call sites can check
     /// it before making any Tasks API request, turning what would otherwise

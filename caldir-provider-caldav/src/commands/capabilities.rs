@@ -5,7 +5,7 @@ use caldir_core::rpc::Capabilities;
 
 /// CalDAV events are always read/write.
 ///
-/// Tasks are per-remote (D-2), not per-binary: `list_calendars` records
+/// Tasks are per-remote, not per-binary: `list_calendars` records
 /// `caldav_supports_tasks` for this remote from the collection's advertised
 /// `supported-calendar-component-set` (a provider-private `RemoteConfigParams`
 /// key). Fail closed on anything but an explicit `true` — absent (unknown),

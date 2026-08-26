@@ -1,5 +1,5 @@
-//! The public shape of D-2: what a provider can do with events and tasks,
-//! answered fresh on every call and never persisted (§4, §17).
+//! The public shape of a provider's capabilities: what it can do with events
+//! and tasks, answered fresh on every call and never persisted (§4, §17).
 
 use serde::{Deserialize, Serialize};
 
@@ -17,7 +17,7 @@ pub struct Capability {
 /// `tests/public_error_api.rs`. Every field defaults to `false` on decode, so
 /// an absent key — a newer provider omitting one it assumes, or an older one
 /// that has never heard of it — reads as "not supported", never as support
-/// (D-2, this ticket's fail-closed assertion).
+/// (the fail-closed guarantee: absent reads as unsupported, not supported).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ProviderCapabilities {
     #[serde(default)]

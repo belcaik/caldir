@@ -14,7 +14,7 @@ use chrono::{NaiveDate, TimeZone};
 
 /// A datetime `DUE`'s calendar date under `tz`, resolved through the zone
 /// database. Delegates to `EventTime::to_local_tz`, which already implements
-/// D-4's rule across all four `EventTime` variants: a `DateTimeZoned` value
+/// the same rule across all four `EventTime` variants: a `DateTimeZoned` value
 /// resolves through its own `tzid` first, then converts into `tz`; every
 /// other variant resolves directly in `tz`. **Do not** take a shortcut
 /// through `EventTime::to_utc` — it is `to_local_tz(&chrono::Local)` and

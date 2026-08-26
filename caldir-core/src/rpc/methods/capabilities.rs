@@ -3,7 +3,7 @@ use crate::provider::ProviderCapabilities;
 use crate::rpc::{Method, Rpc};
 use serde::{Deserialize, Serialize};
 
-/// Per-remote, not per-binary (D-2): the request flattens `RemoteConfigParams`
+/// Per-remote, not per-binary: the request flattens `RemoteConfigParams`
 /// exactly like `ListEvents`, so one binary can answer differently for a
 /// Google Calendar remote and a Google Tasks-list remote. A provider whose
 /// answer never varies is free to ignore the params.
