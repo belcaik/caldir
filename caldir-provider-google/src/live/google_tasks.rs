@@ -399,3 +399,222 @@ async fn run_due_fixpoint_inner(
 
     Ok(())
 }
+
+// ============================================================================
+// P5-07: §15's no-churn sequences, named per the ticket
+// ============================================================================
+//
+// `create_sync_sync_yields_exactly_one_remote_task` above already drives
+// this whole lifecycle and checks cardinality (P5-04's concern) alongside
+// no-churn along the way. These three are P5-07's own, narrower proofs —
+// named exactly as the ticket's RED list requires so `P6-05` can cite them
+// by name — asserting *no changes*, not identity/cardinality.
+
+/// §15: local create / sync / sync — the second sync must report no
+/// changes.
+#[tokio::test]
+#[serial_test::serial(google_tasks)]
+async fn create_sync_sync_reports_no_changes() {
+    let Some(config) = live_gate("create_sync_sync_reports_no_changes") else {
+        return;
+    };
+
+    let outcome = run_create_sync_sync(&config).await;
+
+    if let Some(task_id) = &outcome.task_id {
+        cleanup(&config, task_id).await;
+    }
+
+    outcome
+        .result
+        .expect("create / sync / sync reports no changes");
+}
+
+async fn run_create_sync_sync(config: &LiveConfig) -> Outcome {
+    let mut task_id = None;
+    let result = run_create_sync_sync_inner(config, &mut task_id).await;
+    Outcome { task_id, result }
+}
+
+async fn run_create_sync_sync_inner(
+    config: &LiveConfig,
+    task_id_out: &mut Option<String>,
+) -> Result<()> {
+    let title = unique_title("create-sync-sync-no-churn");
+    let local = Todo::new(title.clone());
+
+    let created = commands::create_event::handle(CreateItem {
+        remote: remote_config(config),
+        event: CalendarItem::Todo(local),
+    })
+    .await
+    .context("create")?;
+    let canonical_1 = expect_todo(created)?;
+    *task_id_out = Some(require_task_id(&canonical_1)?);
+
+    let resynced = commands::update_event::handle(UpdateItem {
+        remote: remote_config(config),
+        event: CalendarItem::Todo(canonical_1.clone()),
+    })
+    .await
+    .context("sync (second run, unchanged content)")?;
+    let canonical_2 = expect_todo(resynced)?;
+
+    ensure!(
+        canonical_2 == canonical_1,
+        "create -> sync -> sync must report no changes on the second sync"
+    );
+
+    Ok(())
+}
+
+/// §15: local update / sync / sync — the second sync (after a content
+/// change already landed) must report no changes.
+#[tokio::test]
+#[serial_test::serial(google_tasks)]
+async fn update_sync_sync_reports_no_changes() {
+    let Some(config) = live_gate("update_sync_sync_reports_no_changes") else {
+        return;
+    };
+
+    let outcome = run_update_sync_sync(&config).await;
+
+    if let Some(task_id) = &outcome.task_id {
+        cleanup(&config, task_id).await;
+    }
+
+    outcome
+        .result
+        .expect("update / sync / sync reports no changes");
+}
+
+async fn run_update_sync_sync(config: &LiveConfig) -> Outcome {
+    let mut task_id = None;
+    let result = run_update_sync_sync_inner(config, &mut task_id).await;
+    Outcome { task_id, result }
+}
+
+async fn run_update_sync_sync_inner(
+    config: &LiveConfig,
+    task_id_out: &mut Option<String>,
+) -> Result<()> {
+    let title = unique_title("update-sync-sync-no-churn");
+    let local = Todo::new(title.clone());
+
+    let created = commands::create_event::handle(CreateItem {
+        remote: remote_config(config),
+        event: CalendarItem::Todo(local),
+    })
+    .await
+    .context("create")?;
+    let canonical_1 = expect_todo(created)?;
+    *task_id_out = Some(require_task_id(&canonical_1)?);
+
+    // The update under test: a real content change.
+    let edited_title = format!("{title} (updated)");
+    let mut edited = canonical_1.clone();
+    edited.summary = Some(edited_title.clone());
+
+    let updated = commands::update_event::handle(UpdateItem {
+        remote: remote_config(config),
+        event: CalendarItem::Todo(edited),
+    })
+    .await
+    .context("update (content change)")?;
+    let canonical_2 = expect_todo(updated)?;
+    ensure!(canonical_2.summary.as_deref() == Some(edited_title.as_str()));
+
+    // Sync again with no further local change: must report no changes.
+    let resynced = commands::update_event::handle(UpdateItem {
+        remote: remote_config(config),
+        event: CalendarItem::Todo(canonical_2.clone()),
+    })
+    .await
+    .context("sync (second run after the update, unchanged content)")?;
+    let canonical_3 = expect_todo(resynced)?;
+
+    ensure!(
+        canonical_3 == canonical_2,
+        "update -> sync -> sync must report no changes on the second sync"
+    );
+
+    Ok(())
+}
+
+/// §15: local delete / sync — the task must be absent remotely and a
+/// second delete (the sync retry classify_delete_status is built to
+/// tolerate) must not error or resurrect it.
+#[tokio::test]
+#[serial_test::serial(google_tasks)]
+async fn delete_sync_reports_absent() {
+    let Some(config) = live_gate("delete_sync_reports_absent") else {
+        return;
+    };
+
+    let outcome = run_delete_sync(&config).await;
+
+    if let Some(task_id) = &outcome.task_id {
+        cleanup(&config, task_id).await;
+    }
+
+    outcome
+        .result
+        .expect("delete / sync reports the task absent");
+}
+
+async fn run_delete_sync(config: &LiveConfig) -> Outcome {
+    let mut task_id = None;
+    let result = run_delete_sync_inner(config, &mut task_id).await;
+    Outcome { task_id, result }
+}
+
+async fn run_delete_sync_inner(
+    config: &LiveConfig,
+    task_id_out: &mut Option<String>,
+) -> Result<()> {
+    let title = unique_title("delete-sync-absent");
+    let local = Todo::new(title.clone());
+
+    let created = commands::create_event::handle(CreateItem {
+        remote: remote_config(config),
+        event: CalendarItem::Todo(local),
+    })
+    .await
+    .context("create")?;
+    let canonical = expect_todo(created)?;
+    *task_id_out = Some(require_task_id(&canonical)?);
+
+    commands::delete_event::handle(DeleteItem {
+        remote: remote_config(config),
+        event: CalendarItem::Todo(canonical.clone()),
+    })
+    .await
+    .context("delete")?;
+
+    let token = access_token(config).await?;
+    let after_delete = matching_tasks(config, &token, &title).await?;
+    ensure!(
+        after_delete.is_empty(),
+        "expected the task to be absent remotely after delete, found {}",
+        after_delete.len()
+    );
+
+    // "sync" after the delete: a retried delete of an already-gone task
+    // must not error and must not retry into recreating it
+    // (`classify_delete_status`'s already-gone-is-success rule, C-7a).
+    commands::delete_event::handle(DeleteItem {
+        remote: remote_config(config),
+        event: CalendarItem::Todo(canonical),
+    })
+    .await
+    .context("sync (delete retried against an already-gone task)")?;
+
+    let after_retry = matching_tasks(config, &token, &title).await?;
+    ensure!(
+        after_retry.is_empty(),
+        "a retried delete must not resurrect the task, found {}",
+        after_retry.len()
+    );
+
+    Ok(())
+}

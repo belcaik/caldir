@@ -34,7 +34,7 @@ pub(crate) fn todo_x_property<'a>(todo: &'a caldir_core::Todo, name: &str) -> Op
 /// task is new (see that module's doc comment).
 #[cfg(test)]
 mod tests {
-    use caldir_core::{Todo, XProperty};
+    use caldir_core::{CalendarItem, Todo, XProperty};
 
     use super::client::Task;
     use super::*;
@@ -137,6 +137,134 @@ mod tests {
 
         assert_eq!(patch_url, delete_url);
         assert!(patch_url.ends_with("/shared-id"));
+    }
+
+    // --- P1-05 VTODO fixtures, copied byte-identical ---
+    //
+    // `caldir_core::test_utils` is `#[cfg(test)]` and unexported, so this
+    // crate cannot import them directly (`docs/vtodo/context/testing.md`
+    // §4). Keeping them byte-identical to `caldir-core/src/test_utils.rs`
+    // makes a divergence a visible diff rather than a silent drift.
+
+    const P5_07_VTODO_ICS: &str = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+PRODID:-//u_crawler//EN\r\n\
+CALSCALE:GREGORIAN\r\n\
+BEGIN:VTODO\r\n\
+UID:assignment-123@u-crawler\r\n\
+DTSTAMP:20260801T090000Z\r\n\
+DUE:20260815T235900Z\r\n\
+SUMMARY:Assignment 3 - Recursive descent parser\r\n\
+DESCRIPTION:Submit the parser and a short report via the course portal.\r\n\
+URL:https://example.edu/courses/cs101/assignments/123\r\n\
+PRIORITY:1\r\n\
+STATUS:COMPLETED\r\n\
+COMPLETED:20260814T120000Z\r\n\
+END:VTODO\r\n\
+END:VCALENDAR\r\n";
+
+    const P5_07_VTODO_ZONED_ICS: &str = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+PRODID:-//u_crawler//EN\r\n\
+CALSCALE:GREGORIAN\r\n\
+BEGIN:VTODO\r\n\
+UID:zoned-123@u-crawler\r\n\
+DTSTAMP:20260801T090000Z\r\n\
+DUE;TZID=Europe/Stockholm:20260815T235900\r\n\
+COMPLETED:20260814T120000\r\n\
+SUMMARY:Zoned deadline\r\n\
+END:VTODO\r\n\
+END:VCALENDAR\r\n";
+
+    const P5_07_VTODO_OPEN_PRODUCTION_ICS: &str = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+PRODID:-//u_crawler//calendar-sync//EN\r\n\
+BEGIN:VTODO\r\n\
+UID:u_crawler-todo-9001571@u-crawler.local\r\n\
+DTSTAMP:20260610T191757Z\r\n\
+DUE:20260902T035959Z\r\n\
+PRIORITY:1\r\n\
+SUMMARY:Semana 11: Sumativa 5: Solemne 2\r\n\
+URL:https://lms.example.edu/courses/900223/assignments/9001571\r\n\
+END:VTODO\r\n\
+END:VCALENDAR\r\n";
+
+    const P5_07_VTODO_COMPLETED_PRODUCTION_ICS: &str = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+PRODID:-//u_crawler//calendar-sync//EN\r\n\
+BEGIN:VTODO\r\n\
+UID:u_crawler-todo-9002295@u-crawler.local\r\n\
+DTSTAMP:20260701T040020Z\r\n\
+DUE:20260708T035959Z\r\n\
+PRIORITY:1\r\n\
+STATUS:COMPLETED\r\n\
+SUMMARY:Sube aquí tu Certificado: Mentalidad digital\r\n\
+URL:https://lms.example.edu/courses/900222/assignments/9002295\r\n\
+END:VTODO\r\n\
+END:VCALENDAR\r\n";
+
+    /// Echoes a `GoogleTaskInsert` back as the `Task` shape Google's
+    /// response would carry — the stub standing in for "Google's own
+    /// canonicalization", since this crate has no HTTP mock.
+    fn echo_response(id: &str, request: &GoogleTaskInsert) -> Task {
+        Task {
+            id: id.to_string(),
+            title: request.title.clone(),
+            notes: request.notes.clone(),
+            status: request.status.clone(),
+            due: request.due.clone(),
+            completed: request.completed.clone(),
+            deleted: false,
+            hidden: false,
+        }
+    }
+
+    /// One `to_google` -> `echo_response` -> `from_google` cycle, under the
+    /// caller's zone.
+    fn round_trip(id: &str, todo: &Todo) -> Todo {
+        let request = todo.to_google(&chrono::Local);
+        let response = echo_response(id, &request);
+        task_to_calendar_item(response)
+            .unwrap()
+            .map(|item| {
+                let CalendarItem::Todo(todo) = item else {
+                    unreachable!("task_to_calendar_item always returns CalendarItem::Todo");
+                };
+                todo
+            })
+            .expect("echoed response is never reported deleted")
+    }
+
+    /// **Necessary, not sufficient** (per the ticket): this is a
+    /// self-consistency check on a pure function, run under
+    /// `UTC`/`Europe/Stockholm`/`America/New_York`. It proves the
+    /// conversion agrees with *itself* on a second pass — it does NOT prove
+    /// Google's own canonicalization agrees with caldir's expectation.
+    /// Only `live::google_tasks`'s gated tests, run against a real
+    /// account, prove that (`GOOGLE-10`, §15).
+    #[test]
+    fn the_whole_fixture_set_canonicalizes_to_a_fixpoint() {
+        for (name, ics) in [
+            ("VTODO_ICS", P5_07_VTODO_ICS),
+            ("VTODO_ZONED_ICS", P5_07_VTODO_ZONED_ICS),
+            ("VTODO_OPEN_PRODUCTION_ICS", P5_07_VTODO_OPEN_PRODUCTION_ICS),
+            (
+                "VTODO_COMPLETED_PRODUCTION_ICS",
+                P5_07_VTODO_COMPLETED_PRODUCTION_ICS,
+            ),
+        ] {
+            let CalendarItem::Todo(local) = CalendarItem::from_single_ics_str(ics).unwrap() else {
+                panic!("{name}: fixture parses as a Todo");
+            };
+
+            let first_pass = round_trip("fixpoint-task-id", &local);
+            let second_pass = round_trip("fixpoint-task-id", &first_pass);
+
+            assert_eq!(
+                first_pass, second_pass,
+                "{name}: a second to_google/from_google cycle must be a fixpoint"
+            );
+        }
     }
 
     #[test]

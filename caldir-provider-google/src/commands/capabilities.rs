@@ -11,10 +11,10 @@ use caldir_core::rpc::Capabilities;
 
 use crate::remote_config::GoogleResourceKind;
 
-/// A task-list remote reads tasks and writes none yet; a Calendar remote
-/// supports no tasks at all. Fail closed: an unresolvable remote kind
-/// reports no task support, falling back to today's events-only behaviour
-/// rather than erroring the capability query itself.
+/// A task-list remote reads and writes tasks; a Calendar remote supports no
+/// tasks at all. Fail closed: an unresolvable remote kind reports no task
+/// support, falling back to today's events-only behaviour rather than
+/// erroring the capability query itself.
 pub fn handle(cmd: Capabilities) -> ProviderCapabilities {
     match crate::remote_config::resolve_resource_kind(&cmd.remote) {
         Ok(GoogleResourceKind::TaskList) => ProviderCapabilities {
@@ -24,7 +24,7 @@ pub fn handle(cmd: Capabilities) -> ProviderCapabilities {
             },
             tasks: Capability {
                 read: true,
-                write: false,
+                write: true,
             },
         },
         Ok(GoogleResourceKind::Calendar) | Err(_) => ProviderCapabilities::events_only(),
@@ -78,15 +78,49 @@ mod tests {
         assert!(caps.tasks.read);
     }
 
-    /// D-2's prohibition is the whole reason this ticket is separate from
-    /// Wave 5; `tasks.read = true` alone is one keystroke away from both.
+    /// P5-07 closes Wave 5: create, update and delete are all coherent
+    /// (D-2), so a task-list remote now advertises `tasks.write = true` —
+    /// the flag `withhold_task_pushes` reads to let a VTODO leave the
+    /// outgoing set at all (`CROSS-3`).
     #[test]
-    fn a_task_list_remote_does_not_advertise_task_writes() {
+    fn a_task_list_remote_advertises_task_writes() {
         let caps = handle(Capabilities {
             remote: task_list_params(),
         });
 
+        assert!(caps.tasks.write);
+    }
+
+    /// The reachable wrong edit is flipping the field unconditionally,
+    /// which would tell core it may push VTODOs at a Google **Calendar**
+    /// remote — §9 and `CROSS-6` in one step, and it would look correct in
+    /// every task-list test.
+    #[test]
+    fn a_calendar_remote_still_advertises_no_task_support() {
+        let caps = handle(Capabilities {
+            remote: calendar_params(),
+        });
+
+        assert!(!caps.tasks.read);
         assert!(!caps.tasks.write);
+    }
+
+    /// `GOOGLE-12`: the capability reply is the first thing every sync
+    /// reads, so this flag flip must not perturb the events half for
+    /// either resource kind.
+    #[test]
+    fn the_event_capabilities_are_unchanged_by_this_flag() {
+        let task_list = handle(Capabilities {
+            remote: task_list_params(),
+        });
+        assert!(!task_list.events.read);
+        assert!(!task_list.events.write);
+
+        let calendar = handle(Capabilities {
+            remote: calendar_params(),
+        });
+        assert!(calendar.events.read);
+        assert!(calendar.events.write);
     }
 
     /// A Google Calendar has no Tasks API behind it at all; advertising
