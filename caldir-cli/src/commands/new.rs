@@ -88,16 +88,9 @@ pub fn run(
 
     let calendar = resolve_calendar(caldir, calendar_slug, &calendars, interactive)?;
 
-    let mut event = Event::new(title, start_time);
-    event.end = Some(end_time);
-    if let Some(loc) = location {
-        event.location = Some(loc);
-    }
-    if !reminders.is_empty() {
-        event.reminders = reminders;
-    }
-
-    let calendar_event = calendar.create_event(event)?;
+    let calendar_event = calendar.create_event(assemble_event(
+        title, start_time, end_time, location, reminders,
+    ))?;
 
     if interactive {
         println!();
@@ -109,6 +102,26 @@ pub fn run(
     );
 
     Ok(())
+}
+
+/// Build the VEVENT `new` creates. R90: `new` creates events only — this is
+/// deliberately the one and only item `new` can assemble.
+fn assemble_event(
+    title: String,
+    start_time: EventTime,
+    end_time: EventTime,
+    location: Option<String>,
+    reminders: Vec<Reminder>,
+) -> Event {
+    let mut event = Event::new(title, start_time);
+    event.end = Some(end_time);
+    if let Some(loc) = location {
+        event.location = Some(loc);
+    }
+    if !reminders.is_empty() {
+        event.reminders = reminders;
+    }
+    event
 }
 
 /// Prompt the user with retry on parse errors.
@@ -391,7 +404,104 @@ fn resolve_calendar<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use caldir_core::CalendarItem;
     use chrono::{Datelike, NaiveDate, Timelike};
+    use clap::CommandFactory;
+
+    // --- R90: `caldir new` stays event-only ---
+
+    /// R90: `caldir new` creates VEVENTs and nothing else. The assembled item
+    /// goes through the same `Calendar::create_event` the command uses, and the
+    /// file on disk is inspected three ways.
+    #[test]
+    fn new_still_creates_only_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        let calendar = caldir_core::Calendar::create(&tmp.path().join("work"), None).unwrap();
+
+        let start = EventTime::Date(NaiveDate::from_ymd_opt(2026, 4, 15).unwrap());
+        let end = EventTime::Date(NaiveDate::from_ymd_opt(2026, 4, 16).unwrap());
+        let created = calendar
+            .create_event(assemble_event(
+                "File taxes".to_string(),
+                start,
+                end,
+                None,
+                vec![],
+            ))
+            .unwrap();
+
+        // 1. the bytes are a VEVENT, and carry no VTODO at all
+        let bytes = std::fs::read_to_string(created.path()).unwrap();
+        assert!(bytes.contains("BEGIN:VEVENT"), "wrote: {bytes}");
+        assert!(!bytes.contains("BEGIN:VTODO"), "wrote: {bytes}");
+
+        // 2. it loads back as an Event, not a Todo
+        let loaded = caldir_core::CalendarEvent::load(created.path()).unwrap();
+        assert!(
+            matches!(loaded.item(), CalendarItem::Event(_)),
+            "loaded a non-Event item"
+        );
+
+        // 3. the filename cannot be mistaken for L1-07's reserved task name
+        assert_eq!(created.filename(), Some("2026-04-15__file-taxes.ics"));
+    }
+
+    /// Guards the `assemble_event` seam extracted out of `run`: the event `new`
+    /// builds still carries end, location and reminders (R1/R2 — unchanged
+    /// behaviour for events).
+    #[test]
+    fn assemble_event_wires_end_location_and_reminders() {
+        let event = assemble_event(
+            "Standup".to_string(),
+            EventTime::Date(NaiveDate::from_ymd_opt(2026, 4, 15).unwrap()),
+            EventTime::Date(NaiveDate::from_ymd_opt(2026, 4, 16).unwrap()),
+            Some("Room 3".to_string()),
+            vec![Reminder::from_human("10m").unwrap()],
+        );
+
+        assert_eq!(event.summary.as_deref(), Some("Standup"));
+        assert_eq!(
+            event.start,
+            EventTime::Date(NaiveDate::from_ymd_opt(2026, 4, 15).unwrap())
+        );
+        assert_eq!(
+            event.end,
+            Some(EventTime::Date(
+                NaiveDate::from_ymd_opt(2026, 4, 16).unwrap()
+            ))
+        );
+        assert_eq!(event.location.as_deref(), Some("Room 3"));
+        assert_eq!(event.reminders, vec![Reminder::from_human("10m").unwrap()]);
+    }
+
+    /// R90: a prose non-goal is not a guard. No `--due`, and no other
+    /// task-oriented flag, exists on `caldir new`.
+    #[test]
+    fn new_has_no_due_flag() {
+        let cli = crate::Cli::command();
+        let new = cli
+            .get_subcommands()
+            .find(|c| c.get_name() == "new")
+            .expect("`new` subcommand");
+
+        let args: Vec<(&str, Option<&str>)> = new
+            .get_arguments()
+            .map(|a| (a.get_id().as_str(), a.get_long()))
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                ("title", None),
+                ("start", Some("start")),
+                ("end", Some("end")),
+                ("duration", Some("duration")),
+                ("location", Some("location")),
+                ("calendar", Some("calendar")),
+                ("reminder", Some("reminder")),
+                ("no_reminders", Some("no-reminders")),
+            ]
+        );
+    }
 
     // --- has_time_component ---
 
