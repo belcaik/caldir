@@ -167,4 +167,41 @@ mod tests {
                 .is_none()
         );
     }
+
+    /// W3-C1's hazard, driven through both real production functions this
+    /// ticket wires together: `raw_to_config` (recording what
+    /// `list_calendars` observed) feeding `capabilities::handle` (deciding
+    /// what `capabilities` answers for that same remote). A collection whose
+    /// `supported-calendar-component-set` was observed to omit `VTODO` must
+    /// not come back out of `capabilities` as `tasks.read = true` — that is
+    /// exactly the combination that let a degraded, events-only `list_events`
+    /// answer be read by core as complete task state and delete every local
+    /// VTODO holding a sync base (C-7a).
+    #[test]
+    fn a_calendar_observed_to_lack_vtodo_reports_tasks_read_false_through_capabilities() {
+        use crate::commands::capabilities;
+        use caldir_core::RemoteConfigParams;
+        use caldir_core::rpc::Capabilities;
+
+        let cfg = raw_to_config(
+            "me@fastmail.com",
+            raw_with_tasks("Personal", "https://server/cal/1/", None, None, Some(false)),
+        );
+        let remote_config = cfg.remote_config().unwrap();
+
+        // Rebuild the wire-flattened `RemoteConfigParams` the same way
+        // `Remote::capabilities()` does: everything the real `raw_to_config`
+        // recorded, carried across as-is.
+        let mut remote = RemoteConfigParams::new();
+        if let Some(v) = remote_config.get("caldav_supports_tasks") {
+            remote.insert("caldav_supports_tasks".to_string(), v.clone());
+        }
+
+        let caps = capabilities::handle(Capabilities { remote });
+
+        assert!(
+            !caps.tasks.read,
+            "a calendar observed to lack VTODO support must not advertise tasks.read = true"
+        );
+    }
 }
