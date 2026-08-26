@@ -1,27 +1,93 @@
 use anyhow::{Context, Result, anyhow};
 use caldir_core::provider::ProviderStorage;
 use caldir_core::rpc::CreateItem;
-use caldir_core::{CalendarItem, Event, EventTime, RemoteConfigParams};
+use caldir_core::{CalendarItem, Event, EventTime, RemoteConfigParams, Todo};
 use google_calendar::types::SendUpdates;
 
 use crate::app_config::AppConfigStore;
 use crate::commands::invite::patch_invite_status;
-use crate::constants::{PROVIDER_EVENT_ID_PROPERTY, PROVIDER_NAME};
+use crate::constants::{PROVIDER_EVENT_ID_PROPERTY, PROVIDER_NAME, PROVIDER_TASK_ID_PROPERTY};
 use crate::google_event::{FromGoogle, ToGoogle};
-use crate::remote_config::GoogleRemoteConfig;
+use crate::google_tasks::{self, ToGoogle as ToGoogleTask};
+use crate::remote_config::{GoogleRemoteConfig, GoogleTaskListRemoteConfig};
 use crate::session::SessionStore;
 
 pub async fn handle(cmd: CreateItem) -> Result<CalendarItem> {
-    let event = match cmd.event {
-        CalendarItem::Event(event) => event,
-        _ => {
-            return Err(anyhow!(
-                "caldir-provider-google does not support creating tasks"
-            ));
+    match cmd.event {
+        CalendarItem::Event(event) => {
+            Ok(CalendarItem::Event(handle_event(cmd.remote, event).await?))
         }
+        CalendarItem::Todo(todo) => Ok(CalendarItem::Todo(handle_todo(cmd.remote, todo).await?)),
+        _ => Err(anyhow!(
+            "caldir-provider-google does not support this item kind"
+        )),
+    }
+}
+
+/// The Tasks half of the create split (§9): never touches the Calendar API,
+/// never builds a `google_calendar::types::Event`.
+async fn handle_todo(remote: RemoteConfigParams, todo: Todo) -> Result<Todo> {
+    let config = GoogleTaskListRemoteConfig::try_from(&remote)?;
+    let account_email = &config.google_account;
+    let task_list_id = &config.google_resource_id;
+
+    let storage = ProviderStorage::for_provider(PROVIDER_NAME)?;
+    let session_store = SessionStore::new(storage.clone());
+    let app_config_store = AppConfigStore::new(storage);
+
+    let session = session_store
+        .load_valid(account_email, &app_config_store)
+        .await?;
+    session.require_tasks_scope()?;
+
+    let (_, body) = task_insert_request(task_list_id, &todo);
+
+    let response = google_tasks::insert_task(session.access_token(), task_list_id, &body)
+        .await
+        .with_context(|| format!("Failed to create task: {}", body.title))?;
+
+    todo_from_create_response(todo, response)
+}
+
+/// Pure request-building half of a task create: the Tasks list-scoped
+/// endpoint and the insert body, with no client-chosen `id` (same
+/// "Invalid resource id value" trap the event path's insert works around).
+/// Kept separate from `insert_task`'s network call so routing to the Tasks
+/// endpoint, not the Calendar one, is directly testable without an HTTP
+/// mock this crate does not have.
+fn task_insert_request(
+    task_list_id: &str,
+    todo: &Todo,
+) -> (String, google_tasks::GoogleTaskInsert) {
+    let mut body = todo.to_google(&chrono::Local);
+    body.id = None;
+    (google_tasks::tasks_url(task_list_id), body)
+}
+
+/// The response seam: returns the canonical item Google's `insert` response
+/// describes, never the request `todo` unchanged (§7, §15) — but keeps the
+/// local `uid` and every field Google cannot represent, since the caller
+/// overwrites the local `.ics` file with exactly what this returns.
+fn todo_from_create_response(local: Todo, response: google_tasks::Task) -> Result<Todo> {
+    let canonical = google_tasks::task_to_calendar_item(response)?
+        .ok_or_else(|| anyhow!("Google task create response reported the task as deleted"))?;
+
+    let CalendarItem::Todo(canonical) = canonical else {
+        unreachable!("task_to_calendar_item always returns CalendarItem::Todo");
     };
 
-    Ok(CalendarItem::Event(handle_event(cmd.remote, event).await?))
+    let mut merged = local;
+    merged.summary = canonical.summary;
+    merged.description = canonical.description;
+    merged.status = canonical.status;
+    merged.completed = canonical.completed;
+    merged.due = canonical.due;
+    merged
+        .x_properties
+        .retain(|p| p.name != PROVIDER_TASK_ID_PROPERTY);
+    merged.x_properties.extend(canonical.x_properties);
+
+    Ok(merged)
 }
 
 async fn handle_event(remote: RemoteConfigParams, event: Event) -> Result<Event> {
@@ -269,5 +335,55 @@ mod tests {
         let error = http_error(r#"{"error":{"message":"Invalid attendee email"}}"#);
 
         assert!(!is_conference_data_error(&error));
+    }
+
+    #[test]
+    fn a_task_create_targets_the_tasks_endpoint_not_the_calendar_one() {
+        let mut todo = Todo::new("Buy milk");
+        todo.description = Some("2%, not skim".into());
+
+        let (url, body) = task_insert_request("task-list-123", &todo);
+
+        assert_eq!(
+            url,
+            "https://tasks.googleapis.com/tasks/v1/lists/task-list-123/tasks"
+        );
+        assert!(!url.contains("calendar"));
+
+        // CROSS-6, on the serialized bytes: a Todo's insert body carries none
+        // of the calendar-only shape.
+        let json = serde_json::to_value(&body).unwrap();
+        for calendar_only_key in ["summary", "start", "end", "attendees", "recurrence"] {
+            assert!(
+                json.get(calendar_only_key).is_none(),
+                "task insert body must not carry {calendar_only_key}, got {json}"
+            );
+        }
+        assert_eq!(json.get("title").and_then(|v| v.as_str()), Some("Buy milk"));
+    }
+
+    #[test]
+    fn the_created_task_carries_googles_generated_id_back_to_core() {
+        let mut local = Todo::new("Buy milk");
+        local.uid = caldir_core::EventUid::new("local-uid-123");
+
+        let response = google_tasks::Task {
+            id: "google-task-abc".into(),
+            title: "Buy milk".into(),
+            notes: String::new(),
+            status: "needsAction".into(),
+            due: None,
+            completed: None,
+            deleted: false,
+            hidden: false,
+        };
+
+        let returned = todo_from_create_response(local.clone(), response).unwrap();
+
+        assert_eq!(returned.uid, local.uid);
+        assert!(returned.x_properties.contains(&XProperty::new(
+            PROVIDER_TASK_ID_PROPERTY,
+            "google-task-abc"
+        )));
     }
 }

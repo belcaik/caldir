@@ -5,6 +5,17 @@
 
 mod client;
 mod from_google;
+mod to_google;
 
-pub use client::{Task, list_task_lists, list_tasks};
+pub use client::{Task, insert_task, list_task_lists, list_tasks, tasks_url};
 pub use from_google::task_to_calendar_item;
+pub use to_google::{GoogleTaskInsert, ToGoogle};
+
+/// `Todo` has no `x_property()` accessor (that's `Event`-only) — this reads
+/// `x_properties` directly rather than adding one to `caldir-core`.
+pub(crate) fn todo_x_property<'a>(todo: &'a caldir_core::Todo, name: &str) -> Option<&'a str> {
+    todo.x_properties
+        .iter()
+        .find(|p| p.name == name)
+        .map(|p| p.value.as_str())
+}

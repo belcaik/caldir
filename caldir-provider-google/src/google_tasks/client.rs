@@ -3,6 +3,8 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+use super::to_google::GoogleTaskInsert;
+
 const TASKLISTS_URL: &str = "https://tasks.googleapis.com/tasks/v1/users/@me/lists";
 
 /// A Google Tasks list (`TaskLists` resource). Private to this module and its
@@ -84,7 +86,7 @@ struct TasksResponse {
 /// distinguishable from "never existed" (mirrors `showDeleted` on the
 /// Calendar path in `commands::list_events::handle`); `showCompleted`
 /// defaults to `true` but is passed explicitly for clarity.
-fn tasks_url(task_list_id: &str) -> String {
+pub fn tasks_url(task_list_id: &str) -> String {
     format!("https://tasks.googleapis.com/tasks/v1/lists/{task_list_id}/tasks")
 }
 
@@ -113,4 +115,32 @@ pub async fn list_tasks(access_token: &str, task_list_id: &str) -> Result<Vec<Ta
         .context("Failed to parse Google Tasks response")?;
 
     Ok(parsed.items)
+}
+
+/// `tasks.insert` — create one task in the given list. Never `events().insert()`
+/// (§9: a task must never travel the Calendar API): this hits
+/// `tasks.googleapis.com`, not `googleapis.com/calendar`.
+pub async fn insert_task(
+    access_token: &str,
+    task_list_id: &str,
+    body: &GoogleTaskInsert,
+) -> Result<Task> {
+    let response = reqwest::Client::new()
+        .post(tasks_url(task_list_id))
+        .bearer_auth(access_token)
+        .json(body)
+        .send()
+        .await
+        .context("Failed to create Google Task")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("Failed to create Google Task ({status}): {body}");
+    }
+
+    response
+        .json()
+        .await
+        .context("Failed to parse Google Task create response")
 }
