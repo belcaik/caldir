@@ -1059,3 +1059,45 @@ All three are strengthenings.
 I scoped the CLI reporting fix to `caldir push`. `sync.rs` and
 `discard.rs` carry the identical shape, and `sync` is the command users
 actually run. Dispatched separately.
+
+## KNOWN CONSEQUENCE for the ship report — a refused task aborts sync's PULL half
+`caldir sync` renders ONE combined diff, so once the outgoing half is
+refused there is no honest way to show the incoming half while
+suppressing the outgoing one. A partial render would misrepresent what
+happened. Consequence: a user with a task in a synced calendar must run
+`caldir pull` rather than `caldir sync` until the task is moved.
+`pull` on such a calendar works and exits 0 - locked by
+`pull_ignores_a_local_task_and_exits_zero`.
+Recorded in a doc comment at the site, and must appear in the ship
+report's known limitations.
+
+## RULING — `discard` correctly does NOT get the pre-flight guard
+`discard_outgoing_diff` is purely local and never touches the wire, AND
+dropping the task is one of the two remedies the refusal message itself
+offers. Guarding it would strand the user with no way out. Locked by an
+INVERSE mutation (guard wrongly copied in => caught).
+
+## CORRECTION — ADR-01's headline justification was the wrong argument
+I have been citing "41 errors across 7 files holding 220 VEVENT tests"
+as why CalendarItem beat widening Event. The architecture reviewer found
+that measured MIGRATION FRICTION, not architectural necessity. The
+enum's real justification is STORAGE: SyncBases is one
+HashMap<EventInstanceId, Option<Box<...>>> that must hold both kinds,
+and Box<dyn Component> would lose the derived PartialEq that IS the
+sync-direction test (event_bases.rs, calendar_diff.rs).
+Right conclusion, wrong argument. The PR description must not repeat the
+41-error framing as the reason.
+
+## VJOURNAL — the structural claim survives, the COST estimate does not
+Structural (survives): diff engine, state layout, wire, identity format
+and the push pre-flight all absorb a new variant unchanged, because the
+pre-flight keys on ComponentKind rather than Rust type.
+Cost (does not survive): measured 13 exhaustive match arms in item.rs
+alone, plus a todo.rs-sized codec module (~310 prod lines) recurring PER
+KIND, because ADR-01 step 6's shared read_shared/write_shared<C:
+EventLike> was never built.
+And a trap: in caldir-cli, six wildcard arms would compile SILENTLY
+against the #[non_exhaustive] enum while one unreachable!() PANICS on
+the --json path (agenda_json.rs). #[non_exhaustive] protects the crate
+boundary but converts a compile error into a runtime panic for a
+downstream consumer that guessed wrong.
