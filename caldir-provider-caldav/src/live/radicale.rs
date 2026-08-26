@@ -105,7 +105,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use caldir_core::{CalendarItem, EventTime, Todo, TodoStatus};
+use caldir_core::{CalendarItem, ComponentKind, EventTime, EventUid, Todo, TodoStatus};
 use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
 use http::StatusCode;
 
@@ -1150,4 +1150,201 @@ fn renaming_a_local_file_updates_the_same_resource_and_never_a_second_one() {
     );
     assert_eq!(fetched.start, renamed.start);
     assert_eq!(fetched.end, renamed.end);
+}
+
+// ============================================================================
+// P3-05: mixed-component behaviour survives the write paths
+// ============================================================================
+
+/// The UID a sibling task uses in
+/// [`task_writes_leave_a_sibling_event_in_the_same_collection_untouched`] —
+/// deliberately not the control event's UID (C-15: these two are not the
+/// same-UID case, just neighbours in one collection).
+const SIBLING_TASK_UID: &str = "sibling-task-1@u-crawler";
+
+/// **P3-05**, C-9/C-15. A task create, update and delete, all through the
+/// production write paths, leave a sibling `VEVENT` in the same collection
+/// byte-identical on the server.
+///
+/// Before `P3-02`..`P3-04` a task could not reach a `PUT` or `DELETE` at all;
+/// now both compute an href from a UID and locate resources by REPORT, both
+/// collection-wide operations, and a mis-scoped one takes the neighbour with
+/// it. This is a regression lock, not a claim about production shape: caldir
+/// never puts a task and an event in the same directory in practice.
+///
+/// R30 binding: only server output is compared (a `get_ics` against an
+/// earlier `get_ics`), never a PUT against a GET.
+#[test]
+#[serial_test::serial(radicale)]
+fn task_writes_leave_a_sibling_event_in_the_same_collection_untouched() {
+    let Some(server) =
+        live_gate("task_writes_leave_a_sibling_event_in_the_same_collection_untouched")
+    else {
+        return;
+    };
+
+    server.mkcalendar("deadlines");
+    let collection_url = server.collection_url("deadlines");
+
+    // The sibling VEVENT, seeded through the production create path.
+    let CalendarItem::Event(event) =
+        CalendarItem::from_single_ics_str(CONTROL_EVENT_ICS).expect("the control fixture parses")
+    else {
+        panic!("the control fixture is a VEVENT");
+    };
+    block_on(ops::create_event(
+        USERNAME,
+        PASSWORD,
+        &collection_url,
+        event,
+    ))
+    .expect("the sibling event create lands");
+
+    let event_filename = format!("{CONTROL_EVENT_UID}.ics");
+    let baseline = server.get_ics("deadlines", &event_filename);
+
+    let event_is_untouched = |server: &RadicaleServer| {
+        assert_eq!(
+            server.get_ics("deadlines", &event_filename),
+            baseline,
+            "a task write must not disturb the sibling event's resource"
+        );
+        let CalendarItem::Event(fetched) = pull(server, "deadlines")
+            .into_iter()
+            .find(|item| item.uid().as_str() == CONTROL_EVENT_UID)
+            .unwrap_or_else(|| panic!("the sibling event must still be in the listing"))
+        else {
+            panic!("the sibling event must still come back as an Event");
+        };
+        assert_eq!(fetched.summary.as_deref(), Some("Assignment 3 window"));
+    };
+
+    // Create a task with a *different* UID through the production path.
+    let mut todo = Todo::new("Sibling task");
+    todo.uid = EventUid::new(SIBLING_TASK_UID);
+    block_on(crate::caldav::ops::create_event::create_item(
+        USERNAME,
+        PASSWORD,
+        &collection_url,
+        CalendarItem::Todo(todo.clone()),
+    ))
+    .expect("the task create lands");
+    event_is_untouched(&server);
+
+    // Update the task through the production path.
+    todo.summary = Some("Sibling task, updated".to_string());
+    block_on(crate::caldav::ops::update_event::update_item(
+        USERNAME,
+        PASSWORD,
+        &collection_url,
+        CalendarItem::Todo(todo.clone()),
+    ))
+    .expect("the task update lands");
+    event_is_untouched(&server);
+
+    // Delete the task through the production path.
+    block_on(ops::delete_event(
+        USERNAME,
+        PASSWORD,
+        &collection_url,
+        SIBLING_TASK_UID,
+        ComponentKind::Todo,
+    ))
+    .expect("the task delete lands");
+    event_is_untouched(&server);
+}
+
+/// **P3-05**, C-9/C-15. A `VEVENT` and a `VTODO` sharing one UID, in separate
+/// collections, stay distinct through a task create and update via the
+/// production path.
+///
+/// Separate collections is the *deliberate* shape here (C-15): production's
+/// task and its window event never share a UID and live in different
+/// calendar directories, so §8.5's same-UID pair is synthetic, not something
+/// production exercises. It is pinned anyway because it is the case that
+/// silently destroys data if identity resolution regresses. One collection is
+/// deliberately not attempted: Radicale enforces UID uniqueness per
+/// collection component-agnostically, and the shipped
+/// [`pushing_a_same_uid_pair_into_one_collection_surfaces_an_error`] already
+/// records that a same-UID push there is an error, not a second resource.
+#[test]
+#[serial_test::serial(radicale)]
+fn a_same_uid_event_and_task_in_separate_collections_stay_distinct_through_a_task_write() {
+    let Some(server) = live_gate(
+        "a_same_uid_event_and_task_in_separate_collections_stay_distinct_through_a_task_write",
+    ) else {
+        return;
+    };
+
+    server.mkcalendar("windows");
+    server.mkcalendar("deadlines");
+
+    // The event, in `windows`, seeded through the production create path.
+    let CalendarItem::Event(event) = CalendarItem::from_single_ics_str(SAME_UID_EVENT_ICS)
+        .expect("the colliding event fixture parses")
+    else {
+        panic!("the colliding fixture is a VEVENT");
+    };
+    block_on(ops::create_event(
+        USERNAME,
+        PASSWORD,
+        &server.collection_url("windows"),
+        event,
+    ))
+    .expect("the event create lands");
+
+    // The task sharing that UID, in `deadlines`, created then updated through
+    // the production path.
+    let CalendarItem::Todo(todo) =
+        CalendarItem::from_single_ics_str(U_CRAWLER_TASK_ICS).expect("the task fixture parses")
+    else {
+        panic!("the task fixture is a VTODO");
+    };
+    block_on(crate::caldav::ops::create_event::create_item(
+        USERNAME,
+        PASSWORD,
+        &server.collection_url("deadlines"),
+        CalendarItem::Todo(todo.clone()),
+    ))
+    .expect("the task create lands");
+
+    let mut updated = todo.clone();
+    updated.summary = Some("Deadline, updated".to_string());
+    block_on(crate::caldav::ops::update_event::update_item(
+        USERNAME,
+        PASSWORD,
+        &server.collection_url("deadlines"),
+        CalendarItem::Todo(updated),
+    ))
+    .expect("the task update lands");
+
+    let task_hrefs = server.resource_hrefs("deadlines");
+    assert_eq!(
+        task_hrefs.len(),
+        1,
+        "the task's collection must hold exactly one resource, got {task_hrefs:?}"
+    );
+
+    let event_hrefs = server.resource_hrefs("windows");
+    assert_eq!(
+        event_hrefs.len(),
+        1,
+        "the event's collection must be unchanged, got {event_hrefs:?}"
+    );
+
+    let windows_items = pull(&server, "windows");
+    let CalendarItem::Event(fetched_event) = windows_items
+        .iter()
+        .find(|item| item.uid().as_str() == U_CRAWLER_UID)
+        .unwrap_or_else(|| panic!("the event is still in its own collection"))
+    else {
+        panic!("the windows collection must still hold an Event for this UID");
+    };
+    assert_eq!(
+        fetched_event.summary.as_deref(),
+        Some("Event that must not replace the task")
+    );
+
+    let fetched_task = task_with_uid(&pull(&server, "deadlines"), U_CRAWLER_UID);
+    assert_eq!(fetched_task.summary.as_deref(), Some("Deadline, updated"));
 }

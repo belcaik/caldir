@@ -531,6 +531,70 @@ END:VCALENDAR\r\n";
         );
     }
 
+    const SAME_UID_EVENT_ICS: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VEVENT\r\nUID:shared-1@caldir\r\nDTSTART:20260615T100000Z\r\nDTEND:20260615T110000Z\r\n\
+SUMMARY:Meeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+    const SAME_UID_TODO_ICS: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VTODO\r\nUID:shared-1@caldir\r\nDTSTAMP:20260801T090000Z\r\nSTATUS:NEEDS-ACTION\r\n\
+SUMMARY:File the tax return\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
+
+    /// P3-05, C-9/C-15. A same-UID `VEVENT`/`VTODO` pair, served at two
+    /// different hrefs, both survive one listing as two distinct items.
+    ///
+    /// Right proof because `both_reports_resources_reach_the_caller` uses two
+    /// *different* UIDs, so nothing there would catch a merge keyed on UID
+    /// alone: such a merge drops one of the two, and core reads that as a
+    /// delete of the user's file. `instance_id()`, not `uid()`, is the
+    /// identity that must differ.
+    #[tokio::test]
+    async fn a_same_uid_event_and_task_both_survive_one_listing() {
+        let server = MockServer::start().await;
+
+        mount_report(
+            &server,
+            "VEVENT",
+            multistatus("/cal/evt-shared.ics", "\"e-shared\"", SAME_UID_EVENT_ICS),
+        )
+        .await;
+        mount_report(
+            &server,
+            "VTODO",
+            multistatus("/cal/task-shared.ics", "\"t-shared\"", SAME_UID_TODO_ICS),
+        )
+        .await;
+
+        let items = fetch_events(
+            "user",
+            "pass",
+            &calendar_url(&server),
+            "2025-08-25T00:00:00Z",
+            "2027-08-25T00:00:00Z",
+        )
+        .await
+        .expect("both REPORTs answer");
+
+        assert_eq!(
+            items.len(),
+            2,
+            "a same-UID event/task pair must yield two items, got {items:?}"
+        );
+
+        let uids: Vec<&str> = items.iter().map(|item| item.uid().as_str()).collect();
+        assert_eq!(
+            uids,
+            ["shared-1@caldir", "shared-1@caldir"],
+            "both resources share the UID, got {uids:?}"
+        );
+
+        assert_ne!(
+            items[0].instance_id(),
+            items[1].instance_id(),
+            "component kind is part of caldir identity: a merge keyed on UID \
+             alone collapses this pair into one, which core reads as a delete"
+        );
+    }
+
     /// R2/C13. A server that rejects the bare-`VTODO` `calendar-query` and
     /// openly says (via `supported-calendar-component-set`) that it has no
     /// `VTODO` support must not lose the caller's **event** sync. Before this
