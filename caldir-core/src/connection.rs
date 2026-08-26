@@ -3,7 +3,7 @@ mod error;
 use std::collections::HashMap;
 
 use crate::calendar::{CalendarError, SyncBases};
-use crate::diff::EventChange;
+use crate::diff::{EventChange, TaskPushes};
 use crate::event::EventInstanceId;
 use crate::item::CalendarItem;
 use crate::{Calendar, CalendarDiff, CalendarEvent, DateRange, Remote, RemoteEvent};
@@ -37,6 +37,18 @@ impl Connection {
 
     pub async fn diff(&mut self, range: &DateRange) -> Result<CalendarDiff, ConnectionError> {
         let local_listing = self.local().events()?;
+
+        // C-8/D-2, fail closed: `capabilities()` never propagates an error —
+        // an absent, unknown, errored or timed-out answer already reads as
+        // `ProviderCapabilities::default()` (all false), so the reason is
+        // only for a future surface (P2-05) and is dropped here.
+        let (capabilities, _reason) = self.remote().capabilities().await;
+        let task_pushes = if capabilities.tasks.write {
+            TaskPushes::Allowed
+        } else {
+            TaskPushes::Withheld
+        };
+
         let remote_events = self.remote().list_events(range).await?;
 
         // State migration: in-sync pairs never produce a change to apply, so
@@ -53,8 +65,13 @@ impl Connection {
 
         let sync_bases = self.local().state().sync_bases();
 
-        let mut diff =
-            CalendarDiff::compute_from_listing(local_listing, remote_events, sync_bases, range);
+        let mut diff = CalendarDiff::compute_from_listing(
+            local_listing,
+            remote_events,
+            sync_bases,
+            range,
+            task_pushes,
+        );
 
         if self.read_only() {
             diff.discard_outgoing();
@@ -256,6 +273,7 @@ mod tests {
     use crate::Event;
     use crate::diff::EventChange;
     use crate::event::{EventUid, XProperty};
+    use crate::provider::ProviderCapabilities;
     use crate::provider::mock_provider::MockProvider;
     use crate::test_utils::{
         VEVENT_CONTROL_ICS, VTODO_ZONED_ICS, incoming_create_diff, incoming_delete_diff,
@@ -296,6 +314,7 @@ mod tests {
         calendar.create_event(test_event()).unwrap();
 
         let mock = test_mock_provider();
+        mock.reply::<rpc::Capabilities>(ProviderCapabilities::events_only());
         mock.reply::<rpc::ListEvents>(vec![]);
         let remote = Remote::new(mock.provider(), test_remote_params());
 
@@ -325,6 +344,7 @@ mod tests {
             .unwrap();
 
         let mock = test_mock_provider();
+        mock.reply::<rpc::Capabilities>(ProviderCapabilities::events_only());
         mock.reply::<rpc::ListEvents>(vec![]);
         let remote = Remote::new(mock.provider(), test_remote_params());
 
@@ -349,6 +369,7 @@ mod tests {
         calendar.create_event(event.clone()).unwrap();
 
         let mock = test_mock_provider();
+        mock.reply::<rpc::Capabilities>(ProviderCapabilities::events_only());
         mock.reply::<rpc::ListEvents>(vec![]);
         let remote = Remote::new(mock.provider(), test_remote_params());
 
@@ -356,6 +377,105 @@ mod tests {
         let diff = connection.diff(&DateRange::default()).await.unwrap();
 
         assert_eq!(diff.outgoing(), &[EventChange::Create(event.into())]);
+    }
+
+    /// P1-03/S3, the connection-level proof. The module-level `CalendarDiff`
+    /// tests pass just as well against a hard-coded flag (C-3's whole point
+    /// is that `CalendarDiff` cannot see a `Remote`), so only driving the
+    /// real `Connection::diff` against a `MockProvider` proves the value is
+    /// actually threaded from the provider's answer.
+    #[tokio::test]
+    async fn the_capability_reported_by_the_provider_decides_task_pushes() {
+        use crate::provider::Capability;
+
+        let todo = Todo::new("Hand in the assignment");
+
+        let (_tmp, caldir) = test_caldir();
+        let calendar = caldir
+            .create_calendar("writable-cal", Some(calendar_config(Some(false))))
+            .unwrap();
+        calendar.create_event(todo.clone()).unwrap();
+        let mock = test_mock_provider();
+        mock.reply::<rpc::Capabilities>(ProviderCapabilities {
+            events: Capability {
+                read: true,
+                write: true,
+            },
+            tasks: Capability {
+                read: true,
+                write: true,
+            },
+        });
+        mock.reply::<rpc::ListEvents>(vec![]);
+        let remote = Remote::new(mock.provider(), test_remote_params());
+        let mut connection = Connection::new(calendar, remote);
+        let allowed = connection.diff(&DateRange::default()).await.unwrap();
+
+        assert_eq!(
+            allowed.outgoing(),
+            &[EventChange::Create(CalendarItem::Todo(todo.clone()))],
+            "tasks.write=true must let the task reach the outgoing set",
+        );
+        assert_eq!(allowed.withheld_task_pushes(), 0);
+
+        let (_tmp2, caldir2) = test_caldir();
+        let calendar2 = caldir2
+            .create_calendar("writable-cal", Some(calendar_config(Some(false))))
+            .unwrap();
+        calendar2.create_event(todo.clone()).unwrap();
+        let mock2 = test_mock_provider();
+        mock2.reply::<rpc::Capabilities>(ProviderCapabilities::default());
+        mock2.reply::<rpc::ListEvents>(vec![]);
+        let remote2 = Remote::new(mock2.provider(), test_remote_params());
+        let mut connection2 = Connection::new(calendar2, remote2);
+        let withheld = connection2.diff(&DateRange::default()).await.unwrap();
+
+        assert!(
+            withheld.outgoing().is_empty(),
+            "tasks.write=false must withhold the same task, got {:?}",
+            withheld.outgoing(),
+        );
+        assert_eq!(withheld.withheld_task_pushes(), 1);
+    }
+
+    /// C-8/`CROSS-5`. A provider whose capabilities call cannot be answered
+    /// must not fail the calendar: `Remote::capabilities()` already reads
+    /// that as task-less (P1-02), and this pins that `Connection::diff` acts
+    /// on it rather than propagating the transport error — the calendar's
+    /// events sync exactly as they would for a task-free calendar.
+    #[tokio::test]
+    async fn a_provider_that_cannot_answer_capabilities_still_syncs_its_events() {
+        use crate::provider::transport::ProviderTransportError;
+        use std::time::Duration;
+
+        let (_tmp, caldir) = test_caldir();
+        let calendar = caldir
+            .create_calendar("writable-cal", Some(calendar_config(Some(false))))
+            .unwrap();
+        let event = test_event();
+        calendar.create_event(event.clone()).unwrap();
+        let todo = Todo::new("Hand in the assignment");
+        calendar.create_event(todo.clone()).unwrap();
+
+        let mock = test_mock_provider();
+        mock.reply_error(ProviderTransportError::Timeout(Duration::from_secs(1)));
+        mock.reply::<rpc::ListEvents>(vec![]);
+        let remote = Remote::new(mock.provider(), test_remote_params());
+
+        let mut connection = Connection::new(calendar, remote);
+        let diff = connection.diff(&DateRange::default()).await.unwrap();
+
+        assert_eq!(
+            diff.outgoing(),
+            &[EventChange::Create(event.into())],
+            "the calendar's events must sync exactly as a task-free calendar would",
+        );
+        assert_eq!(
+            diff.withheld_task_pushes(),
+            1,
+            "a capabilities failure must fail closed, not lose the task silently",
+        );
+        let _ = todo;
     }
 
     #[tokio::test]
@@ -376,6 +496,7 @@ mod tests {
         assert_eq!(calendar.state().sync_base(&id), None);
 
         let mock = test_mock_provider();
+        mock.reply::<rpc::Capabilities>(ProviderCapabilities::events_only());
         mock.reply::<rpc::ListEvents>(vec![event.clone().into()]);
         let remote = Remote::new(mock.provider(), test_remote_params());
 
@@ -394,6 +515,7 @@ mod tests {
         let id = event.event_instance_id();
         connection.local().create_event(event.clone()).unwrap();
 
+        mock.reply::<rpc::Capabilities>(ProviderCapabilities::events_only());
         mock.reply::<rpc::ListEvents>(vec![event.into()]);
         connection.diff(&DateRange::default()).await.unwrap();
 
@@ -434,6 +556,7 @@ mod tests {
         assert!(calendar.events().unwrap().is_incomplete());
 
         let mock = test_mock_provider();
+        mock.reply::<rpc::Capabilities>(ProviderCapabilities::events_only());
         mock.reply::<rpc::ListEvents>(vec![remote_only.into()]);
         let remote = Remote::new(mock.provider(), test_remote_params());
 
@@ -810,6 +933,7 @@ mod tests {
             .to_path_buf();
         let todo_bytes_before = std::fs::read(&todo_path).unwrap();
 
+        mock.reply::<rpc::Capabilities>(ProviderCapabilities::events_only());
         mock.reply::<rpc::ListEvents>(vec![]);
         for event in &events {
             mock.reply::<rpc::CreateItem>(CalendarItem::Event(event.clone()));
@@ -991,6 +1115,7 @@ mod tests {
         let undecodable = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
 BEGIN:VJOURNAL\r\nUID:journal@u-crawler\r\nDTSTAMP:20260801T090000Z\r\n\
 END:VJOURNAL\r\nEND:VCALENDAR\r\n";
+        mock.reply::<rpc::Capabilities>(ProviderCapabilities::events_only());
         mock.reply_raw_data(serde_json::json!([decodable, undecodable]));
 
         let Err(err) = connection.diff(&DateRange::default()).await else {
@@ -1073,6 +1198,7 @@ END:VJOURNAL\r\nEND:VCALENDAR\r\n";
         .unwrap();
         connection.local = Calendar::load(connection.local().path()).unwrap();
 
+        mock.reply::<rpc::Capabilities>(ProviderCapabilities::events_only());
         mock.reply::<rpc::ListEvents>(vec![
             CalendarItem::Event(event.clone()),
             CalendarItem::Todo(todo.clone()),
@@ -1109,6 +1235,7 @@ END:VJOURNAL\r\nEND:VCALENDAR\r\n";
         );
 
         // Now neither item is reported remotely.
+        mock.reply::<rpc::Capabilities>(ProviderCapabilities::events_only());
         mock.reply::<rpc::ListEvents>(vec![]);
         let diff = connection.diff(&DateRange::default()).await.unwrap();
 
@@ -1180,6 +1307,7 @@ END:VJOURNAL\r\nEND:VCALENDAR\r\n";
             .unwrap();
 
         // Events, and only events — the webcal feed shape.
+        mock.reply::<rpc::Capabilities>(ProviderCapabilities::events_only());
         mock.reply::<rpc::ListEvents>(vec![CalendarItem::Event(still_there.clone())]);
         let diff = connection.diff(&DateRange::default()).await.unwrap();
 
@@ -1547,6 +1675,7 @@ END:VCALENDAR\r\n";
         // The control event is local-only; both tasks live on the remote, so
         // one sync moves items in *both* directions.
         connection.local().create_event(event.clone()).unwrap();
+        mock.reply::<rpc::Capabilities>(ProviderCapabilities::events_only());
         mock.reply_raw_data(serde_json::json!([CHURN_VTODO_ICS, VTODO_ZONED_ICS]));
 
         let first = connection.diff(&range).await.unwrap();
@@ -1588,6 +1717,7 @@ END:VCALENDAR\r\n";
         // Pass two: nothing changed on either side. The remote now reports all
         // three items — the same bytes it was handed for the tasks, and the
         // event it just accepted.
+        mock.reply::<rpc::Capabilities>(ProviderCapabilities::events_only());
         mock.reply_raw_data(serde_json::json!([
             VEVENT_CONTROL_ICS,
             CHURN_VTODO_ICS,

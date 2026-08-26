@@ -26,6 +26,7 @@ impl CalendarDiff {
         remote_events: Vec<RemoteEvent>,
         sync_bases: &SyncBases,
         range: &DateRange,
+        task_pushes: TaskPushes,
     ) -> Self {
         let deletes = if local_listing.is_incomplete() {
             Deletes::Suppressed
@@ -39,6 +40,7 @@ impl CalendarDiff {
             sync_bases,
             range,
             deletes,
+            task_pushes,
         )
     }
 
@@ -48,6 +50,7 @@ impl CalendarDiff {
         sync_bases: &SyncBases,
         range: &DateRange,
         deletes: Deletes,
+        task_pushes: TaskPushes,
     ) -> Self {
         // Keyed by the kind-carrying identity: a VEVENT and a VTODO
         // sharing a UID are two entries on each side, so `.collect()` cannot
@@ -191,7 +194,15 @@ impl CalendarDiff {
             }
         }
 
-        let withheld_task_pushes = withhold_task_pushes(&mut outgoing);
+        // C-3: the capability flag decides whether the event-only wire's
+        // withholding runs at all. `CalendarDiff` never inspects a `Remote`
+        // or a provider name to get here — `Connection::diff` resolved that
+        // upstream and handed down only this enum, the way `Deletes` already
+        // arrives decided.
+        let withheld_task_pushes = match task_pushes {
+            TaskPushes::Allowed => 0,
+            TaskPushes::Withheld => withhold_task_pushes(&mut outgoing),
+        };
 
         CalendarDiff {
             outgoing,
@@ -271,6 +282,7 @@ impl CalendarDiff {
             sync_bases,
             range,
             Deletes::Allowed,
+            TaskPushes::Withheld,
         )
     }
 
@@ -304,6 +316,17 @@ fn withhold_task_pushes(outgoing: &mut Vec<EventChange>) -> usize {
 enum Deletes {
     Allowed,
     Suppressed,
+}
+
+/// Whether the provider advertises `tasks.write` (C-3). Threaded into
+/// `compute_with` the same way `Deletes` is: decided by the caller
+/// (`Connection::diff`, from `Remote::capabilities()`) and handed down as an
+/// opaque flag. `CalendarDiff` never sees a `Remote` or a provider name to
+/// derive this itself.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TaskPushes {
+    Allowed,
+    Withheld,
 }
 
 enum UpdateDirection {
@@ -1138,6 +1161,7 @@ mod tests {
             ],
             &sync_bases,
             &DateRange::default(),
+            TaskPushes::Withheld,
         );
 
         let outgoing_deletes: Vec<_> = diff
@@ -1181,6 +1205,7 @@ mod tests {
             vec![RemoteEvent::new(remote_deleted.clone())],
             &sync_bases,
             &DateRange::default(),
+            TaskPushes::Withheld,
         );
 
         assert_eq!(
@@ -1507,6 +1532,102 @@ mod tests {
         assert_eq!(diff.outgoing, vec![]);
         assert_eq!(diff.incoming, vec![]);
         let _ = todo;
+    }
+
+    /// P1-03/S3. A provider that advertises `tasks.write` must actually let a
+    /// task through: `compute_with`'s withholding is conditional on the
+    /// capability flag, not unconditional (C-3).
+    #[test]
+    fn a_task_change_is_outgoing_when_task_writes_are_advertised() {
+        let (_tmp, calendar) = test_calendar();
+        let todo = Todo::new("Hand in the assignment");
+        let calendar_event = CalendarEvent::create(&calendar, todo.clone()).unwrap();
+
+        let diff = CalendarDiff::compute_with(
+            vec![calendar_event],
+            vec![],
+            &SyncBases::new(),
+            &DateRange::default(),
+            Deletes::Allowed,
+            TaskPushes::Allowed,
+        );
+
+        assert_eq!(
+            diff.outgoing,
+            vec![EventChange::Create(CalendarItem::Todo(todo))]
+        );
+        assert_eq!(diff.withheld_task_pushes, 0);
+    }
+
+    /// The honest `false` beside the honest `true` above: without the
+    /// capability, the task is withheld and an event change in the same diff
+    /// still goes out (R70 is scoped to tasks, never to the whole diff).
+    #[test]
+    fn a_task_change_is_withheld_when_task_writes_are_not_advertised() {
+        let (_tmp, calendar) = test_calendar();
+        let todo = Todo::new("Hand in the assignment");
+        let event = test_event();
+        let todo_event = CalendarEvent::create(&calendar, todo.clone()).unwrap();
+        let event_event = calendar.create_event(event.clone()).unwrap();
+
+        let diff = CalendarDiff::compute_with(
+            vec![todo_event, event_event],
+            vec![],
+            &SyncBases::new(),
+            &DateRange::default(),
+            Deletes::Allowed,
+            TaskPushes::Withheld,
+        );
+
+        assert_eq!(diff.outgoing, vec![EventChange::Create(event.into())]);
+        assert_eq!(diff.withheld_task_pushes, 1);
+    }
+
+    /// R1/R2 control: an event's own outgoing status never depends on the
+    /// task capability, in either direction.
+    #[test]
+    fn an_event_change_is_outgoing_regardless_of_task_capability() {
+        for task_pushes in [TaskPushes::Allowed, TaskPushes::Withheld] {
+            let (_tmp, calendar) = test_calendar();
+            let event = test_event();
+            let calendar_event = calendar.create_event(event.clone()).unwrap();
+
+            let diff = CalendarDiff::compute_with(
+                vec![calendar_event],
+                vec![],
+                &SyncBases::new(),
+                &DateRange::default(),
+                Deletes::Allowed,
+                task_pushes,
+            );
+
+            assert_eq!(diff.outgoing, vec![EventChange::Create(event.into())]);
+        }
+    }
+
+    /// C-3's last clause: a read-only calendar pushes nothing at all, so
+    /// naming *tasks* there would report the wrong restriction even though
+    /// the provider genuinely allows task writes.
+    #[test]
+    fn a_discarded_outgoing_set_reports_no_task_restriction_even_when_task_writes_are_allowed() {
+        let (_tmp, calendar) = test_calendar();
+        let todo = Todo::new("Hand in the assignment");
+        let calendar_event = CalendarEvent::create(&calendar, todo).unwrap();
+
+        let mut diff = CalendarDiff::compute_with(
+            vec![calendar_event],
+            vec![],
+            &SyncBases::new(),
+            &DateRange::default(),
+            Deletes::Allowed,
+            TaskPushes::Allowed,
+        );
+        assert_eq!(diff.withheld_task_pushes, 0);
+
+        diff.discard_outgoing();
+
+        assert!(diff.outgoing.is_empty());
+        assert_eq!(diff.withheld_task_pushes(), 0);
     }
 
     /// T-27 (R99, A-5). Absence stays meaningful. The remote response is
