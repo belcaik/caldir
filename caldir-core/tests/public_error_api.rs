@@ -75,11 +75,13 @@ fn a_downstream_crate_can_name_and_match_calendar_event_error() {
     assert_eq!(described, format!("not found: {}", missing.display()));
 }
 
-/// `RemoteError` is the error type of every public `Remote` method. Its
-/// `Provider` payload is still crate-private, so it is built here through the
-/// public `From<EventError>` conversion `#[from]` generates. `EventError`
-/// itself is now nameable — see the two tests below, which match *into* the
-/// `UnsupportedItem` payload rather than only past it.
+/// `RemoteError` is the error type of every public `Remote` method. This
+/// test drives its `UnsupportedItem` arm through the public
+/// `From<EventError>` conversion `#[from]` generates — the `Provider` arm's
+/// payload (`ProviderError`) is exercised separately, below
+/// (`a_downstream_crate_distinguishes_the_six_error_classes_on_provider_error`,
+/// W2-C1). `EventError` itself is now nameable — see the two tests below,
+/// which match *into* the `UnsupportedItem` payload rather than only past it.
 #[test]
 fn a_downstream_crate_can_name_and_match_remote_error() {
     let mut event = Event::new(
@@ -148,6 +150,76 @@ fn a_downstream_crate_can_match_inside_remote_error_unsupported_item() {
     };
 
     assert_eq!(named, "VJOURNAL");
+}
+
+/// W2-C1: `P2-04` built the six §16 classes so the CLI could distinguish
+/// provider failures without matching on the `Display` string, but
+/// `ProviderError` was re-exported `pub(crate)` — unnameable, so every
+/// downstream caller could only reach the string the taxonomy was built to
+/// replace. `ProviderError`'s data variants carry no invariants, so
+/// constructing them directly here is the same shape as the in-crate sibling
+/// test `ConnectionError`'s `a_missing_scope_failure_is_distinguishable_
+/// without_string_matching`, just now legal from outside the crate.
+/// `ProviderTransportError` is exposed alongside it (also `#[non_exhaustive]`)
+/// so the `network` class — carried inside `ProviderError::Transport` rather
+/// than as its own top-level variant — is distinguishable from an unrelated
+/// local subprocess failure, not just lumped in with it.
+#[test]
+fn a_downstream_crate_distinguishes_the_six_error_classes_on_provider_error() {
+    use caldir_core::provider::{ProviderError, ProviderTransportError};
+
+    fn describe(err: &ProviderError) -> &'static str {
+        match err {
+            ProviderError::UnsupportedOperation(_) => "unsupported_operation",
+            ProviderError::MissingAuthScope(_) => "missing_auth_scope",
+            ProviderError::RemoteNotFound(_) => "remote_not_found",
+            ProviderError::Conflict(_) => "conflict",
+            ProviderError::SemanticLimitation(_) => "semantic_limitation",
+            ProviderError::Transport(ProviderTransportError::Network(_)) => "network",
+            // The arm `#[non_exhaustive]` forces on every downstream match —
+            // on both enums.
+            _ => "some other failure",
+        }
+    }
+
+    let cases: [(ProviderError, &str); 6] = [
+        (
+            ProviderError::UnsupportedOperation("task writes unsupported".into()),
+            "unsupported_operation",
+        ),
+        (
+            ProviderError::MissingAuthScope("reauth required".into()),
+            "missing_auth_scope",
+        ),
+        (
+            ProviderError::RemoteNotFound("event gone".into()),
+            "remote_not_found",
+        ),
+        (ProviderError::Conflict("stale etag".into()), "conflict"),
+        (
+            ProviderError::SemanticLimitation("field truncated".into()),
+            "semantic_limitation",
+        ),
+        (
+            ProviderError::Transport(ProviderTransportError::Network("dns failure".into())),
+            "network",
+        ),
+    ];
+
+    for (provider_error, expected_class) in cases {
+        assert_eq!(describe(&provider_error), expected_class);
+
+        // The class survives the real conversion path a `Remote` failure
+        // takes, not just a bare `ProviderError` in isolation.
+        let remote_error: RemoteError = provider_error.into();
+        match &remote_error {
+            RemoteError::Provider(inner) => {
+                assert_eq!(describe(inner), expected_class);
+            }
+            RemoteError::UnsupportedItem(_) => panic!("expected a provider failure"),
+            _ => panic!("unrecognised RemoteError variant"),
+        }
+    }
 }
 
 /// `ConnectionError` is the error type of every public `Connection` method —

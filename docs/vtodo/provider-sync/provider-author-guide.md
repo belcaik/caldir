@@ -109,9 +109,9 @@ must still fail loudly rather than silently dispatch) `a_typo_in_a_known_command
 On the caller side (not your code, but useful to know what caldir sees): this reply becomes
 `ProviderError::UnsupportedMethod`, distinct from a generic provider error, locked by
 `an_unsupported_method_reply_becomes_a_typed_provider_error`. You do not construct or match this
-type yourself — `ProviderError` is not publicly nameable outside `caldir-core` (see "Types you can
-actually name" below) — but it is why upgrading caldir against your unmodified binary degrades
-gracefully instead of breaking.
+type yourself — it is the CLI's job to match on `ProviderError` (see "Types you can actually name"
+below for what is nameable and by whom), never your `Handler` implementation's — but it is why
+upgrading caldir against your unmodified binary degrades gracefully instead of breaking.
 
 `Method` itself is a closed, non-`#[non_exhaustive]` enum. If you match on it directly (most
 providers dispatch through `Handler` and never do), add a wildcard arm defensively; a future verb
@@ -121,10 +121,8 @@ added to `caldir-core` is source-incompatible with an exhaustive match, by desig
 ## The six failure classes (§16)
 
 §16 requires the CLI be able to distinguish six kinds of provider failure without parsing your
-error message. `rpc::ErrorCode` (in `caldir-core/src/rpc.rs`) carries the class alongside the
-message you already return; you get this for free if you return a plain error from a `Handler`
-method (it lands as the unclassified/generic class, exactly like today), and you can opt into a
-specific class where one applies:
+error message. `rpc::ErrorCode` (in `caldir-core/src/rpc.rs`) is the wire-level discriminator that
+carries the class alongside the message:
 
 - `unsupported_operation` — you understood the request but do not support this kind of write (e.g.
   task writes on an events-only provider). `create_item`/`update_item`/`delete_item`'s default
@@ -135,6 +133,16 @@ specific class where one applies:
 - `semantic_limitation` — you cannot represent what was asked (distinct from an outright refusal).
 - `network` — your own call to the remote API failed for network reasons. Distinct from a failure
   in the exchange between caldir and your binary, which caldir already detects on its own.
+
+**You cannot opt into any of these today except `unsupported_operation`.** The only thing that
+attaches a class to a `Handler` error is `Classified`, a struct private to `caldir-core`'s own
+`handler.rs`, used solely by the trait defaults (`create_item`/`update_item`/`delete_item`) to tag
+their own `unsupported_operation` refusal. There is no public constructor, trait method, or
+`Handler::Error` shape that lets your binary attach `missing_auth_scope`, `remote_not_found`,
+`conflict`, `semantic_limitation`, or `network` to an error you return — return a plain error and
+it lands as the unclassified/generic class, exactly like before this section existed. Giving
+providers a way to attach the other five classes is tracked by `P3-02`/`P3-03`/`P4-02`; until one
+of those lands, do not design an integration around producing them.
 
 `ErrorCode` is `#[non_exhaustive]` and unknown values decode as a generic "unrecognized" bucket
 rather than failing to parse — so a class added to a future `caldir-core` never breaks an older
@@ -157,12 +165,17 @@ Everything above only works if you can name and construct the types involved fro
   it needs a wildcard `_` arm, or it fails to compile the moment a new variant is added upstream.
   This is a compile error you will hit the first time, not a runtime surprise.
 - `caldir_core::ConnectionError` — same: public, `#[non_exhaustive]`, wildcard arm required.
+- `caldir_core::provider::ProviderError` — public, `#[non_exhaustive]`, wildcard arm required
+  (`W2-C1`). This is the type the CLI matches to get the six §16 classes above out of
+  `RemoteError::Provider` without parsing a message.
+- `caldir_core::provider::ProviderTransportError` — public, `#[non_exhaustive]`, wildcard arm
+  required. Nested inside `ProviderError::Transport`; you need it only to pick the `network` class
+  (`ProviderTransportError::Network`) out from an unrelated local subprocess failure.
 
-**One type you cannot name: `ProviderError`.** It is declared `pub(crate) use error::ProviderError;`
-inside `caldir-core/src/provider.rs` — deliberately not re-exported. You reach its content only
-through `RemoteError::Provider`'s `Display` output; you cannot `match` into it from outside the
-crate. Do not design an integration around matching `ProviderError` variants — it does not compile
-outside `caldir-core`.
+None of this is something your `Handler` implementation constructs or matches — these are the
+CLI's types for consuming failures your provider produces, not yours for producing them. Nothing
+above lets you *attach* a class to your own error; see "You cannot opt into any of these today"
+above.
 
 ## Where you write state
 

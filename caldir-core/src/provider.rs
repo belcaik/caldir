@@ -17,11 +17,12 @@ use std::sync::Arc;
 use transport::{ProviderTransport, SubprocessTransport};
 
 pub use capabilities::{Capability, ProviderCapabilities};
-pub(crate) use error::ProviderError;
+pub use error::ProviderError;
 pub use handler::{Error, Handler, Result, process_request, run_provider};
 pub use registry::ProviderRegistry;
 pub use slug::{ProviderSlug, provider_slug_from_filename};
 pub use storage::{ProviderStorage, StorageError};
+pub use transport::ProviderTransportError;
 
 #[derive(Debug, Clone)]
 pub struct Provider {

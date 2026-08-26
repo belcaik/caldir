@@ -168,10 +168,10 @@ JSON (a broken envelope, not just an unknown command) still goes through the pre
 On the caller side, `Provider::call` turns an `UnsupportedMethod`-coded error reply into
 `ProviderError::UnsupportedMethod(String)`, distinct from the general
 `ProviderError::Provider(String)` — so a caller can match on protocol skew instead of
-substring-matching an error message. `ProviderError` itself is not publicly nameable outside
-`caldir-core` (see §8); this distinction reaches a downstream crate only through
-`RemoteError::Provider`, and `Remote::capabilities()` already folds it into the fail-closed floor
-(§6) before a caller ever sees it.
+substring-matching an error message. `ProviderError` is publicly nameable (`W2-C1`; see §8), so a
+downstream crate can match this distinction directly through `RemoteError::Provider`, though
+`Remote::capabilities()` already folds it into the fail-closed floor (§6) before a caller ever sees
+it there.
 
 The `Response::Error.code` field is additive and `Option`-typed with `#[serde(default)]`, so an
 error envelope from a provider built before this field existed still decodes — locked by
@@ -193,10 +193,15 @@ Locked by, in order of the claims above:
 - `caldir_core::provider::{Capability, ProviderCapabilities}` — public, constructible, not
   `#[non_exhaustive]`.
 - `caldir_core::RemoteError` — public, `#[non_exhaustive]`, so every downstream `match` needs a
-  wildcard arm. `RemoteError::Provider(ProviderError)` is the variant carrying provider failures,
-  but `ProviderError` itself is `pub(crate)` — a downstream crate cannot name it or match into it,
-  only `Display` it via `RemoteError`'s own message.
+  wildcard arm. `RemoteError::Provider(ProviderError)` is the variant carrying provider failures.
 - `caldir_core::ConnectionError` — public, `#[non_exhaustive]`, same wildcard-arm requirement.
+- `caldir_core::provider::ProviderError` — public (`W2-C1`), `#[non_exhaustive]`, wildcard-arm
+  required. Carries the six §16 failure classes as its own variants — `UnsupportedOperation`,
+  `MissingAuthScope`, `RemoteNotFound`, `Conflict`, `SemanticLimitation` — except `Network`, which
+  nests inside `ProviderError::Transport(ProviderTransportError::Network(String))`.
+- `caldir_core::provider::ProviderTransportError` — public (`W2-C1`), `#[non_exhaustive]`; needed
+  to match `Network` out of `ProviderError::Transport` rather than conflating it with an unrelated
+  local subprocess failure (`Spawn`, `Io`, `Timeout`, …).
 - `Response::Error`'s `code: Option<ErrorCode>` and `rpc::ErrorCode` are provider-side wire types
   used inside a `Handler` implementation (see the provider-author guide); a consumer of `Remote`
   never sees `ErrorCode` directly, only the folded `RemoteError`/fail-closed result.
