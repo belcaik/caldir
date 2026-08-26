@@ -103,14 +103,11 @@ impl ToGoogle for Todo {
     }
 }
 
-/// Minimal `DUE` -> `due` conversion, enough to create a task at all. Takes
-/// the calendar date under `zone` and sends it as midnight UTC, the shape
-/// Google's `due` field expects (date precision only). This does not attempt
-/// to prove the round trip is a fixpoint under every zone — that belongs to
-/// a dedicated, later piece of work once it lands, which should replace this
-/// function rather than duplicate it.
+/// `DUE` -> `due`: the calendar date under `zone` (`super::due::
+/// google_due_date`, D-4), sent as midnight UTC — the shape Google's `due`
+/// field expects (date precision only, §13 clause 1).
 fn due_to_google<Tz: TimeZone>(due: &EventTime, zone: &Tz) -> String {
-    let date = due.to_local_tz(zone).date_naive();
+    let date = super::due::google_due_date(due, zone);
     format!("{}T00:00:00.000Z", date.format("%Y-%m-%d"))
 }
 

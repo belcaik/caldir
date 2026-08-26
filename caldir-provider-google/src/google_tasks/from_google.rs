@@ -75,7 +75,9 @@ pub fn task_to_calendar_item(task: Task) -> Result<Option<CalendarItem>> {
 /// `due`'s wire type is RFC 3339, but per the Tasks API reference "the due
 /// date only records date information; the time portion... is discarded"
 /// (`docs/vtodo/provider-sync/providers/google-tasks.md`). §13 clause 2 reads
-/// it as a date-only `DUE`.
+/// it as a date-only `DUE`, via `super::due::date_to_due` — the same
+/// function the write direction's inverse funnels through, so the pair
+/// can't drift (§7).
 ///
 /// The calendar date comes from the timestamp's **own** offset (RFC 3339
 /// requires one) — never from `chrono::Local`/the system zone (C-18). Google
@@ -83,7 +85,7 @@ pub fn task_to_calendar_item(task: Task) -> Result<Option<CalendarItem>> {
 /// the parsed offset is used as-is via `date_naive()`.
 fn google_due_to_date(due: &str) -> Option<EventTime> {
     let dt = chrono::DateTime::parse_from_rfc3339(due).ok()?;
-    Some(EventTime::Date(dt.date_naive()))
+    Some(super::due::date_to_due(dt.date_naive()))
 }
 
 #[cfg(test)]
@@ -178,6 +180,28 @@ mod tests {
             todo.due,
             Some(EventTime::Date("2026-09-02".parse().unwrap()))
         );
+    }
+
+    /// §13 clause 2, exhaustively: reusing `google_dt_to_event_time`
+    /// (`google_event/from_google.rs`) on this path is the honest-looking
+    /// implementation that fails this — it produces `DateTimeUtc(midnight)`,
+    /// which then differs from the local file's date-only `DUE` on every
+    /// comparison forever. Only an exhaustive match, not `assert_eq!`
+    /// against one expected variant, catches every way `due` could
+    /// accidentally carry a time-of-day.
+    #[test]
+    fn a_google_due_becomes_a_date_only_due_never_a_midnight_timestamp() {
+        let mut task = minimal_task("task1", "Submit report");
+        task.due = Some("2026-09-01T00:00:00.000Z".into());
+
+        let todo = task_to_todo(task).unwrap().unwrap();
+
+        match todo.due {
+            Some(EventTime::Date(date)) => {
+                assert_eq!(date, "2026-09-01".parse().unwrap());
+            }
+            other => panic!("expected a date-only DUE, got {other:?}"),
+        }
     }
 
     #[test]
