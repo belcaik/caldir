@@ -182,6 +182,23 @@ impl CalendarItem {
         }
     }
 
+    /// C-13: extends `Event::with_x_properties_merged_from` to both component
+    /// kinds, called on the item **before** `into_event`'s narrowing, so a
+    /// task update never silently strips provider-managed `X-` properties.
+    /// A kind mismatch (identity does not change kind in practice) leaves
+    /// `self` untouched rather than guessing.
+    pub(crate) fn with_x_properties_merged_from(self, base: &CalendarItem) -> CalendarItem {
+        match (self, base) {
+            (CalendarItem::Event(event), CalendarItem::Event(base)) => {
+                CalendarItem::Event(event.with_x_properties_merged_from(base))
+            }
+            (CalendarItem::Todo(todo), CalendarItem::Todo(base)) => {
+                CalendarItem::Todo(todo.with_x_properties_merged_from(base))
+            }
+            (item, _) => item,
+        }
+    }
+
     /// The item's `SUMMARY`, from whichever kind backs it.
     pub fn summary(&self) -> Option<&str> {
         match self {

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use caldir_core::provider::ProviderStorage;
-use caldir_core::rpc::UpdateEvent;
-use caldir_core::{Event, ParticipationStatus};
+use caldir_core::rpc::UpdateItem;
+use caldir_core::{CalendarItem, Event, ParticipationStatus, RemoteConfigParams};
 
 use crate::app_config::AppConfigStore;
 use crate::constants::{PROVIDER_EVENT_ID_PROPERTY, PROVIDER_NAME};
@@ -12,8 +12,21 @@ use crate::outlook_event::to_outlook::to_outlook;
 use crate::remote_config::OutlookRemoteConfig;
 use crate::session::SessionStore;
 
-pub async fn handle(cmd: UpdateEvent) -> Result<Event> {
-    let config = OutlookRemoteConfig::try_from(&cmd.remote)?;
+pub async fn handle(cmd: UpdateItem) -> Result<CalendarItem> {
+    let event = match cmd.event {
+        CalendarItem::Event(event) => event,
+        _ => {
+            return Err(anyhow::anyhow!(
+                "caldir-provider-outlook does not support updating tasks"
+            ));
+        }
+    };
+
+    Ok(CalendarItem::Event(handle_event(cmd.remote, event).await?))
+}
+
+async fn handle_event(remote: RemoteConfigParams, event: Event) -> Result<Event> {
+    let config = OutlookRemoteConfig::try_from(&remote)?;
     let account_email = &config.outlook_account;
 
     let storage = ProviderStorage::for_provider(PROVIDER_NAME)?;
@@ -25,19 +38,18 @@ pub async fn handle(cmd: UpdateEvent) -> Result<Event> {
         .await?;
     let graph = GraphClient::new(session.access_token());
 
-    let outlook_event_id = cmd
-        .event
+    let outlook_event_id = event
         .x_property(PROVIDER_EVENT_ID_PROPERTY)
         .ok_or_else(|| {
             anyhow::anyhow!("Cannot update event without {PROVIDER_EVENT_ID_PROPERTY}")
         })?;
 
-    if cmd.event.is_invite_for(account_email) {
+    if event.is_invite_for(account_email) {
         // Non-organizer: use dedicated RSVP endpoints
-        respond_to_invite(&graph, outlook_event_id, &cmd.event, account_email).await
+        respond_to_invite(&graph, outlook_event_id, &event, account_email).await
     } else {
         // Organizer or own event: full PATCH update
-        let body = to_outlook(&cmd.event);
+        let body = to_outlook(&event);
         let path = format!("/me/events/{}", outlook_event_id);
         let response = graph.patch(&path, &body).await?;
         let updated: GraphEvent = response.json().await?;

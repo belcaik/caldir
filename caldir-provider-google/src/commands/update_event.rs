@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow, bail};
-use caldir_core::Event;
 use caldir_core::provider::ProviderStorage;
-use caldir_core::rpc::UpdateEvent;
+use caldir_core::rpc::UpdateItem;
+use caldir_core::{CalendarItem, Event, RemoteConfigParams};
 use serde_json::Value;
 
 use crate::app_config::AppConfigStore;
@@ -11,8 +11,21 @@ use crate::google_event::{FromGoogle, ToGoogle};
 use crate::remote_config::GoogleRemoteConfig;
 use crate::session::SessionStore;
 
-pub async fn handle(cmd: UpdateEvent) -> Result<Event> {
-    let config = GoogleRemoteConfig::try_from(&cmd.remote)?;
+pub async fn handle(cmd: UpdateItem) -> Result<CalendarItem> {
+    let event = match cmd.event {
+        CalendarItem::Event(event) => event,
+        _ => {
+            return Err(anyhow!(
+                "caldir-provider-google does not support updating tasks"
+            ));
+        }
+    };
+
+    Ok(CalendarItem::Event(handle_event(cmd.remote, event).await?))
+}
+
+async fn handle_event(remote: RemoteConfigParams, event: Event) -> Result<Event> {
+    let config = GoogleRemoteConfig::try_from(&remote)?;
     let account_email = &config.google_account;
     let calendar_id = &config.google_calendar_id;
 
@@ -25,18 +38,17 @@ pub async fn handle(cmd: UpdateEvent) -> Result<Event> {
         .await?;
 
     // Get Google's event ID from custom properties
-    let google_event_id = cmd
-        .event
+    let google_event_id = event
         .x_property(PROVIDER_EVENT_ID_PROPERTY)
         .ok_or_else(|| anyhow!("Cannot update event without {PROVIDER_EVENT_ID_PROPERTY}"))?;
 
-    if cmd.event.is_invite_for(account_email) {
+    if event.is_invite_for(account_email) {
         // Only update our own attendee status:
         let google_event = patch_invite_status(
             &session,
             calendar_id,
             google_event_id,
-            &cmd.event,
+            &event,
             account_email,
         )
         .await?;
@@ -50,7 +62,7 @@ pub async fn handle(cmd: UpdateEvent) -> Result<Event> {
             session.access_token(),
             calendar_id,
             google_event_id,
-            &cmd.event,
+            &event,
         )
         .await?;
 

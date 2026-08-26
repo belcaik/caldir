@@ -171,6 +171,27 @@ impl Todo {
 
         ics.replacen("END:VTODO\r\n", &format!("{valarms}END:VTODO\r\n"), 1)
     }
+
+    /// C-13: the task-side sibling of `Event::with_x_properties_merged_from`.
+    /// Same union-of-params merge, so an item-typed update never strips
+    /// provider-managed `X-` properties just because the item is a task.
+    pub fn with_x_properties_merged_from(mut self, base: &Todo) -> Self {
+        for local in &mut self.x_properties {
+            if let Some(base_prop) = base.x_properties.iter().find(|p| p.name == local.name) {
+                for (k, v) in &base_prop.params {
+                    if !local.params.iter().any(|(lk, _)| lk == k) {
+                        local.params.push((k.clone(), v.clone()));
+                    }
+                }
+            }
+        }
+        for base_prop in &base.x_properties {
+            if !self.x_properties.iter().any(|p| p.name == base_prop.name) {
+                self.x_properties.push(base_prop.clone());
+            }
+        }
+        self
+    }
 }
 
 #[cfg(test)]

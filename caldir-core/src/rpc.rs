@@ -6,12 +6,11 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 pub use methods::{
-    Capabilities, Connect, ConnectResponse, ConnectStepKind, CreateEvent, CredentialField,
-    CredentialsData, DeleteEvent, FieldType, HostedOAuthData, ListCalendars, ListEvents, Method,
-    OAuthData, SetupData, UpdateEvent,
+    Capabilities, Connect, ConnectResponse, ConnectStepKind, CreateItem, CredentialField,
+    CredentialsData, DeleteItem, FieldType, HostedOAuthData, ListCalendars, ListEvents, Method,
+    OAuthData, SetupData, UpdateItem,
 };
 
-pub(crate) use ics::Ics;
 #[cfg(test)]
 pub(crate) use wire::JsonWireValue;
 pub(crate) use wire::{Wire, WireValue};
@@ -101,6 +100,7 @@ impl Response<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CalendarItem;
     use crate::test_utils::{VEVENT_CONTROL_ICS, VTODO_ICS};
     use serde_json::json;
 
@@ -199,19 +199,19 @@ mod tests {
         list_events["caldir_from_the_future"] = extra.clone();
         serde_json::from_value::<ListEvents>(list_events).expect("ListEvents");
 
-        for name in ["CreateEvent", "UpdateEvent", "DeleteEvent"] {
+        for name in ["CreateItem", "UpdateItem", "DeleteItem"] {
             let mut payload = json!({"event": VEVENT_CONTROL_ICS});
             payload["caldir_from_the_future"] = extra.clone();
 
             match name {
-                "CreateEvent" => {
-                    serde_json::from_value::<CreateEvent>(payload).expect(name);
+                "CreateItem" => {
+                    serde_json::from_value::<CreateItem>(payload).expect(name);
                 }
-                "UpdateEvent" => {
-                    serde_json::from_value::<UpdateEvent>(payload).expect(name);
+                "UpdateItem" => {
+                    serde_json::from_value::<UpdateItem>(payload).expect(name);
                 }
                 _ => {
-                    serde_json::from_value::<DeleteEvent>(payload).expect(name);
+                    serde_json::from_value::<DeleteItem>(payload).expect(name);
                 }
             }
         }
@@ -274,27 +274,25 @@ mod tests {
         })
     }
 
-    /// The honest counterpart to the ticket's `T-36`, which asked that
-    /// `CreateEvent`/`UpdateEvent`/`DeleteEvent` **carry** a task payload.
-    /// That criterion is refused: R70 keeps the outbound field `Event`, so a
-    /// task cannot ride it by construction. What is testable — and what R71
-    /// actually requires — is that the attempt aborts **loudly**, with the
-    /// text `L6-01` builds its user-facing story on. A silent success here
-    /// would push a task to a remote as if it were a meeting.
+    /// `T-36`, inverted by this ticket: `CreateItem`/`UpdateItem`/`DeleteItem`
+    /// now **carry** a task payload — R53's second sentence, which the
+    /// event-only wire refused. All three structs must move together, or a
+    /// half-migration would leave one arm of `P2-01`'s `apply_change` match
+    /// unable to compile while two silently could.
     #[test]
-    fn a_task_payload_is_rejected_by_every_outbound_request_struct() {
+    fn a_task_payload_decodes_into_every_outbound_request_struct() {
         let payload = json!({ "event": VTODO_ICS });
-        const EXPECTED: &str = "expected 1 event(s) in ICS, found 0";
+        let expected = CalendarItem::from_single_ics_str(VTODO_ICS).unwrap();
 
-        let create = serde_json::from_value::<CreateEvent>(payload.clone())
-            .expect_err("a VTODO must not decode into CreateEvent");
-        let update = serde_json::from_value::<UpdateEvent>(payload.clone())
-            .expect_err("a VTODO must not decode into UpdateEvent");
-        let delete = serde_json::from_value::<DeleteEvent>(payload)
-            .expect_err("a VTODO must not decode into DeleteEvent");
+        let create = serde_json::from_value::<CreateItem>(payload.clone())
+            .expect("a VTODO must decode into CreateItem");
+        let update = serde_json::from_value::<UpdateItem>(payload.clone())
+            .expect("a VTODO must decode into UpdateItem");
+        let delete = serde_json::from_value::<DeleteItem>(payload)
+            .expect("a VTODO must decode into DeleteItem");
 
-        assert_eq!(create.to_string(), EXPECTED);
-        assert_eq!(update.to_string(), EXPECTED);
-        assert_eq!(delete.to_string(), EXPECTED);
+        assert_eq!(create.event, expected);
+        assert_eq!(update.event, expected);
+        assert_eq!(delete.event, expected);
     }
 }

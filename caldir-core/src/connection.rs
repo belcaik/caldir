@@ -557,13 +557,16 @@ mod tests {
         let event = test_event();
         connection.local().create_event(event.clone()).unwrap();
 
-        mock.reply::<rpc::CreateEvent>(event.clone());
+        mock.reply::<rpc::CreateItem>(CalendarItem::Event(event.clone()));
         connection
             .apply_outgoing_diff(&outgoing_create_diff(event.clone()))
             .await
             .unwrap();
 
-        assert_eq!(mock.captured_request::<rpc::CreateEvent>().event, event);
+        assert_eq!(
+            mock.captured_request::<rpc::CreateItem>().event,
+            CalendarItem::Event(event)
+        );
     }
 
     #[tokio::test]
@@ -574,13 +577,16 @@ mod tests {
         to.summary = Some("Updated".into());
         connection.local().create_event(to.clone()).unwrap();
 
-        mock.reply::<rpc::UpdateEvent>(to.clone());
+        mock.reply::<rpc::UpdateItem>(CalendarItem::Event(to.clone()));
         connection
             .apply_outgoing_diff(&outgoing_update_diff(from, to.clone()))
             .await
             .unwrap();
 
-        assert_eq!(mock.captured_request::<rpc::UpdateEvent>().event, to);
+        assert_eq!(
+            mock.captured_request::<rpc::UpdateItem>().event,
+            CalendarItem::Event(to)
+        );
     }
 
     #[tokio::test]
@@ -588,13 +594,16 @@ mod tests {
         let (_tmp, mock, mut connection) = writable_connection();
         let event = test_event();
 
-        mock.reply::<rpc::DeleteEvent>(());
+        mock.reply::<rpc::DeleteItem>(());
         connection
             .apply_outgoing_diff(&outgoing_delete_diff(event.clone()))
             .await
             .unwrap();
 
-        assert_eq!(mock.captured_request::<rpc::DeleteEvent>().event, event);
+        assert_eq!(
+            mock.captured_request::<rpc::DeleteItem>().event,
+            CalendarItem::Event(event)
+        );
     }
 
     #[tokio::test]
@@ -608,7 +617,7 @@ mod tests {
             "X-GOOGLE-EVENT-ID".to_string(),
             "abc123".to_string(),
         ));
-        mock.reply::<rpc::CreateEvent>(canonical.clone());
+        mock.reply::<rpc::CreateItem>(CalendarItem::Event(canonical.clone()));
 
         connection
             .apply_outgoing_diff(&outgoing_create_diff(local))
@@ -645,7 +654,7 @@ mod tests {
         canonical.uid = EventUid::new("provider-assigned-uid@example.com");
         let canonical_id = canonical.event_instance_id();
         assert_ne!(original_id, canonical_id);
-        mock.reply::<rpc::CreateEvent>(canonical.clone());
+        mock.reply::<rpc::CreateItem>(CalendarItem::Event(canonical.clone()));
 
         connection
             .apply_outgoing_diff(&outgoing_create_diff(local))
@@ -668,7 +677,7 @@ mod tests {
         let id = event.event_instance_id();
         connection.local().create_event(event.clone()).unwrap();
 
-        mock.reply::<rpc::CreateEvent>(event.clone());
+        mock.reply::<rpc::CreateItem>(CalendarItem::Event(event.clone()));
         connection
             .apply_outgoing_diff(&outgoing_create_diff(event.clone()))
             .await
@@ -692,7 +701,7 @@ mod tests {
 
         // First Create succeeds!
         // Second errors mid-loop!
-        mock.reply::<rpc::CreateEvent>(event_a.clone());
+        mock.reply::<rpc::CreateItem>(CalendarItem::Event(event_a.clone()));
         mock.reply_error(ProviderTransportError::Timeout(Duration::from_secs(1)));
 
         let diff = CalendarDiff::from_changes(
@@ -803,7 +812,7 @@ mod tests {
 
         mock.reply::<rpc::ListEvents>(vec![]);
         for event in &events {
-            mock.reply::<rpc::CreateEvent>(event.clone());
+            mock.reply::<rpc::CreateItem>(CalendarItem::Event(event.clone()));
         }
 
         let diff = connection.diff(&DateRange::default()).await.unwrap();
@@ -886,8 +895,8 @@ mod tests {
             .path()
             .to_path_buf();
 
-        mock.reply::<rpc::CreateEvent>(event.clone());
-        mock.reply::<rpc::DeleteEvent>(());
+        mock.reply::<rpc::CreateItem>(CalendarItem::Event(event.clone()));
+        mock.reply::<rpc::DeleteItem>(());
 
         let diff = CalendarDiff::from_changes(
             vec![
@@ -932,9 +941,9 @@ mod tests {
         let event_id = event.event_instance_id();
         assert_eq!(reloaded.state().sync_base(&event_id), Some(&event));
         assert_eq!(
-            mock.captured_request::<rpc::DeleteEvent>()
+            mock.captured_request::<rpc::DeleteItem>()
                 .event
-                .event_instance_id(),
+                .instance_id(),
             doomed_id,
             "the delete queued behind the task must reach the wire too",
         );
@@ -1295,7 +1304,7 @@ END:VJOURNAL\r\nEND:VCALENDAR\r\n";
         let todo_before = std::fs::read(&todo_path).unwrap();
 
         for event in &events {
-            mock.reply::<rpc::CreateEvent>(event.clone());
+            mock.reply::<rpc::CreateItem>(CalendarItem::Event(event.clone()));
         }
 
         let mut changes: Vec<EventChange> = events
@@ -1378,7 +1387,7 @@ END:VJOURNAL\r\nEND:VCALENDAR\r\n";
             std::fs::read(&todo_path).unwrap(),
         );
 
-        mock.reply::<rpc::CreateEvent>(event.clone());
+        mock.reply::<rpc::CreateItem>(CalendarItem::Event(event.clone()));
 
         let diff = CalendarDiff::from_changes(
             vec![
@@ -1398,8 +1407,8 @@ END:VJOURNAL\r\nEND:VCALENDAR\r\n";
         connection.apply_outgoing_diff(&diff).await.unwrap();
 
         assert_eq!(
-            mock.captured_request::<rpc::CreateEvent>().event.uid,
-            uid,
+            mock.captured_request::<rpc::CreateItem>().event.uid(),
+            &uid,
             "the event is what reaches the collection",
         );
 
@@ -1438,8 +1447,8 @@ END:VJOURNAL\r\nEND:VCALENDAR\r\n";
 
         connection.local().create_event(first.clone()).unwrap();
 
-        mock.reply::<rpc::CreateEvent>(first.clone());
-        mock.reply::<rpc::CreateEvent>(second.clone());
+        mock.reply::<rpc::CreateItem>(CalendarItem::Event(first.clone()));
+        mock.reply::<rpc::CreateItem>(CalendarItem::Event(second.clone()));
 
         let diff = CalendarDiff::from_changes(
             vec![
@@ -1567,7 +1576,7 @@ END:VCALENDAR\r\n";
         );
 
         connection.apply_incoming_diff(&first).unwrap();
-        mock.reply::<rpc::CreateEvent>(event.clone());
+        mock.reply::<rpc::CreateItem>(CalendarItem::Event(event.clone()));
         connection.apply_outgoing_diff(&first).await.unwrap();
 
         // A second `caldir pull` is a fresh process: reload the calendar from

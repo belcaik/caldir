@@ -12,10 +12,10 @@ use std::io::{self, BufRead, Write};
 
 use crate::provider::ProviderCapabilities;
 use crate::rpc::{
-    Capabilities, Connect, ConnectResponse, CreateEvent, DeleteEvent, ErrorCode, ListCalendars,
-    ListEvents, Method, Request, Response, Rpc, UpdateEvent, WireValue,
+    Capabilities, Connect, ConnectResponse, CreateItem, DeleteItem, ErrorCode, ListCalendars,
+    ListEvents, Method, Request, Response, Rpc, UpdateItem, WireValue,
 };
-use crate::{CalendarConfig, CalendarItem, Event};
+use crate::{CalendarConfig, CalendarItem};
 
 use super::slug::provider_slug_from_filename;
 
@@ -41,15 +41,17 @@ pub trait Handler: Send + Sync {
         Err("list_events is not supported by this provider".into())
     }
 
-    async fn create_event(&self, _cmd: CreateEvent) -> Result<Event> {
+    /// D-3/C-16: item-typed so a provider's `match` can serve a `Todo` arm
+    /// once it has one; the wire verb stays `create_event`.
+    async fn create_item(&self, _cmd: CreateItem) -> Result<CalendarItem> {
         Err("This provider does not support creating events".into())
     }
 
-    async fn update_event(&self, _cmd: UpdateEvent) -> Result<Event> {
+    async fn update_item(&self, _cmd: UpdateItem) -> Result<CalendarItem> {
         Err("This provider does not support updating events".into())
     }
 
-    async fn delete_event(&self, _cmd: DeleteEvent) -> Result<()> {
+    async fn delete_item(&self, _cmd: DeleteItem) -> Result<()> {
         Err("This provider does not support deleting events".into())
     }
 
@@ -165,9 +167,9 @@ async fn dispatch<H: Handler>(handler: &H, request: Request) -> Result<serde_jso
         Method::Connect => call(params, |c| handler.connect(c)).await,
         Method::ListCalendars => call(params, |c| handler.list_calendars(c)).await,
         Method::ListEvents => call(params, |c| handler.list_events(c)).await,
-        Method::CreateEvent => call(params, |c| handler.create_event(c)).await,
-        Method::UpdateEvent => call(params, |c| handler.update_event(c)).await,
-        Method::DeleteEvent => call(params, |c| handler.delete_event(c)).await,
+        Method::CreateEvent => call(params, |c| handler.create_item(c)).await,
+        Method::UpdateEvent => call(params, |c| handler.update_item(c)).await,
+        Method::DeleteEvent => call(params, |c| handler.delete_item(c)).await,
         Method::Capabilities => call(params, |c| handler.capabilities(c)).await,
     }
 }
@@ -186,8 +188,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rpc::Ics;
-    use crate::{EventTime, RemoteConfigParams};
+    use crate::{Event, EventTime, RemoteConfigParams};
     use chrono::NaiveDate;
 
     struct StubHandler;
@@ -210,7 +211,7 @@ mod tests {
             unreachable!()
         }
 
-        async fn create_event(&self, cmd: CreateEvent) -> Result<Event> {
+        async fn create_item(&self, cmd: CreateItem) -> Result<CalendarItem> {
             Ok(cmd.event)
         }
     }
@@ -234,18 +235,19 @@ mod tests {
             "Test",
             EventTime::Date(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()),
         );
-        let request = CreateEvent {
+        let request = CreateItem {
             remote: RemoteConfigParams::new(),
-            event: event.clone(),
+            event: CalendarItem::Event(event.clone()),
         }
         .to_json()
         .unwrap();
 
         let response = process_request(&EventHandler, &request.to_string()).await;
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
-        let wire_event: Ics = serde_json::from_value(parsed["data"].clone()).unwrap();
+        let wire_event =
+            CalendarItem::from_single_ics_str(parsed["data"].as_str().unwrap()).unwrap();
 
-        assert_eq!(wire_event.into_inner(), event);
+        assert_eq!(wire_event, CalendarItem::Event(event));
     }
 
     struct ListingHandler(Vec<CalendarItem>);
@@ -298,6 +300,76 @@ mod tests {
 
         assert!(ics.contains("BEGIN:VTODO\r\n"), "got {ics:?}");
         assert!(!ics.contains("BEGIN:VEVENT"), "got {ics:?}");
+    }
+
+    /// The compensating lock for a change touching 27 `cmd.event` sites
+    /// across 10 files and 4 crates: both directions of a `create_event`
+    /// exchange must put the exact bytes `Event::to_ics_string` puts on the
+    /// wire — asserted against the bytes' own source of truth, not against
+    /// the codec under test, so no installed provider ever sees the shape
+    /// of an event change.
+    #[tokio::test]
+    async fn an_event_create_is_byte_identical_to_the_event_only_encoding() {
+        let event = Event::new(
+            "Test",
+            EventTime::Date(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()),
+        );
+
+        let request = CreateItem {
+            remote: RemoteConfigParams::new(),
+            event: CalendarItem::Event(event.clone()),
+        }
+        .to_json()
+        .unwrap();
+
+        assert_eq!(request["params"]["event"], event.to_ics_string());
+
+        let response = process_request(&EventHandler, &request.to_string()).await;
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(parsed["data"], event.to_ics_string());
+    }
+
+    /// `CROSS-6`: the tempting implementation of an unsupported `Todo` arm in
+    /// a VEVENT-bound provider is to map it onto an event. This asserts the
+    /// refusal is the shipped behaviour instead — an error envelope, and no
+    /// `VEVENT` anywhere in the exchange.
+    #[tokio::test]
+    async fn a_provider_that_cannot_write_a_task_errors_without_converting_it() {
+        struct EventOnlyHandler;
+
+        #[async_trait]
+        impl Handler for EventOnlyHandler {
+            async fn connect(&self, _cmd: Connect) -> Result<ConnectResponse> {
+                unreachable!()
+            }
+
+            async fn create_item(&self, cmd: CreateItem) -> Result<CalendarItem> {
+                match cmd.event {
+                    CalendarItem::Event(event) => Ok(CalendarItem::Event(event)),
+                    CalendarItem::Todo(_) => {
+                        Err("this provider does not support creating tasks".into())
+                    }
+                }
+            }
+        }
+
+        let todo = CalendarItem::from_single_ics_str(crate::test_utils::VTODO_ICS).unwrap();
+        let request = CreateItem {
+            remote: RemoteConfigParams::new(),
+            event: todo,
+        }
+        .to_json()
+        .unwrap();
+
+        let response = process_request(&EventOnlyHandler, &request.to_string()).await;
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(parsed["status"], "error");
+        assert!(
+            !response.contains("VEVENT"),
+            "a refused task must never be converted to an event, got {response}"
+        );
     }
 
     #[tokio::test]
@@ -385,8 +457,8 @@ mod tests {
                 unreachable!()
             }
 
-            async fn create_event(&self, _cmd: CreateEvent) -> Result<Event> {
-                panic!("create_event must not run for a typo'd command");
+            async fn create_item(&self, _cmd: CreateItem) -> Result<CalendarItem> {
+                panic!("create_item must not run for a typo'd command");
             }
         }
 

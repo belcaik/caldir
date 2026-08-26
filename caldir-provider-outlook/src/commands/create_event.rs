@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use caldir_core::provider::ProviderStorage;
-use caldir_core::rpc::CreateEvent;
-use caldir_core::{Event, EventTime};
+use caldir_core::rpc::CreateItem;
+use caldir_core::{CalendarItem, Event, EventTime, RemoteConfigParams};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 
 use crate::app_config::AppConfigStore;
@@ -13,8 +13,21 @@ use crate::outlook_event::to_outlook::to_outlook;
 use crate::remote_config::OutlookRemoteConfig;
 use crate::session::SessionStore;
 
-pub async fn handle(cmd: CreateEvent) -> Result<Event> {
-    let config = OutlookRemoteConfig::try_from(&cmd.remote)?;
+pub async fn handle(cmd: CreateItem) -> Result<CalendarItem> {
+    let event = match cmd.event {
+        CalendarItem::Event(event) => event,
+        _ => {
+            return Err(anyhow!(
+                "caldir-provider-outlook does not support creating tasks"
+            ));
+        }
+    };
+
+    Ok(CalendarItem::Event(handle_event(cmd.remote, event).await?))
+}
+
+async fn handle_event(remote: RemoteConfigParams, event: Event) -> Result<Event> {
+    let config = OutlookRemoteConfig::try_from(&remote)?;
 
     let storage = ProviderStorage::for_provider(PROVIDER_NAME)?;
     let session_store = SessionStore::new(storage.clone());
@@ -30,9 +43,8 @@ pub async fn handle(cmd: CreateEvent) -> Result<Event> {
     // "create exception" affordance on that endpoint). Look up the
     // auto-expanded instance and PATCH it instead — Graph attaches the
     // override to the series and assigns it a fresh per-instance id.
-    if let Some(rid) = cmd.event.recurrence_id.as_ref() {
-        let master_id = cmd
-            .event
+    if let Some(rid) = event.recurrence_id.as_ref() {
+        let master_id = event
             .x_property(PROVIDER_EVENT_ID_PROPERTY)
             .ok_or_else(|| {
                 anyhow!(
@@ -44,12 +56,12 @@ pub async fn handle(cmd: CreateEvent) -> Result<Event> {
         let rid_time = rid.as_event_time();
         let instance_id = find_instance_id(&graph, master_id, rid_time).await?;
 
-        let body = to_outlook(&cmd.event);
+        let body = to_outlook(&event);
         let path = format!("/me/events/{}", instance_id);
         let response = graph.patch(&path, &body).await.with_context(|| {
             format!(
                 "Failed to patch recurring instance: {}",
-                cmd.event.summary.as_deref().unwrap_or("")
+                event.summary.as_deref().unwrap_or("")
             )
         })?;
 
@@ -58,24 +70,24 @@ pub async fn handle(cmd: CreateEvent) -> Result<Event> {
             .await
             .context("Failed to parse patched instance response")?;
 
-        let mut event = from_outlook(updated, &config.outlook_account)?;
+        let mut updated_event = from_outlook(updated, &config.outlook_account)?;
         // Graph's PATCH-instance response carries the exception's per-instance
         // iCalUId and omits originalStart, so from_outlook would produce a
         // standalone-looking event. Restore the master's UID and the sent
         // recurrence_id so the override file has a stable (uid, recurrence_id)
         // key matching what list_events emits on subsequent pulls.
-        event.uid = cmd.event.uid.clone();
-        event.recurrence_id = cmd.event.recurrence_id.clone();
-        return Ok(event);
+        updated_event.uid = event.uid.clone();
+        updated_event.recurrence_id = event.recurrence_id.clone();
+        return Ok(updated_event);
     }
 
-    let body = to_outlook(&cmd.event);
+    let body = to_outlook(&event);
 
     let path = format!("/me/calendars/{}/events", config.outlook_calendar_id);
     let response = graph.post(&path, &body).await.with_context(|| {
         format!(
             "Failed to create event: {}",
-            cmd.event.summary.as_deref().unwrap_or("")
+            event.summary.as_deref().unwrap_or("")
         )
     })?;
 

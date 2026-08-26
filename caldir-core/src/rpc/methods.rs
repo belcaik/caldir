@@ -15,11 +15,11 @@ pub use connect::{
     Connect, ConnectResponse, ConnectStepKind, CredentialField, CredentialsData, FieldType,
     HostedOAuthData, OAuthData, SetupData,
 };
-pub use create_event::CreateEvent;
-pub use delete_event::DeleteEvent;
+pub use create_event::CreateItem;
+pub use delete_event::DeleteItem;
 pub use list_calendars::ListCalendars;
 pub use list_events::ListEvents;
-pub use update_event::UpdateEvent;
+pub use update_event::UpdateItem;
 
 /// R52 keeps `Method` a closed six-verb enum (C-5, C-8 INVIOLABLE) — but
 /// `capabilities` (`P1-02`/D-2) is the one ratified exception: task

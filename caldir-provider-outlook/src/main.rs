@@ -10,9 +10,9 @@ mod session;
 
 use async_trait::async_trait;
 use caldir_core::rpc::{
-    Connect, ConnectResponse, CreateEvent, DeleteEvent, ListCalendars, ListEvents, UpdateEvent,
+    Connect, ConnectResponse, CreateItem, DeleteItem, ListCalendars, ListEvents, UpdateItem,
 };
-use caldir_core::{CalendarConfig, CalendarItem, Event, provider};
+use caldir_core::{CalendarConfig, CalendarItem, provider};
 
 struct OutlookProvider;
 
@@ -32,15 +32,15 @@ impl provider::Handler for OutlookProvider {
         Ok(events.into_iter().map(CalendarItem::from).collect())
     }
 
-    async fn create_event(&self, cmd: CreateEvent) -> provider::Result<Event> {
+    async fn create_item(&self, cmd: CreateItem) -> provider::Result<CalendarItem> {
         Ok(commands::create_event::handle(cmd).await?)
     }
 
-    async fn update_event(&self, cmd: UpdateEvent) -> provider::Result<Event> {
+    async fn update_item(&self, cmd: UpdateItem) -> provider::Result<CalendarItem> {
         Ok(commands::update_event::handle(cmd).await?)
     }
 
-    async fn delete_event(&self, cmd: DeleteEvent) -> provider::Result<()> {
+    async fn delete_item(&self, cmd: DeleteItem) -> provider::Result<()> {
         Ok(commands::delete_event::handle(cmd).await?)
     }
 }

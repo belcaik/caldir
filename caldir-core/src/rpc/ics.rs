@@ -1,54 +1,28 @@
 //! ICS string codec for calendar items on the RPC wire.
 //!
-//! Two layers, deliberately:
-//! - [`item`] is the codec proper. It encodes and decodes a [`CalendarItem`]
-//!   and applies the **same** arity and unsupported-component rules as the
-//!   disk loader, `VTIMEZONE` exemption included.
-//! - the module-level [`serialize`]/[`deserialize`] used by
-//!   `#[serde(with = "crate::rpc::ics")]`, and [`Ics`], sit on top of it and
-//!   narrow to an `Event`, because the **outbound** RPC struct field is still
-//!   `Event`.
+//! [`item`] is the codec proper. It encodes and decodes a [`CalendarItem`]
+//! and applies the **same** arity and unsupported-component rules as the
+//! disk loader, `VTIMEZONE` exemption included. `#[serde(with =
+//! "crate::rpc::ics::item")]` reaches it directly on every RPC struct field
+//! now that the outbound write RPCs (`CreateItem`/`UpdateItem`/`DeleteItem`)
+//! are item-typed (D-3/C-16) — the same field, one layer, no narrowing.
 //!
-//! Two wire newtypes, not one, and that asymmetry is deliberate:
-//! - [`Ics`] is the **outbound** payload. It stays `Event`-only, so a task
-//!   pushed to a provider aborts loudly.
-//! - [`ItemIcs`] is the **inbound** payload, carrying a whole [`CalendarItem`]
-//!   so `list_events` can hand a task back at all.
+//! [`ItemIcs`] is the wire representation `CalendarItem` uses as an RPC
+//! *response* type (`WireValue`), so `list_events` and the write RPCs can
+//! hand a task back at all.
 //!
-//! `WireValue::from_wire` is infallible, so neither newtype may narrow inside
+//! `WireValue::from_wire` is infallible, so `ItemIcs` may not narrow inside
 //! it — a narrowing there has no error channel and could only panic or drop.
-//! Both put every fallible step in `Deserialize`, where serde's error channel
-//! is, and hold an already-decoded value afterwards.
+//! Every fallible step lives in `Deserialize`, where serde's error channel
+//! is, and it holds an already-decoded value afterwards.
 //!
-//! Decode failure is loud in both layers, and that loudness is the whole
-//! reason an old core paired with a new provider is safe: a VTODO
-//! payload fails the `Vec<Event>` deserialization, one bad element fails the
-//! whole vector, the call errors, and the sync aborts **before any apply**.
+//! Decode failure is loud, and that loudness is the whole reason an old core
+//! paired with a new provider is safe: an unsupported component fails the
+//! item deserialization, one bad element fails the whole vector on a
+//! listing, the call errors, and the sync aborts **before any apply**.
 
-use crate::Event;
 use crate::item::CalendarItem;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Ics(pub Event);
-
-impl Ics {
-    pub fn into_inner(self) -> Event {
-        self.0
-    }
-}
-
-impl Serialize for Ics {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serialize(&self.0, serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for Ics {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserialize(deserializer).map(Self)
-    }
-}
 
 /// The **inbound** wire payload: one supported item of whichever kind.
 ///
@@ -115,28 +89,10 @@ pub(crate) mod item {
     }
 }
 
-pub(crate) fn serialize<S: Serializer>(event: &Event, serializer: S) -> Result<S::Ok, S::Error> {
-    // One encoding path, not two: a second wire-local `to_ics_string()` call
-    // here is where the kinds would drift apart. The clone costs one
-    // `Event` beside the ICS string the codec allocates anyway, and the bytes
-    // are `Event::to_ics_string`'s, unchanged.
-    item::serialize(&CalendarItem::Event(event.clone()), serializer)
-}
-
-/// The wire payload stays an `Event`: retyping it to `CalendarItem` would put
-/// ~25 `cmd.event` sites across five provider crates in this feature's blast
-/// radius. Decoding goes through the item codec, and a task is narrowed away
-/// here with the arity error the wire already reports.
-pub(crate) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Event, D::Error> {
-    // TODO: pushing a task to a provider aborts here.
-    item::deserialize(deserializer)?
-        .into_event()
-        .map_err(serde::de::Error::custom)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Event;
     use crate::EventTime;
     use crate::test_utils::{EMPTY_VCALENDAR_ICS, VTODO_ICS};
     use chrono::NaiveDate;
@@ -147,11 +103,12 @@ mod tests {
             "Test",
             EventTime::Date(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()),
         );
+        let item = CalendarItem::Event(event.clone());
 
-        let json = serde_json::to_string(&Ics(event.clone())).unwrap();
-        let decoded: Ics = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_value(WithItem(item)).unwrap();
+        let decoded = decode_item(json.as_str().unwrap()).unwrap();
 
-        assert_eq!(decoded.into_inner(), event);
+        assert_eq!(decoded, CalendarItem::Event(event));
     }
 
     /// The Radicale shape for any zoned task: a synthesized `VTIMEZONE`
@@ -315,36 +272,22 @@ BEGIN:VTODO\r\nUID:b@caldir\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
         }
     }
 
-    /// ADJUDICATION lock: the `#[serde(with = "crate::rpc::ics")]` field stays
-    /// `Event`. Providers are insulated from this feature *only* by that type
-    /// — retyping it puts 25 `cmd.event` sites across five provider crates in
-    /// the blast radius (R70). This fails to compile if the field moves.
+    /// D-3/C-16, inverted: the `#[serde(with = "crate::rpc::ics::item")]`
+    /// field is item-typed now, not `Event`. This fails to compile if the
+    /// field narrows back — the same compile-level bite the old
+    /// `the_serde_with_field_is_still_event_typed` used, in the new
+    /// direction.
     #[test]
-    fn the_serde_with_field_is_still_event_typed() {
+    fn the_outbound_field_is_item_typed() {
         let event = Event::new(
             "Test",
             EventTime::Date(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()),
         );
-        let cmd = crate::rpc::CreateEvent {
+        let cmd = crate::rpc::CreateItem {
             remote: crate::RemoteConfigParams::new(),
-            event,
+            event: CalendarItem::Event(event),
         };
 
-        let _field: Event = cmd.event;
-    }
-
-    /// R70/R71: the wire payload is still an `Event`, so a task cannot ride
-    /// it. The abort is the arity error the wire already defined — locked
-    /// verbatim, because `L6-01` builds the user-facing story on this text
-    /// and a silent success here would push a task as if it were an event.
-    #[test]
-    fn a_task_cannot_ride_the_event_only_wire() {
-        use crate::test_utils::VTODO_ICS;
-
-        let json = serde_json::to_string(VTODO_ICS).unwrap();
-        let err = serde_json::from_str::<Ics>(&json)
-            .expect_err("a VTODO must never decode into the event-only wire payload");
-
-        assert_eq!(err.to_string(), "expected 1 event(s) in ICS, found 0");
+        let _field: CalendarItem = cmd.event;
     }
 }

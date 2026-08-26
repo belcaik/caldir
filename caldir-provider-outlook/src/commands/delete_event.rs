@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
+use caldir_core::CalendarItem;
 use caldir_core::provider::ProviderStorage;
-use caldir_core::rpc::DeleteEvent;
+use caldir_core::rpc::DeleteItem;
 
 use crate::app_config::AppConfigStore;
 use crate::constants::{PROVIDER_EVENT_ID_PROPERTY, PROVIDER_NAME};
@@ -8,7 +9,16 @@ use crate::graph_api::client::GraphClient;
 use crate::remote_config::OutlookRemoteConfig;
 use crate::session::SessionStore;
 
-pub async fn handle(cmd: DeleteEvent) -> Result<()> {
+pub async fn handle(cmd: DeleteItem) -> Result<()> {
+    let event = match cmd.event {
+        CalendarItem::Event(event) => event,
+        _ => {
+            return Err(anyhow::anyhow!(
+                "caldir-provider-outlook does not support deleting tasks"
+            ));
+        }
+    };
+
     let config = OutlookRemoteConfig::try_from(&cmd.remote)?;
 
     let storage = ProviderStorage::for_provider(PROVIDER_NAME)?;
@@ -20,8 +30,7 @@ pub async fn handle(cmd: DeleteEvent) -> Result<()> {
         .await?;
     let graph = GraphClient::new(session.access_token());
 
-    let outlook_event_id = cmd
-        .event
+    let outlook_event_id = event
         .x_property(PROVIDER_EVENT_ID_PROPERTY)
         .ok_or_else(|| {
             anyhow::anyhow!("Cannot delete event without {PROVIDER_EVENT_ID_PROPERTY}")

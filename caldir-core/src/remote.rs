@@ -4,7 +4,7 @@ mod event;
 
 use crate::diff::EventChange;
 use crate::provider::{ProviderCapabilities, ProviderError};
-use crate::{DateRange, Event, Provider, rpc};
+use crate::{CalendarItem, DateRange, Event, Provider, rpc};
 
 pub use config::{RemoteConfig, RemoteConfigParams};
 pub use error::RemoteError;
@@ -67,11 +67,16 @@ impl Remote {
                 let remote_event = self.create_event(item.clone().into_event()?).await?;
                 Ok(Some(remote_event))
             }
+            // C-13: the merge is item-typed and runs *before* the
+            // event-only narrowing (P1-04's non-goal keeps dispatch here
+            // unchanged — `P2-01` owns sending a task for real), so a task
+            // update never silently drops provider-managed `X-` properties
+            // even though the narrow right after it still aborts.
             EventChange::Update { from, to } => {
                 let merged = to
                     .clone()
-                    .into_event()?
-                    .with_x_properties_merged_from(&from.clone().into_event()?);
+                    .with_x_properties_merged_from(&from.clone())
+                    .into_event()?;
                 let remote_event = self.update_event(merged).await?;
                 Ok(Some(remote_event))
             }
@@ -83,22 +88,22 @@ impl Remote {
     }
 
     async fn create_event(&self, event: Event) -> Result<RemoteEvent, RemoteError> {
-        let event = self
+        let item = self
             .provider
-            .call(rpc::CreateEvent {
+            .call(rpc::CreateItem {
                 remote: self.params.clone(),
-                event,
+                event: CalendarItem::Event(event),
             })
             .await?;
 
-        Ok(RemoteEvent::new(event))
+        Ok(RemoteEvent::new(item.into_event()?))
     }
 
     async fn delete_event(&self, event: Event) -> Result<(), RemoteError> {
         self.provider
-            .call(rpc::DeleteEvent {
+            .call(rpc::DeleteItem {
                 remote: self.params.clone(),
-                event,
+                event: CalendarItem::Event(event),
             })
             .await?;
 
@@ -106,15 +111,15 @@ impl Remote {
     }
 
     async fn update_event(&self, event: Event) -> Result<RemoteEvent, RemoteError> {
-        let event = self
+        let item = self
             .provider
-            .call(rpc::UpdateEvent {
+            .call(rpc::UpdateItem {
                 remote: self.params.clone(),
-                event,
+                event: CalendarItem::Event(event),
             })
             .await?;
 
-        Ok(RemoteEvent::new(event))
+        Ok(RemoteEvent::new(item.into_event()?))
     }
 }
 
@@ -134,14 +139,17 @@ mod tests {
     async fn apply_change_sends_create_event_for_outgoing_create() {
         let (mock, remote) = test_remote();
         let event = test_event();
-        mock.reply::<rpc::CreateEvent>(event.clone());
+        mock.reply::<rpc::CreateItem>(CalendarItem::Event(event.clone()));
 
         remote
             .apply_change(&EventChange::Create(event.clone().into()))
             .await
             .unwrap();
 
-        assert_eq!(mock.captured_request::<rpc::CreateEvent>().event, event);
+        assert_eq!(
+            mock.captured_request::<rpc::CreateItem>().event,
+            CalendarItem::Event(event)
+        );
     }
 
     #[tokio::test]
@@ -150,7 +158,7 @@ mod tests {
         let from = test_event();
         let mut to = from.clone();
         to.summary = Some("Updated".into());
-        mock.reply::<rpc::UpdateEvent>(to.clone());
+        mock.reply::<rpc::UpdateItem>(CalendarItem::Event(to.clone()));
 
         remote
             .apply_change(&EventChange::Update {
@@ -160,7 +168,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(mock.captured_request::<rpc::UpdateEvent>().event, to);
+        assert_eq!(
+            mock.captured_request::<rpc::UpdateItem>().event,
+            CalendarItem::Event(to)
+        );
     }
 
     #[tokio::test]
@@ -184,7 +195,7 @@ mod tests {
             "geo:51.47,-0.45",
         )];
 
-        mock.reply::<rpc::UpdateEvent>(to.clone());
+        mock.reply::<rpc::UpdateItem>(CalendarItem::Event(to.clone()));
 
         remote
             .apply_change(&EventChange::Update {
@@ -194,7 +205,11 @@ mod tests {
             .await
             .unwrap();
 
-        let captured = mock.captured_request::<rpc::UpdateEvent>().event;
+        let captured = mock
+            .captured_request::<rpc::UpdateItem>()
+            .event
+            .into_event()
+            .unwrap();
         assert_eq!(captured.x_properties.len(), 1);
         assert_eq!(
             captured.x_properties[0].params,
@@ -228,7 +243,7 @@ mod tests {
     #[tokio::test]
     async fn apply_change_yields_no_remote_event_for_a_delete() {
         let (mock, remote) = test_remote();
-        mock.reply::<rpc::DeleteEvent>(());
+        mock.reply::<rpc::DeleteItem>(());
 
         let applied = remote
             .apply_change(&EventChange::Delete(test_event().into()))
@@ -262,14 +277,52 @@ mod tests {
     async fn apply_change_sends_delete_event_for_outgoing_delete() {
         let (mock, remote) = test_remote();
         let event = test_event();
-        mock.reply::<rpc::DeleteEvent>(());
+        mock.reply::<rpc::DeleteItem>(());
 
         remote
             .apply_change(&EventChange::Delete(event.clone().into()))
             .await
             .unwrap();
 
-        assert_eq!(mock.captured_request::<rpc::DeleteEvent>().event, event);
+        assert_eq!(
+            mock.captured_request::<rpc::DeleteItem>().event,
+            CalendarItem::Event(event)
+        );
+    }
+
+    /// C-13, the item-typed sibling of
+    /// `apply_change_update_merges_x_property_params_from_remote`: the merge
+    /// this ticket moves ahead of `into_event`'s narrowing must apply to a
+    /// task too, or an item-typed update path compiles perfectly while
+    /// silently dropping every provider-managed `X-` property on a task — a
+    /// strip no round-trip-equality test would catch, because both sides
+    /// would agree on the stripped value. The narrow after the merge still
+    /// aborts (`P2-01` owns real task dispatch); what this pins is that the
+    /// merge itself already ran, item-typed, before that abort.
+    #[test]
+    fn a_task_update_keeps_the_remote_x_properties() {
+        let mut from = crate::todo::Todo::new("Hand in the assignment");
+        from.x_properties = vec![crate::event::XProperty {
+            name: "X-CALDAV-TASK-ID".to_string(),
+            value: "abc123".to_string(),
+            params: vec![("X-TITLE".to_string(), "Server label".to_string())],
+        }];
+
+        let mut to = from.clone();
+        to.summary = Some("Updated".into());
+        to.x_properties = vec![crate::event::XProperty::new("X-CALDAV-TASK-ID", "abc123")];
+
+        let merged =
+            CalendarItem::from(to).with_x_properties_merged_from(&CalendarItem::from(from));
+
+        let CalendarItem::Todo(todo) = merged else {
+            panic!("expected a Todo, got {merged:?}");
+        };
+        assert_eq!(todo.x_properties.len(), 1);
+        assert_eq!(
+            todo.x_properties[0].params,
+            vec![("X-TITLE".to_string(), "Server label".to_string())]
+        );
     }
 
     /// D-2's core assertion: every way the answer can fail to arrive reads

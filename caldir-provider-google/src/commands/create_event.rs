@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use caldir_core::provider::ProviderStorage;
-use caldir_core::rpc::CreateEvent;
-use caldir_core::{Event, EventTime};
+use caldir_core::rpc::CreateItem;
+use caldir_core::{CalendarItem, Event, EventTime, RemoteConfigParams};
 use google_calendar::types::SendUpdates;
 
 use crate::app_config::AppConfigStore;
@@ -11,8 +11,21 @@ use crate::google_event::{FromGoogle, ToGoogle};
 use crate::remote_config::GoogleRemoteConfig;
 use crate::session::SessionStore;
 
-pub async fn handle(cmd: CreateEvent) -> Result<Event> {
-    let config = GoogleRemoteConfig::try_from(&cmd.remote)?;
+pub async fn handle(cmd: CreateItem) -> Result<CalendarItem> {
+    let event = match cmd.event {
+        CalendarItem::Event(event) => event,
+        _ => {
+            return Err(anyhow!(
+                "caldir-provider-google does not support creating tasks"
+            ));
+        }
+    };
+
+    Ok(CalendarItem::Event(handle_event(cmd.remote, event).await?))
+}
+
+async fn handle_event(remote: RemoteConfigParams, event: Event) -> Result<Event> {
+    let config = GoogleRemoteConfig::try_from(&remote)?;
     let account_email = &config.google_account;
     let calendar_id = &config.google_calendar_id;
 
@@ -29,23 +42,18 @@ pub async fn handle(cmd: CreateEvent) -> Result<Event> {
     // Shares the master's iCalUID, so creating via events().insert() trips Google's "duplicate identifier" check.
     // Google's data model treats an override as a modification of an existing auto-expanded instance.
     // PUT the synthetic instance id `{master_id}_{rid}` instead.
-    if let Some(rid) = cmd.event.recurrence_id.as_ref() {
-        let instance_id = override_instance_id(&cmd.event, rid.as_event_time())?;
+    if let Some(rid) = event.recurrence_id.as_ref() {
+        let instance_id = override_instance_id(&event, rid.as_event_time())?;
 
         // If it's just an RSVP status update, use PATCH instead of PUT:
-        if cmd.event.is_invite_for(account_email) {
-            let google_event = patch_invite_status(
-                &session,
-                calendar_id,
-                &instance_id,
-                &cmd.event,
-                account_email,
-            )
-            .await?;
+        if event.is_invite_for(account_email) {
+            let google_event =
+                patch_invite_status(&session, calendar_id, &instance_id, &event, account_email)
+                    .await?;
 
             return Event::from_google(google_event);
         } else {
-            let mut google_event = cmd.event.to_google();
+            let mut google_event = event.to_google();
 
             google_event.id = instance_id.clone();
 
@@ -78,7 +86,7 @@ pub async fn handle(cmd: CreateEvent) -> Result<Event> {
 
     // Let google change the ID
     // (Otherwise we'll get "Invalid resource id value")
-    let mut google_event = cmd.event.to_google();
+    let mut google_event = event.to_google();
     google_event.id = String::new();
 
     let response = match client

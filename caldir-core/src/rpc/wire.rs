@@ -1,8 +1,8 @@
+use crate::CalendarConfig;
 use crate::item::CalendarItem;
 use crate::provider::ProviderCapabilities;
+use crate::rpc::ConnectResponse;
 use crate::rpc::ics::ItemIcs;
-use crate::rpc::{ConnectResponse, Ics};
-use crate::{CalendarConfig, Event};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -19,19 +19,8 @@ pub(crate) trait WireValue: Sized {
     fn from_wire(wire: Self::Wire) -> Self;
 }
 
-impl WireValue for Event {
-    type Wire = Ics;
-
-    fn into_wire(self) -> Self::Wire {
-        Ics(self)
-    }
-
-    fn from_wire(wire: Self::Wire) -> Self {
-        wire.into_inner()
-    }
-}
-
-/// The inbound item payload (`list_events`'s response). Infallible in both
+/// The inbound item payload (`list_events`'s response, and now the write
+/// RPCs' response too — D-3/C-16). Infallible in both
 /// directions because [`ItemIcs`] already holds a decoded item.
 impl WireValue for CalendarItem {
     type Wire = ItemIcs;

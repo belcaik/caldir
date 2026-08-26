@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
+use caldir_core::CalendarItem;
 use caldir_core::provider::ProviderStorage;
-use caldir_core::rpc::DeleteEvent;
+use caldir_core::rpc::DeleteItem;
 use google_calendar::types::SendUpdates;
 
 use crate::app_config::AppConfigStore;
@@ -8,13 +9,21 @@ use crate::constants::{PROVIDER_EVENT_ID_PROPERTY, PROVIDER_NAME};
 use crate::remote_config::GoogleRemoteConfig;
 use crate::session::SessionStore;
 
-pub async fn handle(cmd: DeleteEvent) -> Result<()> {
+pub async fn handle(cmd: DeleteItem) -> Result<()> {
+    let event = match cmd.event {
+        CalendarItem::Event(event) => event,
+        _ => {
+            return Err(anyhow::anyhow!(
+                "caldir-provider-google does not support deleting tasks"
+            ));
+        }
+    };
+
     let config = GoogleRemoteConfig::try_from(&cmd.remote)?;
     let account_email = &config.google_account;
     let calendar_id = &config.google_calendar_id;
 
-    let google_event_id = cmd
-        .event
+    let google_event_id = event
         .x_property(PROVIDER_EVENT_ID_PROPERTY)
         .ok_or_else(|| {
             anyhow::anyhow!("Cannot delete event without {PROVIDER_EVENT_ID_PROPERTY}")
