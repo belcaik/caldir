@@ -4,6 +4,7 @@ mod app_config;
 mod commands;
 mod constants;
 mod google_event;
+mod google_tasks;
 mod remote_config;
 mod session;
 

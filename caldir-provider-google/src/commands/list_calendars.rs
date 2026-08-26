@@ -8,8 +8,9 @@ use google_calendar::types::MinAccessRole;
 
 use crate::app_config::AppConfigStore;
 use crate::constants::PROVIDER_NAME;
-use crate::remote_config::GoogleRemoteConfig;
-use crate::session::SessionStore;
+use crate::google_tasks;
+use crate::remote_config::{GoogleRemoteConfig, GoogleTaskListRemoteConfig};
+use crate::session::{Session, SessionStore};
 
 pub async fn handle(cmd: ListCalendars) -> Result<Vec<CalendarConfig>> {
     let account_email = &cmd.account_identifier;
@@ -30,7 +31,7 @@ pub async fn handle(cmd: ListCalendars) -> Result<Vec<CalendarConfig>> {
         .context("Failed to fetch calendars")?
         .body;
 
-    let calendar_configs = google_calendars
+    let mut calendar_configs: Vec<CalendarConfig> = google_calendars
         .iter()
         .map(|cal| {
             let params =
@@ -47,5 +48,43 @@ pub async fn handle(cmd: ListCalendars) -> Result<Vec<CalendarConfig>> {
         })
         .collect();
 
+    calendar_configs.extend(task_list_calendar_configs(account_email, &session).await?);
+
     Ok(calendar_configs)
+}
+
+/// Enumerates Google Tasks lists alongside Calendar collections (spec §11,
+/// `GOOGLE-1`). The scope guard runs *before* the Tasks request — a session
+/// predating the Tasks scope degrades to calendars-only rather than
+/// surfacing a bare Google 403 (§10, `docs/vtodo/provider-sync/providers/google-tasks.md`
+/// "Session migration").
+async fn task_list_calendar_configs(
+    account_email: &str,
+    session: &Session,
+) -> Result<Vec<CalendarConfig>> {
+    if session.require_tasks_scope().is_err() {
+        return Ok(Vec::new());
+    }
+
+    let task_lists = google_tasks::list_task_lists(session.access_token())
+        .await
+        .context("Failed to fetch Google Task lists")?;
+
+    Ok(task_lists
+        .iter()
+        .map(|list| {
+            let params = GoogleTaskListRemoteConfig::new(account_email, &list.id)
+                .into_remote_config_params();
+            let remote_config = RemoteConfig::new(ProviderSlug::from(PROVIDER_NAME), params);
+
+            // Whether tasks are pushed is decided at execution time by
+            // capability negotiation (P4-05), not frozen here (D-2, S3).
+            CalendarConfig::new(
+                Some(list.title.clone()),
+                None,
+                Some(false),
+                Some(remote_config),
+            )
+        })
+        .collect())
 }
