@@ -68,6 +68,29 @@ END:VTODO\r\nEND:VCALENDAR\r\n"
     )
 }
 
+/// `P6-04`: as `STUB_PROVIDER`, but also answers `capabilities` with
+/// `tasks.write: true` (so a task is no longer withheld — see
+/// `Connection::diff`, `caldir-core/src/connection.rs`) and logs every
+/// request it is asked for to `$HOME/rpc.log`, mirroring
+/// `sync_exit_status.rs`'s `logging_provider`.
+const TASK_CAPABLE_STUB_PROVIDER: &str = r#"#!/bin/sh
+request=$(cat)
+echo "$request" >> "$HOME/rpc.log"
+case "$request" in
+  *'"list_events"'*)
+    echo '{"status":"success","data":[]}'
+    ;;
+  *'"capabilities"'*)
+    echo '{"status":"success","data":{"events":{"read":true,"write":true},"tasks":{"read":true,"write":true}}}'
+    ;;
+  *)
+    event=${request#*'"event":'}
+    event=${event%\}\}}
+    printf '{"status":"success","data":%s}\n' "$event"
+    ;;
+esac
+"#;
+
 struct Sandbox {
     _tmp: tempfile::TempDir,
     root: PathBuf,
@@ -150,6 +173,11 @@ impl Sandbox {
     fn pushed_ids(&self) -> String {
         fs::read_to_string(self.root.join("data/work/.caldir/state/known_event_ids"))
             .unwrap_or_default()
+    }
+
+    /// `P6-04`: every request `TASK_CAPABLE_STUB_PROVIDER` logged, in order.
+    fn rpc_log(&self) -> String {
+        fs::read_to_string(self.root.join("rpc.log")).unwrap_or_default()
     }
 }
 
@@ -279,5 +307,55 @@ fn a_calendar_whose_provider_is_missing_exits_non_zero() {
     assert!(
         stderr.contains("not-installed"),
         "stderr must name the missing provider, got {stderr:?}",
+    );
+}
+
+/// `P6-04`/`CALDAV-8`/`GOOGLE-12`: a calendar mixing events and a task, pushed
+/// against a provider that *does* advertise `tasks.write`. The only place a
+/// task write can break an event write is a shared calendar in a real push,
+/// so this drives both through one process. The event half is checked
+/// against exactly what `an_event_only_push_still_exits_zero_and_
+/// summarises_what_it_pushed` asserts for its own two events — same ids, same
+/// exit code, same stderr — so a real regression in event handling cannot
+/// hide behind "the task changed the numbers".
+#[test]
+fn a_calendar_holding_events_and_tasks_pushes_both_and_exits_zero() {
+    let sandbox = Sandbox::with_provider(true, "stub", TASK_CAPABLE_STUB_PROVIDER);
+    let output = sandbox.push();
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert!(
+        output.status.success(),
+        "a task-capable provider must still push events cleanly; got {:?}\nstdout: {stdout}\nstderr: {stderr}",
+        output.status,
+    );
+    assert_eq!(stderr, "", "nothing failed, so nothing belongs on stderr");
+    assert!(
+        !stdout.contains("task change not pushed"),
+        "a provider advertising tasks.write must not withhold the task, got {stdout:?}",
+    );
+
+    let log = sandbox.rpc_log();
+    assert!(
+        log.contains("create_event") && log.matches("\"event\":\"BEGIN:VCALENDAR").count() >= 3,
+        "both events and the task must reach the provider as create_event calls; got {log:?}",
+    );
+    assert!(log.contains("BEGIN:VEVENT"), "got {log:?}");
+    assert!(log.contains("BEGIN:VTODO"), "got {log:?}");
+
+    // The event half: same two ids as the event-only push locks, unaffected
+    // by the task sharing the calendar.
+    let pushed = sandbox.pushed_ids();
+    for slug in ["a", "b"] {
+        assert!(
+            pushed.contains(&format!("{slug}@test")),
+            "the events must still push exactly as the event-only case does; got {pushed:?}",
+        );
+    }
+    assert!(
+        pushed.contains("VTODO:hand-in@u-crawler"),
+        "a task-capable provider must actually push the task; got {pushed:?}",
     );
 }

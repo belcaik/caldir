@@ -620,4 +620,29 @@ END:VCALENDAR\r\n",
         assert_ne!(task_id.uid(), window_id.uid());
         assert_ne!(task_id.kind(), window_id.kind());
     }
+
+    /// `P6-04`/`CROSS-6`: `into_event`'s whole safety value is that it
+    /// *cannot* succeed for a task. An infallible version would compile
+    /// everywhere it is called and silently satisfy every other test in the
+    /// suite, so this pins the `Err` directly and, alongside it, that the
+    /// `Event` arm still passes an event through unchanged.
+    #[test]
+    fn the_task_to_event_narrowing_stays_fallible_as_a_backstop() {
+        let todo = crate::todo::Todo::new("Hand in the assignment");
+        let err = CalendarItem::Todo(todo).into_event().unwrap_err();
+        assert!(
+            matches!(
+                err,
+                EventError::UnexpectedEventCount {
+                    expected: 1,
+                    found: 0,
+                }
+            ),
+            "got {err:?}"
+        );
+
+        let event = crate::test_utils::test_event();
+        let narrowed = CalendarItem::Event(event.clone()).into_event().unwrap();
+        assert_eq!(narrowed, event);
+    }
 }

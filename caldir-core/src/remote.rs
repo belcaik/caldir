@@ -141,7 +141,7 @@ mod tests {
     use crate::provider::ProviderCapabilities;
     use crate::provider::transport::ProviderTransportError;
     use crate::provider::transport::mock_transport::MockTransport;
-    use crate::test_utils::{test_event, test_remote};
+    use crate::test_utils::{test_event, test_remote, test_remote_params};
     use pretty_assertions::assert_eq;
     use std::sync::Arc;
     use std::time::Duration;
@@ -513,6 +513,46 @@ mod tests {
         assert!(
             reason.contains("unknown variant `capabilities`"),
             "the provider's own diagnostic text must survive verbatim inside the wrapper: {reason}"
+        );
+    }
+
+    /// `P6-04`/`CROSS-1`+`CROSS-2` in one assertion: drives the identical
+    /// task create through a `caldav`-slugged and a `google`-slugged
+    /// `Provider` and asserts the two captured request bodies are
+    /// byte-equal. One core `Task` type serves every provider (`CROSS-1`),
+    /// and core's outbound bytes are provably independent of who is
+    /// listening — the only way `apply_change`/`create_item` could differ
+    /// per slug is a `match self.provider.slug()` this test would catch
+    /// (`CROSS-2`).
+    #[tokio::test]
+    async fn a_task_write_produces_the_same_request_for_every_provider_slug() {
+        let todo = crate::todo::Todo::new("Hand in the assignment");
+
+        let caldav_mock = crate::provider::mock_provider::MockProvider::new("caldav");
+        let caldav_remote = Remote::new(caldav_mock.provider(), test_remote_params());
+        caldav_mock.reply::<rpc::CreateItem>(CalendarItem::Todo(todo.clone()));
+        caldav_remote
+            .apply_change(&EventChange::Create(todo.clone().into()))
+            .await
+            .expect("a task create must reach the caldav provider");
+
+        let google_mock = crate::provider::mock_provider::MockProvider::new("google");
+        let google_remote = Remote::new(google_mock.provider(), test_remote_params());
+        google_mock.reply::<rpc::CreateItem>(CalendarItem::Todo(todo.clone()));
+        google_remote
+            .apply_change(&EventChange::Create(todo.clone().into()))
+            .await
+            .expect("a task create must reach the google provider");
+
+        let caldav_request = caldav_mock.captured_request::<rpc::CreateItem>();
+        let google_request = google_mock.captured_request::<rpc::CreateItem>();
+
+        let caldav_body = serde_json::to_string(&caldav_request).unwrap();
+        let google_body = serde_json::to_string(&google_request).unwrap();
+
+        assert_eq!(
+            caldav_body, google_body,
+            "the outbound task-create body must not depend on the provider slug"
         );
     }
 }
