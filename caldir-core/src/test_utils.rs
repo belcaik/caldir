@@ -173,6 +173,64 @@ pub fn test_binary(filename: &str) -> (TempDir, PathBuf) {
     (tmp, path)
 }
 
+/// `P6-02`: a real subprocess standing in for a provider binary built
+/// before `caldir-core` ever had a `capabilities` verb — its `Method` enum
+/// knows only the six pre-`P1-02` variants. Answers each of those with a
+/// plain success envelope; answers anything else (in practice, only
+/// `capabilities`) exactly as a binary that predates `P1-01`'s two-stage
+/// envelope decode does: the whole request line fails to parse, verbatim,
+/// with no `code` field. That shape is deliberately stale — it must not be
+/// "corrected" to the newer named/coded form, or the stub stops proving
+/// anything about a real old binary.
+pub fn legacy_provider_binary() -> (TempDir, PathBuf) {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("caldir-provider-legacy");
+
+    let script = r#"#!/bin/sh
+# Drain stdin first so we don't race the parent's write to a closed pipe.
+input=$(cat)
+
+case "$input" in
+  *'"command":"connect"'*)
+    echo '{"status":"success","data":{"status":"done","account_identifier":"legacy@example.com"}}'
+    ;;
+  *'"command":"list_calendars"'*)
+    echo '{"status":"success","data":[]}'
+    ;;
+  *'"command":"list_events"'*)
+    echo '{"status":"success","data":[]}'
+    ;;
+  *'"command":"create_event"'*)
+    echo '{"status":"success","data":"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//u_crawler//EN\r\nCALSCALE:GREGORIAN\r\nBEGIN:VEVENT\r\nUID:window-123@u-crawler\r\nDTSTAMP:20260801T090000Z\r\nDTSTART:20260815T100000Z\r\nDTEND:20260815T120000Z\r\nSUMMARY:Assignment 3 - submission window\r\nDESCRIPTION:Submission window for assignment 3.\r\nURL:https://example.edu/courses/cs101/assignments/123\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"}'
+    ;;
+  *'"command":"update_event"'*)
+    echo '{"status":"success","data":"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//u_crawler//EN\r\nCALSCALE:GREGORIAN\r\nBEGIN:VEVENT\r\nUID:window-123@u-crawler\r\nDTSTAMP:20260801T090000Z\r\nDTSTART:20260815T100000Z\r\nDTEND:20260815T120000Z\r\nSUMMARY:Assignment 3 - submission window\r\nDESCRIPTION:Submission window for assignment 3.\r\nURL:https://example.edu/courses/cs101/assignments/123\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"}'
+    ;;
+  *'"command":"delete_event"'*)
+    echo '{"status":"success","data":null}'
+    ;;
+  *)
+    # Deliberately stale (P6-02): the exact shape a binary predating P1-01
+    # answers for a command its Method enum has never heard of at all — the
+    # whole envelope fails to parse, so there is no `code` field yet.
+    echo '{"status":"error","error":"Failed to parse request: unknown variant `capabilities`, expected one of `connect`, `list_calendars`, `list_events`, `create_event`, `update_event`, `delete_event`"}'
+    ;;
+esac
+"#;
+
+    std::fs::write(&path, script).unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+    }
+
+    (tmp, path)
+}
+
 // --- VTODO reproduction fixtures (stage 2) ---
 //
 // Representative of `u_crawler` output: a course directory with

@@ -729,6 +729,103 @@ mod tests {
         assert_eq!(std::fs::read(&todo_path).unwrap(), todo_bytes_before);
     }
 
+    /// `P6-02`, the process-level counterpart to
+    /// `an_unknown_capabilities_method_withholds_every_task_push` above (that
+    /// test proves the same withholding against a `MockTransport` envelope —
+    /// this one drives it against a real `caldir-provider-legacy` subprocess
+    /// that only ever knew the six pre-`capabilities` verbs). §18's "existing
+    /// calendars retain current behaviour" and C-8's "errored keeps every
+    /// belt on" are one sentence about one run: the event syncing, a
+    /// never-before-seen task's push being withheld, and an already-synced
+    /// task's delete being suppressed are asserted together in one `diff`
+    /// call so a regression can't satisfy one belt while breaking another.
+    ///
+    /// Two tasks, not one: `withheld_task_pushes` and
+    /// `suppressed_task_deletes` are two different belts guarding two
+    /// different histories (never-synced vs. previously-synced-then-gone),
+    /// and no single task's sync state can occupy both at once.
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn a_pre_capability_binary_syncs_events_and_withholds_every_task() {
+        use crate::Provider;
+        use crate::test_utils::legacy_provider_binary;
+
+        let (_tmp, caldir) = test_caldir();
+        let calendar = caldir
+            .create_calendar("writable-cal", Some(calendar_config(Some(false))))
+            .unwrap();
+
+        let event = test_event();
+        calendar.create_event(event.clone()).unwrap();
+
+        // Never synced before: this is the task-push belt (D-2, `outgoing()`
+        // never carries it; `withheld_task_pushes` counts it).
+        let new_todo = Todo::new("Hand in the assignment");
+        let new_todo_path = calendar
+            .create_event(new_todo.clone())
+            .unwrap()
+            .path()
+            .to_path_buf();
+        let new_todo_bytes_before = std::fs::read(&new_todo_path).unwrap();
+
+        // Already synced once: this is the delete-suppression belt (C-7/C-8)
+        // — an old binary's task-blind `list_events` must not read this
+        // absence as a remote delete.
+        let synced_todo = Todo::new("Renew the permit");
+        let synced_todo_path = calendar
+            .create_event(synced_todo.clone())
+            .unwrap()
+            .path()
+            .to_path_buf();
+        let synced_todo_bytes_before = std::fs::read(&synced_todo_path).unwrap();
+
+        let (_bin_tmp, bin) = legacy_provider_binary();
+        let provider = Provider::from_binary_path(bin).unwrap();
+        let remote = Remote::new(provider, test_remote_params());
+
+        let mut connection = Connection::new(calendar, remote);
+        connection
+            .local
+            .record_sync_bases(vec![CalendarItem::Todo(synced_todo.clone())])
+            .unwrap();
+        let diff = connection.diff(&DateRange::default()).await.unwrap();
+
+        assert_eq!(
+            diff.outgoing(),
+            &[EventChange::Create(event.clone().into())],
+            "the event must sync normally against an old binary, got {:?}",
+            diff.outgoing(),
+        );
+        assert_eq!(diff.withheld_task_pushes(), 1);
+        assert!(
+            diff.suppressed_task_deletes(),
+            "C-7's relaxation applies only to a provider that explicitly \
+             advertises tasks.read=true; an old binary never does",
+        );
+        assert!(
+            diff.incoming().is_empty(),
+            "an old binary's empty task listing must never read as a \
+             remote delete either, got {:?}",
+            diff.incoming(),
+        );
+
+        connection
+            .apply_outgoing_diff(&diff)
+            .await
+            .expect("a task-less push against an old binary must still succeed");
+
+        assert_eq!(
+            std::fs::read(&new_todo_path).unwrap(),
+            new_todo_bytes_before,
+            "the never-synced local VTODO must be byte-unchanged after syncing against an old binary",
+        );
+        assert_eq!(
+            std::fs::read(&synced_todo_path).unwrap(),
+            synced_todo_bytes_before,
+            "the previously-synced local VTODO must be byte-unchanged after syncing against an old binary",
+        );
+    }
+
     /// `CROSS-5` names deletion *and* corruption: a withheld push that still
     /// rewrote the local file from a stale base would pass a "not pushed"
     /// assertion and still corrupt the file. Drives a real create-only cycle
