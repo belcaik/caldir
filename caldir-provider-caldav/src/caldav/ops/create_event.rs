@@ -1,14 +1,13 @@
 //! Create a new event on a CalDAV calendar.
 
 use anyhow::{Context, Result};
-use caldir_core::Event;
+use caldir_core::{CalendarItem, Event};
 use http::Request;
 use libdav::caldav::GetCalendarResources;
 
-use crate::caldav::{create_caldav_client, event_url, url_to_href};
+use crate::caldav::{CalDavClient_, create_caldav_client, event_url, url_to_href};
 
-use super::parse_item;
-use super::update_event::update_event;
+use super::{find_event_location, parse_item, put_ics};
 
 /// The CalDAV XML namespace the conflict element lives in.
 const CALDAV_NS: &str = "urn:ietf:params:xml:ns:caldav";
@@ -28,25 +27,96 @@ fn is_no_uid_conflict(body: &str) -> bool {
     })
 }
 
-/// Create a new event on a CalDAV calendar.
+/// Serialize an item to a single-component `VCALENDAR` document, from the
+/// kind's own serializer. Never routed through a shared "as event" path —
+/// that is exactly how a task would get rewritten as a `VEVENT` (CROSS-6).
+fn item_to_ics_string(item: &CalendarItem) -> String {
+    match item {
+        CalendarItem::Event(event) => event.to_ics_string(),
+        CalendarItem::Todo(todo) => todo.to_ics_string(),
+        _ => unreachable!("caldir_core::CalendarItem grew a variant; give it a serializer here"),
+    }
+}
+
+/// Fetch the resource at `href` back and decode it, whichever kind it holds.
+///
+/// `None` on any failure to reach or decode it — the caller falls back to the
+/// value it sent rather than failing a create that already succeeded.
+async fn read_back(caldav: &CalDavClient_, calendar_url: &str, href: &str) -> Option<CalendarItem> {
+    let calendar_href = url_to_href(calendar_url);
+    let response = caldav
+        .request(GetCalendarResources::new(&calendar_href).with_hrefs([href]))
+        .await
+        .ok()?;
+
+    let content = response.resources.into_iter().next()?.content.ok()?;
+    parse_item(&content.data).ok()
+}
+
+/// The `409 <C:no-uid-conflict/>` fallback: the UID already lives at a
+/// server-assigned href, so this create is really an update. Locates the
+/// resource **by the item's own kind, never a constant** — a task's lookup
+/// landing on somebody's event would overwrite the wrong resource — and PUTs
+/// there conditionally on its etag. Runs at most once: this never calls back
+/// into `create_item`, so the fallback cannot recurse or loop.
+async fn update_after_uid_conflict(
+    caldav: &CalDavClient_,
+    calendar_url: &str,
+    item: CalendarItem,
+    ics_content: String,
+) -> Result<CalendarItem> {
+    let calendar_href = url_to_href(calendar_url);
+    let location = find_event_location(
+        caldav,
+        &calendar_href,
+        calendar_url,
+        item.uid().as_str(),
+        item.instance_id().kind(),
+    )
+    .await?;
+
+    let uri = caldav.relative_uri(&location.href)?;
+    let request = Request::builder()
+        .method(http::Method::PUT)
+        .uri(&uri)
+        .header("Content-Type", "text/calendar")
+        .header("If-Match", &location.etag)
+        .body(ics_content)?;
+
+    let (parts, _body) = put_ics(caldav, request)
+        .await
+        .context("Failed to update event")?;
+
+    if !parts.status.is_success() {
+        anyhow::bail!("Failed to update event: server returned {}", parts.status);
+    }
+
+    Ok(read_back(caldav, calendar_url, &location.href)
+        .await
+        .unwrap_or(item))
+}
+
+/// Create a new item — event or task — on a CalDAV calendar, as its own
+/// component: a task is uploaded as `VTODO` calendar data and is never
+/// rewritten as a `VEVENT` (CROSS-6).
 ///
 /// Uses a raw PUT request to avoid duplicate Content-Type headers (a libdav quirk).
-/// Fetches the created event back to get server-assigned values.
+/// Fetches the created item back to get server-assigned values.
 ///
 /// A `409 <C:no-uid-conflict/>` is not a failure but the server saying the UID
 /// already lives at another href; caldir then does what that means — locate the
 /// resource and update it. Once, never in a loop.
-pub async fn create_event(
+pub async fn create_item(
     username: &str,
     password: &str,
     calendar_url: &str,
-    event: Event,
-) -> Result<Event> {
+    item: CalendarItem,
+) -> Result<CalendarItem> {
     let caldav = create_caldav_client(calendar_url, username, password)?;
 
-    let ics_content = event.to_ics_string();
+    let ics_content = item_to_ics_string(&item);
 
-    let full_url = event_url(calendar_url, event.uid.as_str());
+    let full_url = event_url(calendar_url, item.uid().as_str());
     let href = url_to_href(&full_url);
 
     // Use request_raw instead of libdav's PutResource to avoid a duplicate
@@ -59,9 +129,9 @@ pub async fn create_event(
         .uri(&uri)
         .header("Content-Type", "text/calendar")
         .header("If-None-Match", "*")
-        .body(ics_content)?;
+        .body(ics_content.clone())?;
 
-    let (parts, response_body) = super::put_ics(&caldav, request)
+    let (parts, response_body) = put_ics(&caldav, request)
         .await
         .context("Failed to create event")?;
 
@@ -70,10 +140,8 @@ pub async fn create_event(
 
         // `409 <C:no-uid-conflict/>`: the UID already lives at some other href
         // (a server-assigned filename), so this create is really an update.
-        // Attempted at most once — `update_event` never calls back into
-        // `create_event`, so the fallback cannot recurse or loop.
         if parts.status == http::StatusCode::CONFLICT && is_no_uid_conflict(&response_body) {
-            return update_event(username, password, calendar_url, event).await;
+            return update_after_uid_conflict(&caldav, calendar_url, item, ics_content).await;
         }
 
         anyhow::bail!(
@@ -83,31 +151,92 @@ pub async fn create_event(
         );
     }
 
-    // Fetch the created event to get server-assigned values
-    let calendar_href = url_to_href(calendar_url);
-    let get_response = caldav
-        .request(GetCalendarResources::new(&calendar_href).with_hrefs([&href]))
+    Ok(read_back(&caldav, calendar_url, &href)
         .await
-        .ok();
+        .unwrap_or(item))
+}
 
-    if let Some(response) = get_response
-        && let Some(resource) = response.resources.into_iter().next()
-        && let Ok(content) = resource.content
-        && let Ok(caldir_core::CalendarItem::Event(fetched_event)) = parse_item(&content.data)
-    {
-        return Ok(fetched_event);
+/// Create a new event on a CalDAV calendar.
+///
+/// A thin wrapper over [`create_item`]: the event-only entry point every
+/// pre-VTODO caller already uses, unchanged in signature and behaviour.
+pub async fn create_event(
+    username: &str,
+    password: &str,
+    calendar_url: &str,
+    event: Event,
+) -> Result<Event> {
+    match create_item(username, password, calendar_url, CalendarItem::Event(event)).await? {
+        CalendarItem::Event(event) => Ok(event),
+        item => anyhow::bail!(
+            "create_event: server returned a {:?}, not an event",
+            item.instance_id().kind()
+        ),
     }
-
-    Ok(event)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::caldav::ops::test_dav::{calendar_url, mount_report, multistatus};
-    use caldir_core::{EventTime, EventUid};
+    use caldir_core::{CalendarItem, EventTime, EventUid, Todo};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// A local task, uid pinned so `event_url`'s derivation is assertable.
+    fn local_todo() -> Todo {
+        let mut todo = Todo::new("Sent by caldir");
+        todo.uid = EventUid::new("task-1@caldir");
+        todo
+    }
+
+    /// **AC 1, 2 (§8.1, R62, CROSS-6).** The two MUSTs are both statements
+    /// about the bytes on the wire: a `VTODO` PUT at the UID-derived href,
+    /// never rewritten as a `VEVENT`.
+    #[tokio::test]
+    async fn a_task_is_put_as_vtodo_at_the_uid_derived_href() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PUT"))
+            .and(path("/cal/task-1@caldir.ics"))
+            .respond_with(ResponseTemplate::new(201))
+            .mount(&server)
+            .await;
+
+        create_item(
+            "user",
+            "pass",
+            &calendar_url(&server),
+            CalendarItem::Todo(local_todo()),
+        )
+        .await
+        .expect("creating a task succeeds");
+
+        let puts = puts(&server).await;
+        assert_eq!(puts.len(), 1, "exactly one PUT for a task create");
+        assert_eq!(puts[0].url.path(), "/cal/task-1@caldir.ics");
+
+        let body = String::from_utf8_lossy(&puts[0].body);
+        assert!(body.contains("BEGIN:VTODO"), "got: {body}");
+        assert!(
+            !body.contains("BEGIN:VEVENT"),
+            "a task must never be rewritten as an event, got: {body}"
+        );
+        assert_eq!(
+            puts[0]
+                .headers
+                .get("Content-Type")
+                .map(|v| v.to_str().unwrap()),
+            Some("text/calendar")
+        );
+        assert_eq!(
+            puts[0]
+                .headers
+                .get("If-None-Match")
+                .map(|v| v.to_str().unwrap()),
+            Some("*")
+        );
+    }
 
     /// What the *server* holds after the PUT: a different SUMMARY and an
     /// `X-` property caldir never sent. Raw ICS, so the remote is an
@@ -154,6 +283,62 @@ SUMMARY:Renamed by the server\r\nX-RADICALE-NAME:9f2c.ics\r\nEND:VEVENT\r\nEND:V
             created.summary.as_deref(),
             Some("Renamed by the server"),
             "the read-back must win: dropping it loses every server-assigned value"
+        );
+        assert!(
+            created
+                .x_properties
+                .iter()
+                .any(|prop| prop.name == "X-RADICALE-NAME"),
+            "server-only properties must survive the read-back, got {:?}",
+            created.x_properties
+        );
+    }
+
+    /// What the server holds after the PUT: a different `SUMMARY` and an
+    /// `X-RADICALE-NAME` caldir never sent. Raw ICS, so the remote is an
+    /// independent store rather than the encoder under test replaying itself.
+    const SERVER_HELD_VTODO_ICS: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VTODO\r\nUID:task-1@caldir\r\nDTSTAMP:20260801T090000Z\r\n\
+SUMMARY:Renamed by the server\r\nX-RADICALE-NAME:9f2c.ics\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
+
+    /// **AC 5 (§8.4).** The shipped read-back arm is
+    /// `if let Ok(CalendarItem::Event(fetched_event)) = parse_item(..)` — a
+    /// `Todo` read-back falls straight through it and the function silently
+    /// returns the locally-sent item. That failure is invisible until
+    /// `P2-02` writes the wrong sync base and the next sync duplicates.
+    #[tokio::test]
+    async fn create_returns_the_task_the_server_holds_not_the_one_sent() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PUT"))
+            .and(path("/cal/task-1@caldir.ics"))
+            .respond_with(ResponseTemplate::new(201))
+            .mount(&server)
+            .await;
+        mount_report(
+            &server,
+            "calendar-multiget",
+            multistatus("/cal/task-1@caldir.ics", "\"t-1\"", SERVER_HELD_VTODO_ICS),
+        )
+        .await;
+
+        let created = create_item(
+            "user",
+            "pass",
+            &calendar_url(&server),
+            CalendarItem::Todo(local_todo()),
+        )
+        .await
+        .expect("the create succeeds");
+
+        let CalendarItem::Todo(created) = created else {
+            panic!("expected the server's Todo back, got {created:?}");
+        };
+
+        assert_eq!(
+            created.summary.as_deref(),
+            Some("Renamed by the server"),
+            "the read-back must win for a task exactly as it does for an event"
         );
         assert!(
             created
@@ -274,6 +459,155 @@ SUMMARY:Renamed by the server\r\nX-RADICALE-NAME:9f2c.ics\r\nEND:VEVENT\r\nEND:V
         assert!(
             !puts[1].headers.contains_key("If-None-Match"),
             "If-None-Match: * on the fallback would re-trigger the conflict"
+        );
+    }
+
+    /// **AC 4 (INDEX §4 P3-02 risk, SESSION-LOG §7).** The same fallback for a
+    /// task, asserted as an **outcome** — one resource, correct body, no
+    /// duplicate — never as a status code. The reachable trigger is a
+    /// resource at another href already holding the UID (a server-assigned
+    /// filename); a local rename yields the *same* href, because `event_url`
+    /// derives it from the UID alone. Three ticket briefs in the prior effort
+    /// asserted the rename story and were wrong.
+    #[tokio::test]
+    async fn a_409_no_uid_conflict_on_a_task_updates_the_one_resource_that_holds_the_uid() {
+        const TASK_UID_HREF: &str = "/cal/task-1@caldir.ics";
+        const TASK_ASSIGNED_HREF: &str = "/cal/other-task-href.ics";
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("PUT"))
+            .and(path(TASK_UID_HREF))
+            .respond_with(
+                ResponseTemplate::new(409)
+                    .set_body_raw(NO_UID_CONFLICT_BODY, "application/xml; charset=utf-8"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path(TASK_ASSIGNED_HREF))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        // No `calendar-multiget` double: nothing sits at `{uid}.ics`, so the
+        // UID-lookup REPORT is what resolves the resource — and it must
+        // filter on VTODO, never VEVENT.
+        mount_report(
+            &server,
+            r#"<C:comp-filter name="VTODO">"#,
+            multistatus(TASK_ASSIGNED_HREF, "\"tsk-9\"", SERVER_HELD_VTODO_ICS),
+        )
+        .await;
+
+        create_item(
+            "user",
+            "pass",
+            &calendar_url(&server),
+            CalendarItem::Todo(local_todo()),
+        )
+        .await
+        .expect("a 409 no-uid-conflict on a task is an update, not a failure");
+
+        // The outcome: one resource holds the task, at the located href, and
+        // no duplicate sits at the original {uid}.ics attempt. The status
+        // code the server answered with is deliberately not asserted.
+        let puts = puts(&server).await;
+        assert_eq!(
+            puts.len(),
+            2,
+            "exactly one fallback attempt, got {:?}",
+            puts.iter().map(|r| r.url.path()).collect::<Vec<_>>()
+        );
+        assert_eq!(puts[0].url.path(), TASK_UID_HREF);
+        assert_eq!(
+            puts[1].url.path(),
+            TASK_ASSIGNED_HREF,
+            "the fallback must target the located resource, not a duplicate at {TASK_UID_HREF}"
+        );
+        assert_eq!(
+            puts[1].headers.get("If-Match").map(|v| v.to_str().unwrap()),
+            Some("\"tsk-9\""),
+            "the fallback PUT must be conditional on the located etag"
+        );
+        assert!(
+            !puts[1].headers.contains_key("If-None-Match"),
+            "If-None-Match: * on the fallback would re-trigger the conflict"
+        );
+        let body = String::from_utf8_lossy(&puts[1].body);
+        assert!(
+            body.contains("BEGIN:VTODO"),
+            "the correct body: the fallback PUT must still carry the task, got: {body}"
+        );
+    }
+
+    /// **AC 6, INDEX §4 P3-02 risk.** `find_event_location` takes the kind
+    /// from the item being written, never a constant: an item-typed rewrite
+    /// that hardcodes `ComponentKind::Event` compiles, passes every other
+    /// test, and overwrites somebody's meeting with a task. Here a `VEVENT`
+    /// sharing the UID sits right at `{uid}.ics` — the fallback must never
+    /// land there.
+    #[tokio::test]
+    async fn a_task_create_never_locates_a_same_uid_event() {
+        const TASK_UID_HREF: &str = "/cal/task-1@caldir.ics";
+        const TASK_ASSIGNED_HREF: &str = "/cal/other-task-href.ics";
+
+        /// A VEVENT sharing the task's UID, sitting right at `{uid}.ics`.
+        const SAME_UID_VEVENT_ICS: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VEVENT\r\nUID:task-1@caldir\r\nDTSTART:20260615T100000Z\r\nDTEND:20260615T110000Z\r\n\
+SUMMARY:Somebody's meeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("PUT"))
+            .and(path(TASK_UID_HREF))
+            .respond_with(
+                ResponseTemplate::new(409)
+                    .set_body_raw(NO_UID_CONFLICT_BODY, "application/xml; charset=utf-8"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path(TASK_ASSIGNED_HREF))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        // The fast path: a VEVENT, not the task, sits at {uid}.ics.
+        mount_report(
+            &server,
+            "calendar-multiget",
+            multistatus(TASK_UID_HREF, "\"evt-9\"", SAME_UID_VEVENT_ICS),
+        )
+        .await;
+        // The wrong-kind resource at the fast path must fall through to the
+        // VTODO-filtered lookup, which is the task's real location.
+        mount_report(
+            &server,
+            r#"<C:comp-filter name="VTODO">"#,
+            multistatus(TASK_ASSIGNED_HREF, "\"tsk-9\"", SERVER_HELD_VTODO_ICS),
+        )
+        .await;
+
+        create_item(
+            "user",
+            "pass",
+            &calendar_url(&server),
+            CalendarItem::Todo(local_todo()),
+        )
+        .await
+        .expect("a same-uid VEVENT must not prevent locating the task");
+
+        let puts = puts(&server).await;
+        assert_eq!(
+            puts.len(),
+            2,
+            "got {:?}",
+            puts.iter().map(|r| r.url.path()).collect::<Vec<_>>()
+        );
+        assert_eq!(puts[0].url.path(), TASK_UID_HREF);
+        assert_eq!(
+            puts[1].url.path(),
+            TASK_ASSIGNED_HREF,
+            "the fallback must never land on the VEVENT's href"
         );
     }
 
