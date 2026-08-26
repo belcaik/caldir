@@ -56,8 +56,10 @@ async fn handle_todo(remote: RemoteConfigParams, todo: Todo) -> Result<()> {
 /// with no stored id is a named refusal, not a search, since a guessed
 /// delete is unrecoverable. Kept separate from `delete_task`'s network call
 /// so routing to the Tasks endpoint, not the Calendar one, is directly
-/// testable without an HTTP mock this crate does not have.
-fn task_delete_request(task_list_id: &str, todo: &Todo) -> Result<String> {
+/// testable without an HTTP mock this crate does not have. `pub(crate)` so
+/// `google_tasks::tests` can bind this to `task_patch_request`'s target
+/// without duplicating either.
+pub(crate) fn task_delete_request(task_list_id: &str, todo: &Todo) -> Result<String> {
     let task_id = google_tasks::todo_x_property(todo, PROVIDER_TASK_ID_PROPERTY)
         .ok_or_else(|| anyhow!("Cannot delete task without {PROVIDER_TASK_ID_PROPERTY}"))?;
 

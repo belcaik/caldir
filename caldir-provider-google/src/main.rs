@@ -5,6 +5,8 @@ mod commands;
 mod constants;
 mod google_event;
 mod google_tasks;
+#[cfg(test)]
+mod live;
 mod remote_config;
 mod session;
 

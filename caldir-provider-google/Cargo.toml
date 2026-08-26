@@ -49,3 +49,6 @@ url = "2"
 
 [dev-dependencies]
 tempfile = "3"
+# The live::google_tasks gate (CALDIR_LIVE_GOOGLE=1) — mirrors
+# caldir-provider-caldav's live tier so credential-gated tests never race.
+serial_test = "3"

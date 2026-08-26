@@ -56,8 +56,10 @@ async fn handle_todo(remote: RemoteConfigParams, todo: Todo) -> Result<Todo> {
 /// from the stored `X-GOOGLE-TASK-ID` and never from `summary`/`uid` — a task
 /// with no stored id is a named refusal, not a search. Kept separate from
 /// `patch_task`'s network call for the same reason `task_insert_request` is:
-/// no HTTP mock in this crate's dev-dependencies.
-fn task_patch_request(
+/// no HTTP mock in this crate's dev-dependencies. `pub(crate)` so
+/// `google_tasks::tests` can bind this to `task_delete_request`'s target
+/// without duplicating either.
+pub(crate) fn task_patch_request(
     task_list_id: &str,
     todo: &Todo,
 ) -> Result<(String, google_tasks::GoogleTaskPatch)> {
