@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
-use caldir_core::provider::ProviderStorage;
-use caldir_core::rpc::CreateItem;
-use caldir_core::{CalendarItem, Event, EventTime, RemoteConfigParams, Todo};
+use caldir_core::provider::{ProviderStorage, classified_error};
+use caldir_core::rpc::{CreateItem, ErrorCode};
+use caldir_core::{CalendarItem, Event, EventTime, RemoteConfigParams, Todo, TodoStatus};
 use google_calendar::types::SendUpdates;
 
 use crate::app_config::AppConfigStore;
@@ -27,6 +27,16 @@ pub async fn handle(cmd: CreateItem) -> Result<CalendarItem> {
 /// The Tasks half of the create split (§9): never touches the Calendar API,
 /// never builds a `google_calendar::types::Event`.
 async fn handle_todo(remote: RemoteConfigParams, todo: Todo) -> Result<Todo> {
+    google_tasks::policy::reject_recurring(&todo).map_err(|e| {
+        anyhow::Error::from_boxed(classified_error(
+            ErrorCode::SemanticLimitation,
+            e.to_string(),
+        ))
+    })?;
+    if let Some(warning) = google_tasks::policy::semantic_change_warning(&todo) {
+        eprintln!("{warning}");
+    }
+
     let config = GoogleTaskListRemoteConfig::try_from(&remote)?;
     let account_email = &config.google_account;
     let task_list_id = &config.google_resource_id;
@@ -81,6 +91,7 @@ pub(crate) fn merge_canonical_task_response(
         unreachable!("task_to_calendar_item always returns CalendarItem::Todo");
     };
 
+    let local_status = local.status;
     let mut merged = local;
     merged.summary = canonical.summary;
     merged.description = canonical.description;
@@ -91,6 +102,16 @@ pub(crate) fn merge_canonical_task_response(
         .x_properties
         .retain(|p| p.name != PROVIDER_TASK_ID_PROPERTY);
     merged.x_properties.extend(canonical.x_properties);
+
+    // Google Tasks has no IN-PROCESS/CANCELLED equivalent, so
+    // `to_google`/`to_google_patch` already downgrade both to `needsAction`
+    // on the wire. `canonical.status` here is only Google echoing that
+    // downgrade back, never new information — overwriting `merged.status`
+    // with it would silently collapse the "preserved only locally" row to
+    // NeedsAction on every push.
+    if matches!(local_status, TodoStatus::InProcess | TodoStatus::Cancelled) {
+        merged.status = local_status;
+    }
 
     Ok(merged)
 }

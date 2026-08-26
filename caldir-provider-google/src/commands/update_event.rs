@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
-use caldir_core::provider::ProviderStorage;
-use caldir_core::rpc::UpdateItem;
+use caldir_core::provider::{ProviderStorage, classified_error};
+use caldir_core::rpc::{ErrorCode, UpdateItem};
 use caldir_core::{CalendarItem, Event, RemoteConfigParams, Todo};
 use serde_json::Value;
 
@@ -30,6 +30,16 @@ pub async fn handle(cmd: UpdateItem) -> Result<CalendarItem> {
 /// search — and returns the canonical `Todo` Google's patch response
 /// describes.
 async fn handle_todo(remote: RemoteConfigParams, todo: Todo) -> Result<Todo> {
+    google_tasks::policy::reject_recurring(&todo).map_err(|e| {
+        anyhow::Error::from_boxed(classified_error(
+            ErrorCode::SemanticLimitation,
+            e.to_string(),
+        ))
+    })?;
+    if let Some(warning) = google_tasks::policy::semantic_change_warning(&todo) {
+        eprintln!("{warning}");
+    }
+
     let config = GoogleTaskListRemoteConfig::try_from(&remote)?;
     let account_email = &config.google_account;
     let task_list_id = &config.google_resource_id;

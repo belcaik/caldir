@@ -137,7 +137,71 @@ signatures themselves must never name a Tasks type.
 
 ## Unsupported field policy
 
-(Extended in place by `P5-06` — do not fill in here.)
+Every field of `caldir_core::Todo` gets exactly one class: **faithful** (round-trips verbatim),
+**lossy** (round-trips with a documented change), **preserved only locally** (never sent, but
+survives a push because `merge_canonical_task_response` carries it forward from the local item), or
+**rejected** (the push is refused outright, local file untouched). Nothing is silently dropped,
+nothing is given an invented equivalent.
+
+**Grounded in production, not hypotheticals.** The `P1-05` fixture archive (57 VTODOs from a real
+`u_crawler` deployment) carries exactly `UID`, `DTSTAMP`, `DUE`, `PRIORITY`, `SUMMARY`, `URL` — and
+`STATUS:COMPLETED` alone (no `COMPLETED` timestamp, no `PERCENT-COMPLETE`) on 32 of the 57. No
+fixture carries `DESCRIPTION`, `DTSTART`, `RRULE`, `ATTENDEE`, `ORGANIZER`, `ATTACH`, `VALARM`, or any
+`X-` property. `PRIORITY:1` and `URL` are on **all 57** — the two rows that matter most in
+production are two of the rows Google Tasks cannot carry at all.
+
+### The crux: "preserved only locally" is not automatic
+
+`push_outgoing_changes` (`caldir-core/src/connection.rs`) calls `cal_event.update(returned_item)` —
+core overwrites the local `.ics` with exactly what the provider returns from its create/update
+response. A field is preserved only if the provider's response-merge copies it from the request onto
+the parsed response, not by virtue of "the wire format doesn't carry it." That merge is
+`merge_canonical_task_response` (`caldir-provider-google/src/commands/create_event.rs`), reused by
+both create and update. It starts from the **local** item and overwrites only `summary`,
+`description`, `status`, `completed`, `due`, and the `X-GOOGLE-TASK-ID` property — every other field
+carries forward from local untouched. One exception the ticket's own audit found: since Google Tasks
+has no `IN-PROCESS`/`CANCELLED` equivalent, a naive `status = canonical.status` would collapse either
+back to `NeedsAction` on every push (Google only ever echoes back what was just sent). The merge
+special-cases this: when the pre-push local status was `IN-PROCESS` or `CANCELLED`, that status is
+restored after the merge, rather than left as whatever Google echoed.
+
+### The table
+
+| VTODO property | class | behaviour | test |
+|---|---|---|---|
+| `SUMMARY` | faithful | ↔ `title` | `google_tasks::policy::tests::summary_and_notes_round_trip_faithfully` |
+| `DESCRIPTION` | faithful | ↔ `notes` | `google_tasks::policy::tests::summary_and_notes_round_trip_faithfully` |
+| `STATUS:COMPLETED` / `NEEDS-ACTION` | faithful | ↔ `completed` / `needsAction` | `google_tasks::policy::tests::completed_and_needs_action_status_round_trip_faithfully` |
+| `COMPLETED` | lossy | ↔ `completed`; Google restates the instant at millisecond precision, dropping anything finer | `google_tasks::policy::tests::the_completed_timestamp_round_trips_within_googles_precision` |
+| `DUE` (datetime) | lossy | comes back date-only, per `P5-05`'s canonicalization (`google_tasks/due.rs`); this ticket only classifies the loss, not the conversion | `google_tasks::policy::tests::a_timestamped_due_is_classified_lossy_not_faithful` |
+| `STATUS:IN-PROCESS` | lossy / preserved only locally | sent as `needsAction`; the pre-push local value is restored after the merge; a warning is emitted | `google_tasks::policy::tests::in_process_is_sent_as_needs_action_and_survives_locally` |
+| `STATUS:CANCELLED` | lossy / preserved only locally | sent as `needsAction`; **never** `completed` — that would be an invented equivalent marking abandoned work as done; local value restored after the merge; a warning is emitted | `google_tasks::policy::tests::cancelled_is_sent_as_needs_action_and_never_as_completed` |
+| `PERCENT-COMPLETE` | preserved only locally | never sent, never synthesized from `STATUS` (R68) | `google_tasks::policy::tests::percent_complete_survives_the_push_and_is_never_sent` |
+| `PRIORITY` | preserved only locally | on all 57 production tasks; never encoded into `title` or `notes` | `google_tasks::policy::tests::priority_survives_the_push_and_never_enters_title_or_notes`, `google_tasks::policy::tests::the_ucrawler_fixture_survives_a_push_with_priority_and_url_intact` |
+| `URL` | preserved only locally | on all 57 production tasks; never appended to `notes` | `google_tasks::policy::tests::url_survives_the_push_and_is_never_appended_to_notes`, `google_tasks::policy::tests::the_ucrawler_fixture_survives_a_push_with_priority_and_url_intact` |
+| `DTSTART` | preserved only locally | never folded into `due` | `google_tasks::policy::tests::dtstart_survives_the_push_and_is_never_folded_into_due` |
+| `LOCATION` | preserved only locally | no Tasks concept of location; never sent | `google_tasks::policy::tests::every_todo_field_appears_in_the_classification` (exhaustiveness only — no Tasks fixture carries a task `LOCATION`) |
+| `ATTENDEE` / `ORGANIZER` | preserved only locally | never sent (no such concept in the Tasks API) | `google_tasks::policy::tests::attendees_and_organizer_survive_the_push_and_are_never_sent` |
+| `ATTACH` | preserved only locally | never linkified into `notes` | `google_tasks::policy::tests::attachments_survive_the_push_and_are_never_linkified_into_notes` |
+| `VALARM` | preserved only locally | never turned into a Google Tasks reminder/notification | `google_tasks::policy::tests::alarms_survive_the_push_and_no_google_reminder_is_invented` |
+| arbitrary `X-` | preserved only locally | except `X-GOOGLE-TASK-ID`, which this provider owns and rewrites every cycle | `google_tasks::policy::tests::unknown_x_properties_survive_the_push`, `google_tasks::tests::the_google_task_id_is_provider_metadata_and_never_the_uid` |
+| `RRULE` / `EXDATE` / `RDATE` | rejected | a recurring VTODO is refused with a typed semantic-limitation error naming `RRULE`, before any network call; the local file is untouched | `google_tasks::policy::tests::a_recurring_task_is_refused_with_a_named_semantic_limitation` |
+| `RECURRENCE-ID` | rejected (transitively) | only present on a recurring instance; since `RRULE` is rejected outright, no task carrying this is ever pushed | `google_tasks::policy::tests::every_todo_field_appears_in_the_classification` (exhaustiveness only) |
+| `UID`, `CREATED`, `LAST-MODIFIED`, `SEQUENCE` | out of this table | identity/bookkeeping, not user-authored VTODO content; `UID` is never the Google task id (see `X-GOOGLE-TASK-ID` row) | `google_tasks::policy::tests::every_todo_field_appears_in_the_classification` |
+
+`every_todo_field_appears_in_the_classification` exhaustively destructures `caldir_core::Todo` with
+no `..`, so a field added to `Todo` fails to compile here rather than silently defaulting to
+"dropped" by omission.
+
+### Warnings
+
+§14's fourth clause: a user-authored semantic change that cannot be represented produces a warning,
+because "preserved locally" is otherwise invisible to the user. `STATUS:IN-PROCESS` and
+`STATUS:CANCELLED` are the only two rows that trigger one today — both are sent as `needsAction`,
+and the warning is the only place the user learns that edit did not reach Google. Emitted to
+`stderr`, matching `create_event.rs`'s existing `eprintln!("caldir-provider-google: warning: …")`
+convention. Proved by
+`google_tasks::policy::tests::a_warning_is_emitted_when_a_user_authored_change_cannot_be_represented`.
 
 ## Session migration
 
