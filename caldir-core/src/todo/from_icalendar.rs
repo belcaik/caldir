@@ -585,7 +585,8 @@ DTSTAMP:20260801T090000Z\r\n{body}END:VEVENT\r\nEND:VCALENDAR\r\n"
             Some("Sube aquí tu Certificado: Mentalidad digital")
         );
         assert!(
-            todo.to_ics_string().contains("SUMMARY:Sube aquí tu Certificado: Mentalidad digital"),
+            todo.to_ics_string()
+                .contains("SUMMARY:Sube aquí tu Certificado: Mentalidad digital"),
             "non-ASCII SUMMARY must round-trip byte-equal, got {}",
             todo.to_ics_string()
         );

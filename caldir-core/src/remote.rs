@@ -4,7 +4,7 @@ mod event;
 
 use crate::diff::EventChange;
 use crate::provider::{ProviderCapabilities, ProviderError};
-use crate::{rpc, DateRange, Event, Provider};
+use crate::{DateRange, Event, Provider, rpc};
 
 pub use config::{RemoteConfig, RemoteConfigParams};
 pub use error::RemoteError;
@@ -121,11 +121,11 @@ impl Remote {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::transport::mock_transport::MockTransport;
-    use crate::provider::transport::ProviderTransportError;
-    use crate::provider::ProviderCapabilities;
-    use crate::test_utils::{test_event, test_remote};
     use crate::ProviderSlug;
+    use crate::provider::ProviderCapabilities;
+    use crate::provider::transport::ProviderTransportError;
+    use crate::provider::transport::mock_transport::MockTransport;
+    use crate::test_utils::{test_event, test_remote};
     use pretty_assertions::assert_eq;
     use std::sync::Arc;
     use std::time::Duration;

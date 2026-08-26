@@ -1,6 +1,6 @@
+use crate::RemoteConfigParams;
 use crate::provider::ProviderCapabilities;
 use crate::rpc::{Method, Rpc};
-use crate::RemoteConfigParams;
 use serde::{Deserialize, Serialize};
 
 /// Per-remote, not per-binary (D-2): the request flattens `RemoteConfigParams`

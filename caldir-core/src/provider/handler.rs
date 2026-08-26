@@ -104,20 +104,20 @@ pub async fn process_request<H: Handler>(handler: &H, line: &str) -> String {
         Err(e) => return Response::error(&format!("Failed to parse request: {e}"), None),
     };
 
-    let method: Method = match serde_json::from_value(serde_json::Value::String(raw.command.clone()))
-    {
-        Ok(method) => method,
-        Err(_) => {
-            return Response::error(
-                &format!(
-                    "{} does not support the \"{}\" command; the provider may need updating",
-                    provider_name(),
-                    raw.command,
-                ),
-                Some(ErrorCode::UnsupportedMethod),
-            );
-        }
-    };
+    let method: Method =
+        match serde_json::from_value(serde_json::Value::String(raw.command.clone())) {
+            Ok(method) => method,
+            Err(_) => {
+                return Response::error(
+                    &format!(
+                        "{} does not support the \"{}\" command; the provider may need updating",
+                        provider_name(),
+                        raw.command,
+                    ),
+                    Some(ErrorCode::UnsupportedMethod),
+                );
+            }
+        };
 
     let request = Request {
         method,
@@ -365,20 +365,14 @@ mod tests {
 
     #[tokio::test]
     async fn an_unknown_command_is_reported_as_a_version_error() {
-        let response = process_request(
-            &StubHandler,
-            r#"{"command":"list_todos","params":{}}"#,
-        )
-        .await;
+        let response =
+            process_request(&StubHandler, r#"{"command":"list_todos","params":{}}"#).await;
 
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["status"], "error");
         let error = parsed["error"].as_str().unwrap();
         assert!(error.contains("list_todos"), "got: {error}");
-        assert!(
-            !error.contains("Failed to parse request"),
-            "got: {error}"
-        );
+        assert!(!error.contains("Failed to parse request"), "got: {error}");
     }
 
     #[tokio::test]
@@ -429,8 +423,8 @@ mod tests {
     /// eventually.
     #[tokio::test]
     async fn an_unmodified_provider_reports_events_only_capabilities() {
-        let response = process_request(&StubHandler, r#"{"command":"capabilities","params":{}}"#)
-            .await;
+        let response =
+            process_request(&StubHandler, r#"{"command":"capabilities","params":{}}"#).await;
 
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["status"], "success");
@@ -467,9 +461,11 @@ mod tests {
     /// assertion in this ticket.
     #[tokio::test]
     async fn a_provider_may_advertise_task_writes() {
-        let response =
-            process_request(&TaskWritingHandler, r#"{"command":"capabilities","params":{}}"#)
-                .await;
+        let response = process_request(
+            &TaskWritingHandler,
+            r#"{"command":"capabilities","params":{}}"#,
+        )
+        .await;
 
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["data"]["tasks"]["write"], true);

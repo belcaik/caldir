@@ -52,7 +52,9 @@ impl Request {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Response<T> {
-    Success { data: T },
+    Success {
+        data: T,
+    },
     Error {
         error: String,
         /// Additive (R55/C9): absent on every envelope written before this
