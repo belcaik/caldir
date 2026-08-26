@@ -539,6 +539,251 @@ mod tests {
         let _ = todo;
     }
 
+    /// C-8/D-2. A transport error is the failure mode most likely to be
+    /// handled with `unwrap_or_default()` — and `Default` on `Capability` is
+    /// `false` for `write` *but also* `false` for `read`; only an explicit
+    /// test says which reading actually shipped. Pins that a capabilities
+    /// transport error withholds the task, counts it, and the withheld
+    /// push never reaches the write RPC at all.
+    #[tokio::test]
+    async fn a_capability_call_that_errors_withholds_every_task_push() {
+        use crate::provider::transport::ProviderTransportError;
+
+        let (_tmp, caldir) = test_caldir();
+        let calendar = caldir
+            .create_calendar("writable-cal", Some(calendar_config(Some(false))))
+            .unwrap();
+        let todo = Todo::new("Hand in the assignment");
+        let todo_path = calendar
+            .create_event(todo.clone())
+            .unwrap()
+            .path()
+            .to_path_buf();
+        let todo_bytes_before = std::fs::read(&todo_path).unwrap();
+
+        let mock = test_mock_provider();
+        mock.reply_error(ProviderTransportError::Io(std::io::Error::other(
+            "pipe closed",
+        )));
+        mock.reply::<rpc::ListEvents>(vec![]);
+        let remote = Remote::new(mock.provider(), test_remote_params());
+
+        let mut connection = Connection::new(calendar, remote);
+        let diff = connection.diff(&DateRange::default()).await.unwrap();
+
+        assert!(
+            diff.outgoing().is_empty(),
+            "a capabilities transport error must withhold the task, got {:?}",
+            diff.outgoing(),
+        );
+        assert_eq!(
+            diff.withheld_task_pushes(),
+            1,
+            "the withheld task must be counted, never silently dropped",
+        );
+
+        // No further response is queued for a write RPC: if the push
+        // attempted to send the withheld task, `MockTransport::exchange`
+        // would panic here rather than let this pass.
+        connection
+            .apply_outgoing_diff(&diff)
+            .await
+            .expect("a task-less push must still succeed");
+
+        assert_eq!(
+            std::fs::read(&todo_path).unwrap(),
+            todo_bytes_before,
+            "the withheld task's file must be byte-identical to before the push",
+        );
+    }
+
+    /// D-2's absent-field clause, driven through `Connection::diff` rather
+    /// than `ProviderCapabilities` alone: `serde`'s `#[serde(default)]` makes
+    /// an omitted `tasks` object compile and decode into a struct — whether
+    /// that struct is safe to act on is a decision, not a default.
+    #[tokio::test]
+    async fn an_absent_tasks_field_is_read_as_no_task_write_support() {
+        let (_tmp, caldir) = test_caldir();
+        let calendar = caldir
+            .create_calendar("writable-cal", Some(calendar_config(Some(false))))
+            .unwrap();
+        let todo = Todo::new("Hand in the assignment");
+        let todo_path = calendar
+            .create_event(todo.clone())
+            .unwrap()
+            .path()
+            .to_path_buf();
+        let todo_bytes_before = std::fs::read(&todo_path).unwrap();
+
+        let mock = test_mock_provider();
+        // The shape an older, partially-upgraded provider sends: an `events`
+        // object and no `tasks` object at all.
+        mock.reply_raw_data(serde_json::json!({
+            "events": { "read": true, "write": true },
+        }));
+        mock.reply::<rpc::ListEvents>(vec![]);
+        let remote = Remote::new(mock.provider(), test_remote_params());
+
+        let mut connection = Connection::new(calendar, remote);
+        let diff = connection.diff(&DateRange::default()).await.unwrap();
+
+        assert!(
+            diff.outgoing().is_empty(),
+            "an absent tasks field must withhold the task, got {:?}",
+            diff.outgoing(),
+        );
+        assert_eq!(diff.withheld_task_pushes(), 1);
+
+        connection
+            .apply_outgoing_diff(&diff)
+            .await
+            .expect("a task-less push must still succeed");
+
+        assert_eq!(std::fs::read(&todo_path).unwrap(), todo_bytes_before);
+    }
+
+    /// C-4/§17. The real old-binary path: a provider built before
+    /// `capabilities` existed answers `unsupported_method`, which must
+    /// withhold the task exactly as an honest `false` would — while the
+    /// reason `Remote::capabilities()` preserves still names the provider
+    /// and the method, never degrading to `Failed to parse request`.
+    #[tokio::test]
+    async fn an_unknown_capabilities_method_withholds_every_task_push() {
+        use crate::provider::ProviderError;
+        use crate::provider::transport::mock_transport::MockTransport;
+        use crate::{Provider, ProviderSlug, RemoteError};
+        use std::sync::Arc;
+
+        // The reason surfaced directly off `Remote::capabilities()`.
+        let error_transport = Arc::new(MockTransport::with_response(
+            r#"{"status":"error","error":"test-provider does not support the \"capabilities\" command; the provider may need updating","code":"unsupported_method"}"#,
+        ));
+        let error_provider =
+            Provider::with_transport(ProviderSlug::from("test-provider"), error_transport);
+        let error_remote = Remote::new(error_provider, test_remote_params());
+        let (capabilities, reason) = error_remote.capabilities().await;
+
+        assert_eq!(capabilities, ProviderCapabilities::default());
+        match reason {
+            Some(RemoteError::Provider(ProviderError::UnsupportedMethod(msg))) => {
+                assert!(
+                    msg.contains("test-provider"),
+                    "the reason must name the provider: {msg}",
+                );
+                assert!(
+                    msg.contains("capabilities"),
+                    "the reason must name the method: {msg}",
+                );
+            }
+            other => panic!(
+                "expected an UnsupportedMethod reason naming the provider and the method, got {other:?}"
+            ),
+        }
+
+        // The withholding itself, through `Connection::diff`.
+        let (_tmp, caldir) = test_caldir();
+        let calendar = caldir
+            .create_calendar("writable-cal", Some(calendar_config(Some(false))))
+            .unwrap();
+        let todo = Todo::new("Hand in the assignment");
+        let todo_path = calendar
+            .create_event(todo.clone())
+            .unwrap()
+            .path()
+            .to_path_buf();
+        let todo_bytes_before = std::fs::read(&todo_path).unwrap();
+
+        let transport = Arc::new(MockTransport::empty());
+        transport.set_response(
+            r#"{"status":"error","error":"unknown command: capabilities","code":"unsupported_method"}"#,
+        );
+        transport.set_response(serde_json::json!({"status": "success", "data": []}).to_string());
+        let provider = Provider::with_transport(ProviderSlug::from("test-provider"), transport);
+        let remote = Remote::new(provider, test_remote_params());
+
+        let mut connection = Connection::new(calendar, remote);
+        let diff = connection.diff(&DateRange::default()).await.unwrap();
+
+        assert!(
+            diff.outgoing().is_empty(),
+            "an unknown capabilities method must withhold the task, got {:?}",
+            diff.outgoing(),
+        );
+        assert_eq!(diff.withheld_task_pushes(), 1);
+
+        connection
+            .apply_outgoing_diff(&diff)
+            .await
+            .expect("a task-less push must still succeed");
+
+        assert_eq!(std::fs::read(&todo_path).unwrap(), todo_bytes_before);
+    }
+
+    /// `CROSS-5` names deletion *and* corruption: a withheld push that still
+    /// rewrote the local file from a stale base would pass a "not pushed"
+    /// assertion and still corrupt the file. Drives a real create-only cycle
+    /// through both `diff` and `apply_outgoing_diff` and checks the task's
+    /// file byte-for-byte, not merely that no RPC fired for it.
+    #[tokio::test]
+    async fn a_provider_without_task_writes_never_loses_a_local_vtodo() {
+        let (_tmp, mock, mut connection) = writable_connection();
+
+        let event = test_event();
+        let todo = Todo::new("Hand in the assignment");
+        let todo_path = connection
+            .local()
+            .create_event(todo.clone())
+            .unwrap()
+            .path()
+            .to_path_buf();
+        connection.local().create_event(event.clone()).unwrap();
+        let todo_bytes_before = std::fs::read(&todo_path).unwrap();
+
+        mock.reply::<rpc::Capabilities>(ProviderCapabilities::events_only());
+        mock.reply::<rpc::ListEvents>(vec![]);
+        let diff = connection.diff(&DateRange::default()).await.unwrap();
+
+        assert_eq!(
+            diff.outgoing(),
+            &[EventChange::Create(event.clone().into())],
+            "the event pushes, the task does not: {:?}",
+            diff.outgoing(),
+        );
+        assert!(
+            !diff
+                .incoming()
+                .iter()
+                .any(|c| matches!(c, EventChange::Delete(CalendarItem::Todo(_)))),
+            "no task delete may appear on the incoming side either, got {:?}",
+            diff.incoming(),
+        );
+        assert!(
+            !diff
+                .outgoing()
+                .iter()
+                .any(|c| matches!(c, EventChange::Delete(CalendarItem::Todo(_)))),
+            "no task delete may appear on the outgoing side either, got {:?}",
+            diff.outgoing(),
+        );
+
+        mock.reply::<rpc::CreateItem>(CalendarItem::Event(event.clone()));
+        connection
+            .apply_outgoing_diff(&diff)
+            .await
+            .expect("a task in the calendar may not fail the push");
+
+        assert_eq!(
+            std::fs::read(&todo_path).unwrap(),
+            todo_bytes_before,
+            "the task file must be byte-identical to before the push",
+        );
+        assert_eq!(
+            CalendarItem::load(&todo_path).unwrap(),
+            CalendarItem::Todo(todo),
+            "the task file must still parse to the same item",
+        );
+    }
+
     #[tokio::test]
     async fn diff_backfills_base_for_in_sync_legacy_known_id() {
         let (_tmp, caldir) = test_caldir();

@@ -2014,4 +2014,47 @@ mod tests {
         );
         assert_eq!(diff.incoming, vec![], "R41: never an incoming update here");
     }
+
+    /// C-3's named risk: `withhold_task_pushes` is called from both
+    /// `compute_with` and the `#[cfg(test)]` `from_changes` constructor. The
+    /// moment the withholding decision takes a parameter, this is where the
+    /// two paths could drift apart — a test diff holding an outgoing shape
+    /// production can never produce. Pins that both reach the same withheld
+    /// outgoing set and the same withheld count for a non-`true` capability
+    /// value (`TaskPushes::Withheld`, the shape every failure mode collapses
+    /// into upstream in `Connection::diff`).
+    #[test]
+    fn from_changes_withholds_tasks_for_an_unknown_capability() {
+        let (_tmp, calendar) = test_calendar();
+        let event = test_event();
+        let event_calendar_event = calendar.create_event(event.clone()).unwrap();
+        let todo = Todo::new("Hand in the assignment");
+        let todo_calendar_event = CalendarEvent::create(&calendar, todo.clone()).unwrap();
+
+        let via_compute_with = CalendarDiff::compute_with(
+            vec![event_calendar_event, todo_calendar_event],
+            vec![],
+            &SyncBases::new(),
+            &DateRange::default(),
+            Deletes::Allowed,
+            TaskPushes::Withheld,
+        );
+
+        let via_from_changes = CalendarDiff::from_changes(
+            vec![
+                EventChange::Create(event.into()),
+                EventChange::Create(todo.into()),
+            ],
+            vec![],
+        );
+
+        assert_eq!(
+            via_compute_with.outgoing, via_from_changes.outgoing,
+            "compute_with and from_changes must reach the same withholding decision",
+        );
+        assert_eq!(
+            via_compute_with.withheld_task_pushes,
+            via_from_changes.withheld_task_pushes,
+        );
+    }
 }
