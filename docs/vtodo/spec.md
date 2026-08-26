@@ -195,7 +195,7 @@ data**.
 | `X-*` | **IN**, preserved **and** compared | The existing provider-ID carrier. Known loss unchanged from events: repeated same-name `X-*` collapse. |
 | `CLASS` | MAY be inherited | Harmless; MUST NOT be added deliberately. |
 | `CATEGORIES` | **OUT** | The crate **corrupts** it: `WORK,URGENT` re-emits as `WORK\,URGENT` (verified, pinned `=0.17.10`) — two categories become one for third parties. Plus a todo-only exception in a table titled "Fields We Skip" is incoherent. |
-| `RELATED-TO` | **OUT** | Parser-lossy: `MULTIS` lists the ABNF placeholder `"RELATED"`, so two lines in yield one out, `PARENT` gone. A single value survives unmodelled. |
+| `RELATED-TO` | **OUT** | Parser-lossy: `MULTIS` lists the ABNF placeholder `"RELATED"`, so two lines in yield one out, `PARENT` gone. Not modelled and DROPPED on caldir's first write (R15, T-17). |
 | `GEO`, `RESOURCES`, `COMMENT`, `CONTACT` | **OUT** | Already out of scope for events; unchanged. |
 | `DURATION` | **OUT** | Never used; the crate emits `PT7200S` not `PT2H`. |
 | `DTEND` | **FORBIDDEN** | R8. |
@@ -683,8 +683,8 @@ names; *settled by* vendor docs, not code.
 the ABNF placeholder `"RELATED"`, not `"RELATED-TO"`, so two lines in yield one out with `PARENT`
 silently gone (verified). Re-encoding as `X-CALDIR-RELATED-TO` inherits the identical defect
 (repeated same-name `X-*` collapse the same way). Radicale holds both values with `RELTYPE` params
-intact (probe Q-F2), so the loss is **100% caldir's parser**. A single `RELATED-TO` survives
-unmodelled at zero cost; the loss MUST be pinned by a test (T-16).
+intact (probe Q-F2), so the loss is **100% caldir's parser**. `RELATED-TO` is NOT modelled and is
+DROPPED on caldir's first write; the loss MUST be pinned by a test (T-16).
 
 **R88.** **`CATEGORIES`.** Modelling it through the crate **corrupts** it: `WORK,URGENT` becomes
 `WORK\,URGENT` (verified, pinned `=0.17.10`), turning two categories into one for every third
