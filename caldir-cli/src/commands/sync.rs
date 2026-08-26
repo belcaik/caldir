@@ -113,19 +113,6 @@ async fn sync_connection(
         }
     };
 
-    // Asked *before* the diff is rendered, exactly as in `push`. A refused
-    // push applies nothing, so painting its items with the green `+` that
-    // means "pushed" would describe work that never happens.
-    //
-    // This aborts the pull half too. That is deliberate: `sync` renders one
-    // combined diff, so there is no honest way to show the incoming half
-    // while suppressing the outgoing one, and the next `sync` (or a plain
-    // `caldir pull`) still pulls once the task is moved out of the way.
-    if let Err(e) = connection.check_outgoing(&diff) {
-        report(&e);
-        return false;
-    }
-
     println!("{}", diff.render(verbose, caldir));
 
     let mut ok = true;

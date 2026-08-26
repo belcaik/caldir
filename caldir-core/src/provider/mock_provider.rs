@@ -33,7 +33,7 @@ impl MockProvider {
     /// Stub the next RPC call with a raw JSON `data` payload.
     ///
     /// For wire shapes no typed response can express — a provider *newer* than
-    /// this core, sending a component this core cannot decode (R57).
+    /// this core, sending a component this core cannot decode.
     pub(crate) fn reply_raw_data(&self, data: serde_json::Value) {
         let envelope = serde_json::json!({
             "status": "success",

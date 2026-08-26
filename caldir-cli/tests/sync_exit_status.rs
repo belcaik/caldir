@@ -245,41 +245,44 @@ fn streams(output: &Output) -> (String, String) {
 
 /// The pipeline-visible half of the fix, for the command most users run.
 ///
-/// A sync whose push cannot happen must exit non-zero and say so on
-/// **stderr**; before the fix it exited 0, printed to stdout, and painted the
-/// task with the green `+` that means "pushed".
+/// **Replaces `a_sync_holding_a_task_exits_non_zero_reports_on_stderr_and_
+/// pushes_nothing`, which locked the whole-push refusal.** That test required
+/// a non-zero exit, stderr naming the file, and zero ids pushed — and, because
+/// `sync` renders one combined diff, the refusal aborted the *pull* half too.
+/// The user's meetings stopped syncing in both directions until they moved the
+/// task out of the calendar. Tasks are now never outgoing, so a sync holding
+/// one is an ordinary successful sync that says what it kept back.
 #[test]
-fn a_sync_holding_a_task_exits_non_zero_reports_on_stderr_and_pushes_nothing() {
+fn a_sync_holding_a_task_pushes_every_event_and_reports_the_withheld_task() {
     let sandbox = Sandbox::new(true);
     let output = sandbox.sync();
     let (stdout, stderr) = streams(&output);
 
     assert!(
-        !output.status.success(),
-        "a failed sync must be detectable by a script; got {:?}\nstdout: {stdout}",
+        output.status.success(),
+        "a task may not fail the sync; got {:?}\nstdout: {stdout}\nstderr: {stderr}",
         output.status,
     );
+    assert_eq!(stderr, "", "nothing failed, so nothing belongs on stderr");
+
     assert!(
-        stderr.contains("hand-in.ics"),
-        "stderr must name the offending file, got {stderr:?}",
-    );
-    assert!(
-        !stdout.contains("hand-in.ics"),
-        "the refused item must not be reported on stdout, got {stdout:?}",
+        stdout.contains("1 task change not pushed"),
+        "the withheld task must surface, got {stdout:?}",
     );
     assert!(
         !stdout.contains("Hand in the assignment"),
-        "a refused item must never get the green `+`, got {stdout:?}",
+        "a withheld item must never get the green `+`, got {stdout:?}",
     );
+
+    // The whole point: the events around the task synced.
     assert!(
-        !stdout.contains("Pushed:"),
-        "nothing was pushed, so there is nothing to summarise, got {stdout:?}",
+        stdout.contains("Pushed: 2 created, 0 updated, 0 deleted"),
+        "got {stdout:?}",
     );
-    assert_eq!(
-        sandbox.pushed_ids(),
-        "",
-        "a refused push may not apply a single change",
-    );
+    let ids = sandbox.pushed_ids();
+    let mut pushed: Vec<&str> = ids.lines().collect();
+    pushed.sort_unstable();
+    assert_eq!(pushed, vec!["a@test", "b@test"]);
 }
 
 /// R1/R2: an event-only sync is untouched by any of this. Same exit code, same
@@ -363,26 +366,41 @@ fn a_sync_whose_remote_is_unreadable_exits_non_zero() {
 
 // ------------------------------------------------------------- discard
 
-/// `discard` writes only to the local calendar, so the unpushable-task
-/// pre-flight deliberately does **not** apply to it: discarding the task is
-/// one of the two remedies the refusal message offers. This locks that it was
-/// not copied over from `push`.
+/// `discard` reverts the outgoing set, and a task is never in it — exactly as
+/// on a read-only calendar, whose `discard_outgoing` clears the whole set and
+/// leaves every file alone.
+///
+/// **Replaces `discard_still_drops_a_task_and_exits_zero`**, which asserted the
+/// task file was deleted and `Discarded 3 changes`. That behaviour existed to
+/// serve the whole-push refusal: discarding the task was one of the two
+/// remedies the refusal message offered. With no refusal there is nothing to
+/// escape, and silently deleting a task file on a command that only reverts
+/// *pushable* work would be the surprising half. It is reported instead.
 #[test]
-fn discard_still_drops_a_task_and_exits_zero() {
+fn discard_leaves_a_task_alone_and_says_so() {
     let sandbox = Sandbox::new(true);
     let output = sandbox.discard();
     let (stdout, stderr) = streams(&output);
 
     assert!(
         output.status.success(),
-        "discarding a task is local-only work; stdout: {stdout}\nstderr: {stderr}",
+        "discarding is local-only work; stdout: {stdout}\nstderr: {stderr}",
     );
     assert_eq!(stderr, "", "a clean discard says nothing on stderr");
+
     assert!(
-        !sandbox.exists("hand-in.ics"),
-        "the discarded task file must be gone",
+        sandbox.exists("hand-in.ics"),
+        "a task is not part of the outgoing set, so it is not discarded",
     );
-    assert!(stdout.contains("Discarded 3 changes"), "got {stdout:?}",);
+    assert!(
+        stdout.contains("1 task change not discarded"),
+        "the untouched task must surface, got {stdout:?}",
+    );
+
+    // The events around it are discarded exactly as they would be alone.
+    assert!(stdout.contains("Discarded 2 changes"), "got {stdout:?}");
+    assert!(!sandbox.exists("lecture-a.ics"));
+    assert!(!sandbox.exists("lecture-b.ics"));
 }
 
 /// R1/R2: an event-only discard is untouched.

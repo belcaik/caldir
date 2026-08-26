@@ -35,7 +35,7 @@ fn is_no_uid_conflict(body: &str) -> bool {
 ///
 /// A `409 <C:no-uid-conflict/>` is not a failure but the server saying the UID
 /// already lives at another href; caldir then does what that means — locate the
-/// resource and update it (R63, R79). Once, never in a loop.
+/// resource and update it. Once, never in a loop.
 pub async fn create_event(
     username: &str,
     password: &str,

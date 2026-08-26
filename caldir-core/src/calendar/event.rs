@@ -12,6 +12,9 @@ pub use error::CalendarEventError;
 pub struct CalendarEvent {
     item: CalendarItem,
     path: PathBuf,
+    /// Unsupported components that sat beside the item in the file and were
+    /// ignored on load. Empty for anything caldir wrote itself.
+    ignored_components: Vec<String>,
 }
 
 impl CalendarEvent {
@@ -26,15 +29,23 @@ impl CalendarEvent {
         let path = write_best_event_file(calendar.path(), &base_slug, None, contents.as_bytes())?;
         sync_file_mtime(&path, item.last_modified())?;
 
-        Ok(CalendarEvent { item, path })
+        Ok(CalendarEvent {
+            item,
+            path,
+            ignored_components: Vec::new(),
+        })
     }
 
-    /// Load whichever supported item the file holds (R5, R32).
+    /// Load whichever supported item the file holds.
     pub fn load(path: impl Into<PathBuf>) -> Result<Self, CalendarEventError> {
         let path = path.into();
-        let item = CalendarItem::load(&path)?;
+        let (item, ignored_components) = CalendarItem::load_with_ignored(&path)?;
 
-        Ok(CalendarEvent { item, path })
+        Ok(CalendarEvent {
+            item,
+            path,
+            ignored_components,
+        })
     }
 
     pub fn update(&mut self, item: impl Into<CalendarItem>) -> Result<(), CalendarEventError> {
@@ -46,6 +57,10 @@ impl CalendarEvent {
         let new_path =
             write_best_event_file(dir, &base_slug, Some(&self.path), contents.as_bytes())?;
         sync_file_mtime(&new_path, item.last_modified())?;
+
+        // The rewrite serialized this item and nothing else, so whatever
+        // unsupported siblings the file held are gone from disk now.
+        self.ignored_components.clear();
 
         if new_path == self.path {
             self.item = item;
@@ -92,6 +107,16 @@ impl CalendarEvent {
         &self.path
     }
 
+    /// The unsupported components ignored when this file was loaded.
+    ///
+    /// Non-empty means the file holds data caldir does not model and will not
+    /// preserve the next time it rewrites the file — `doctor` says so. It is
+    /// deliberately *not* an error: `main` ignored these components silently,
+    /// so failing the file here would break documents that worked for years.
+    pub fn ignored_components(&self) -> &[String] {
+        &self.ignored_components
+    }
+
     pub fn filename(&self) -> Option<&str> {
         self.path.file_name().and_then(|name| name.to_str())
     }
@@ -109,7 +134,7 @@ impl CalendarEvent {
         email: &str,
         status: ParticipationStatus,
     ) -> Result<(), CalendarEventError> {
-        // An RSVP is meaningless on a task (R81).
+        // An RSVP is meaningless on a task.
         let mut event = self.event().ok_or(CalendarEventError::NotAnEvent)?.clone();
 
         event.set_attendee_status(email, status)?;
@@ -622,6 +647,10 @@ BEGIN:VTODO\r\nUID:a@caldir\r\nEND:VTODO\r\n\
 BEGIN:VJOURNAL\r\nUID:b@caldir\r\nEND:VJOURNAL\r\n\
 END:VCALENDAR\r\n";
 
+    const VJOURNAL_ONLY: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VJOURNAL\r\nUID:b@caldir\r\nEND:VJOURNAL\r\n\
+END:VCALENDAR\r\n";
+
     const VEVENT_AND_VTIMEZONE: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
 BEGIN:VTIMEZONE\r\nTZID:Europe/Stockholm\r\n\
 BEGIN:STANDARD\r\nDTSTART:19701025T030000\r\nTZOFFSETFROM:+0200\r\n\
@@ -700,8 +729,30 @@ SUMMARY:Zoned\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
             "a mixed file must error on the count, never drop the VTODO"
         );
 
-        // Row 7 — 1 VTODO + VJOURNAL: errors naming the unsupported component.
-        let err = load("journal.ics", VTODO_AND_VJOURNAL).unwrap_err();
+        // Row 7 — 1 VTODO + VJOURNAL: the VTODO loads; the VJOURNAL is
+        // ignored and reported, not fatal (ADR-03 amendment 1).
+        //
+        // **Changed by the sibling-tolerance fix.** This row used to assert
+        // `unwrap_err()` with a message naming VJOURNAL. That is the shape
+        // that lost a VEVENT sitting beside a VFREEBUSY/VJOURNAL/VALARM/`X-`
+        // sibling — a document `main` read fine — so the row now asserts the
+        // supported component survives, and that what was ignored is still
+        // audible via `load_with_ignored`.
+        let path = write_ics(dir, "journal.ics", VTODO_AND_VJOURNAL);
+        let (item, ignored) = CalendarItem::load_with_ignored(path).unwrap();
+        assert!(
+            matches!(item, CalendarItem::Todo(ref todo) if todo.uid.as_str() == "a@caldir"),
+            "the supported component must survive an unsupported sibling, got {item:?}"
+        );
+        assert_eq!(
+            ignored,
+            vec!["VJOURNAL".to_string()],
+            "the ignored sibling must still be reported"
+        );
+
+        // Row 7b — the unsupported component *alone* is still an error that
+        // names it: yielding nothing is what R19 forbids.
+        let err = load("journal-only.ics", VJOURNAL_ONLY).unwrap_err();
         assert!(
             err.to_string().contains("VJOURNAL"),
             "the error must name the unsupported component, got: {err}"
@@ -713,6 +764,43 @@ SUMMARY:Zoned\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
             load("zoned.ics", VEVENT_AND_VTIMEZONE),
             Ok(CalendarItem::Event(ref event)) if event.uid.as_str() == "zoned@caldir"
         ));
+    }
+
+    /// Rewriting the file serializes the item and nothing else, so the
+    /// unsupported siblings are gone from disk — and must stop being reported.
+    /// A stale warning would tell the user to act on a component that is no
+    /// longer there.
+    #[test]
+    fn rewriting_a_file_clears_its_ignored_components() {
+        use crate::test_utils::write_ics;
+
+        let (_tmp, calendar) = test_calendar();
+        let path = write_ics(
+            calendar.path(),
+            "sibling.ics",
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VEVENT\r\nUID:sib@caldir\r\nDTSTART:20260301T100000Z\r\nSUMMARY:Sib\r\n\
+END:VEVENT\r\nBEGIN:VFREEBUSY\r\nUID:fb@caldir\r\nEND:VFREEBUSY\r\n\
+END:VCALENDAR\r\n",
+        );
+
+        let mut calendar_event = CalendarEvent::load(&path).unwrap();
+        assert_eq!(calendar_event.ignored_components(), ["VFREEBUSY"]);
+
+        let mut event = calendar_event.event().unwrap().clone();
+        event.summary = Some("Renamed".to_string());
+        calendar_event.update(event).unwrap();
+
+        assert!(
+            calendar_event.ignored_components().is_empty(),
+            "the rewrite dropped the sibling, so there is nothing left to report"
+        );
+        assert!(
+            !fs::read_to_string(calendar_event.path())
+                .unwrap()
+                .contains("VFREEBUSY"),
+            "the sibling really is gone from disk"
+        );
     }
 
     /// A VTIMEZONE-only file has no supported component, but VTIMEZONE is not

@@ -32,8 +32,8 @@ pub trait Handler: Send + Sync {
     }
 
     /// The one inbound channel for a task: item-typed so a provider can
-    /// return a `VTODO` at all (R53). The outbound methods below stay
-    /// `Event`-typed (R70).
+    /// return a `VTODO` at all. The outbound methods below stay `Event`-typed —
+    /// the push wire carries events only, so a task can never ride it.
     async fn list_events(&self, _cmd: ListEvents) -> Result<Vec<CalendarItem>> {
         Err("list_events is not supported by this provider".into())
     }

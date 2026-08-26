@@ -139,11 +139,17 @@ fn make_executable(_path: &Path) {}
 
 /// The pipeline-visible half of the fix.
 ///
-/// A push that cannot happen must exit non-zero and say so on **stderr**;
-/// before the fix it exited 0, printed to stdout, painted the task with the
-/// green `+` that means "pushed", and pushed some of the events anyway.
+/// **Replaces `a_push_holding_a_task_exits_non_zero_reports_on_stderr_and_
+/// pushes_nothing`, which locked the whole-push refusal.** That test asserted
+/// the opposite of what it now asserts — non-zero exit, stderr naming the
+/// file, and *zero* ids pushed — because a task in the outgoing set failed the
+/// whole calendar. CalDAV is the only provider that pulls tasks, so that was
+/// the normal path: pull a mixed calendar, tick one task off, and the
+/// meetings stop syncing on every run. Tasks are now never outgoing, so there
+/// is nothing to refuse; what survives from the old test is the half that
+/// still matters — the task is not pushed, and it is not painted as pushed.
 #[test]
-fn a_push_holding_a_task_exits_non_zero_reports_on_stderr_and_pushes_nothing() {
+fn a_push_holding_a_task_pushes_every_event_and_reports_the_withheld_task() {
     let sandbox = Sandbox::new(true);
     let output = sandbox.push();
 
@@ -151,35 +157,35 @@ fn a_push_holding_a_task_exits_non_zero_reports_on_stderr_and_pushes_nothing() {
     let stderr = String::from_utf8(output.stderr).unwrap();
 
     assert!(
-        !output.status.success(),
-        "a failed push must be detectable by a script; got {:?}\nstdout: {stdout}",
+        output.status.success(),
+        "a task may not fail the calendar's push; got {:?}\nstdout: {stdout}\nstderr: {stderr}",
         output.status,
     );
+    assert_eq!(stderr, "", "nothing failed, so nothing belongs on stderr");
+
+    // The withholding is reported, never silent.
     assert!(
-        stderr.contains("hand-in.ics"),
-        "stderr must name the offending file, got {stderr:?}",
-    );
-    assert!(
-        stdout.is_empty() || !stdout.contains("hand-in.ics"),
-        "the refused item must not be reported on stdout, got {stdout:?}",
+        stdout.contains("1 task change not pushed"),
+        "the withheld task must surface, got {stdout:?}",
     );
 
-    // Not rendered as work about to happen: no `+` line for the task, and no
-    // `Pushed:` summary, because nothing was pushed.
+    // Still not painted as work that happened.
     assert!(
         !stdout.contains("Hand in the assignment"),
-        "a refused item must never get the green `+`, got {stdout:?}",
-    );
-    assert!(
-        !stdout.contains("Pushed:"),
-        "nothing was pushed, so there is nothing to summarise, got {stdout:?}",
+        "a withheld item must never get the green `+`, got {stdout:?}",
     );
 
-    // And the events queued around the task really are still pending.
-    assert_eq!(
-        sandbox.pushed_ids(),
-        "",
-        "a refused push may not apply a single change",
+    // The whole point: both events queued around the task really went out.
+    let pushed = sandbox.pushed_ids();
+    for slug in ["a", "b"] {
+        assert!(
+            pushed.contains(&format!("{slug}@test")),
+            "the events around a task must push; got {pushed:?}",
+        );
+    }
+    assert!(
+        !pushed.contains("hand-in@u-crawler"),
+        "the task itself must not be pushed; got {pushed:?}",
     );
 }
 

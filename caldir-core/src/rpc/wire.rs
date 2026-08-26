@@ -9,7 +9,7 @@ use serde::de::DeserializeOwned;
 ///
 /// [`from_wire`](WireValue::from_wire) is **infallible**, so `Wire` must
 /// decode straight into the domain value — a narrowing here would have no
-/// error channel and could only panic or silently drop (R19, INVIOLABLE).
+/// error channel and could only panic or silently drop.
 /// Every fallible step belongs in `Wire`'s `Deserialize`.
 pub(crate) trait WireValue: Sized {
     type Wire: Serialize + DeserializeOwned;
@@ -45,7 +45,7 @@ impl WireValue for CalendarItem {
 }
 
 /// One bad element fails the whole vector — the fail-safe, not a bug: a short
-/// remote listing is what feeds the delete path (R57).
+/// remote listing is what feeds the delete path.
 impl<T: WireValue> WireValue for Vec<T> {
     type Wire = Vec<T::Wire>;
 

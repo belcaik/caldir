@@ -182,7 +182,7 @@ END:VALARM
 
 ## VTODO (Task)
 
-A task is a `VTODO` component. caldir models it as a sibling of the event, never a variant of one: an item's kind comes from the component it was parsed from and is preserved across disk, sync base, wire, and server. One `.ics` file holds exactly one supported component—a `VEVENT` or a `VTODO`, never both. A payload carrying the wrong number of them is rejected with `expected 1 supported component(s) in ICS, found {n}`.
+A task is a `VTODO` component. caldir models it as a sibling of the event, never a variant of one: an item's kind comes from the component it was parsed from and is preserved across disk, sync base, wire, and server. One `.ics` file holds exactly one supported component—a `VEVENT` or a `VTODO`, never both. A payload carrying the wrong number of them is rejected with `expected 1 supported component(s) in ICS, found {n}`. Any *other* component in the same `VCALENDAR` (`VTIMEZONE`, `VJOURNAL`, `VFREEBUSY`, a top-level `VALARM`, an `X-` component) is ignored, exactly as caldir has always ignored it; the supported component still loads, and `caldir doctor` names what was ignored, because caldir writes one component per file and a rewrite drops it. A document in which *nothing* is supported is rejected, naming what it did hold.
 
 ### Required Fields
 
@@ -343,6 +343,7 @@ These are valid iCalendar fields we intentionally don't use:
 | `CONTACT` | Contact info—ORGANIZER is sufficient |
 | `COMMENT` | Extra comments—rarely used |
 | `VTIMEZONE` | Timezone definitions—we use TZID parameter with IANA names instead |
+| `VJOURNAL`, `VFREEBUSY`, top-level `VALARM`, `X-` components | Not modelled—ignored on read (a supported sibling still loads) and dropped the first time caldir writes the file. `caldir doctor` reports them |
 
 ---
 

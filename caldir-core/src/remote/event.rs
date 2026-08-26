@@ -5,9 +5,9 @@ use crate::item::CalendarItem;
 /// One item as the remote reports it.
 ///
 /// Carries a [`CalendarItem`], not an `Event`: the diff has to be able to see
-/// a remote task at all, or absence of one is indistinguishable from a delete
-/// (R19, R36). The RPC wire underneath still hands back events only — see
-/// `rpc::ics` — so widening here costs no provider change (R70).
+/// a remote task at all, or absence of one is indistinguishable from a delete.
+/// The RPC wire underneath still hands back events only — see `rpc::ics` — so
+/// widening here costs no provider change.
 #[derive(Debug)]
 pub struct RemoteEvent(CalendarItem);
 

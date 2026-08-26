@@ -19,12 +19,12 @@ pub use calendar::{
     Calendar, CalendarConfig, CalendarError, CalendarEvent, CalendarEventError, CalendarListing,
     ExpandedItems, SkippedEvent,
 };
-pub use connection::Connection;
+pub use connection::{Connection, ConnectionError};
 pub use diff::{CalendarDiff, EventChange};
 pub use event::{
-    Attachment, Attendee, Availability, ComponentKind, Event, EventInstanceId, EventTime, EventUid,
-    Organizer, ParticipationStatus, Recurrence, RecurrenceId, Reminder, Status, Visibility,
-    XProperty, expand_in_range, tz_normalize,
+    Attachment, Attendee, Availability, ComponentKind, Event, EventError, EventInstanceId,
+    EventTime, EventUid, Organizer, ParticipationStatus, Recurrence, RecurrenceId, Reminder,
+    Status, Visibility, XProperty, expand_in_range, tz_normalize,
 };
 pub use item::CalendarItem;
 pub use provider::{Provider, ProviderRegistry, ProviderSlug};

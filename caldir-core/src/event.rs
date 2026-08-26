@@ -17,7 +17,7 @@ pub mod tz_normalize;
 mod visibility;
 mod x_property;
 
-// Test-only since `L4-01` folded the last production narrowing into
+// Test-only: the last production narrowing now lives in
 // `CalendarItem::into_event`.
 #[cfg(test)]
 use crate::item::CalendarItem;
@@ -1502,7 +1502,9 @@ END:VCALENDAR
         assert_ne!(base, retitled, "a changed summary is a content change");
     }
 
-    // --- R19: an unsupported component is a hard error that names it ---
+    // --- R19: a document that yields nothing is a hard error that names
+    // what it found; an unsupported component *beside* a supported one is
+    // ignored, exactly as `main` ignored it ---
 
     #[test]
     fn an_unsupported_component_errors_and_names_it() {
@@ -1510,10 +1512,6 @@ END:VCALENDAR
 
         let vjournal = "BEGIN:VCALENDAR\r\n\
 VERSION:2.0\r\n\
-BEGIN:VTODO\r\n\
-UID:task@caldir\r\n\
-SUMMARY:A task\r\n\
-END:VTODO\r\n\
 BEGIN:VJOURNAL\r\n\
 UID:journal@caldir\r\n\
 SUMMARY:A journal entry\r\n\
@@ -1521,13 +1519,36 @@ END:VJOURNAL\r\n\
 END:VCALENDAR\r\n";
 
         let err = CalendarItem::from_ics_str(vjournal)
-            .expect_err("a VJOURNAL sibling must be a hard error, never a silent drop");
+            .expect_err("a document with nothing supported must not yield an empty vec");
         assert!(
             err.to_string().contains("VJOURNAL"),
             "error must name the component, got: {err}"
         );
 
         let x_foo = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+BEGIN:X-FOO\r\n\
+UID:foo@caldir\r\n\
+END:X-FOO\r\n\
+END:VCALENDAR\r\n";
+
+        let err = CalendarItem::from_ics_str(x_foo)
+            .expect_err("a document with nothing supported must not yield an empty vec");
+        assert!(
+            err.to_string().contains("X-FOO"),
+            "error must name the component, got: {err}"
+        );
+    }
+
+    /// The other half of the same rule, and the regression it was written
+    /// against: both documents above used to carry a supported component
+    /// beside the unsupported one, and asserting they errored is what lost a
+    /// `VEVENT` next to a `VJOURNAL`. The supported component must survive.
+    #[test]
+    fn an_unsupported_sibling_does_not_cost_the_supported_component() {
+        use crate::item::CalendarItem;
+
+        let ics = "BEGIN:VCALENDAR\r\n\
 VERSION:2.0\r\n\
 BEGIN:VEVENT\r\n\
 UID:event@caldir\r\n\
@@ -1538,11 +1559,9 @@ UID:foo@caldir\r\n\
 END:X-FOO\r\n\
 END:VCALENDAR\r\n";
 
-        let err = CalendarItem::from_ics_str(x_foo)
-            .expect_err("an X-FOO sibling must be a hard error, never a silent drop");
-        assert!(
-            err.to_string().contains("X-FOO"),
-            "error must name the component, got: {err}"
-        );
+        let items = CalendarItem::from_ics_str(ics).expect("the VEVENT must still load");
+
+        assert_eq!(items.len(), 1);
+        assert!(matches!(items[0], Ok(CalendarItem::Event(_))));
     }
 }

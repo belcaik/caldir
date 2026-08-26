@@ -329,7 +329,7 @@ impl Calendar {
             Some(mut ce) => {
                 // Unreachable for an event id: an event identity only ever
                 // matches an event.
-                // TODO(L3-03): tasks need their own instance-override path.
+                // TODO: tasks need their own instance-override path.
                 let Some(mut event) = ce.event().cloned() else {
                     return Err(CalendarError::MasterNotFound(id.uid().as_str().to_string()));
                 };
@@ -361,13 +361,13 @@ impl Calendar {
     /// List every item to show for `[from, to)`: events expanded into their
     /// occurrences, tasks as themselves.
     ///
-    /// Tasks are **modelled, never expanded** (R89) — a recurring task yields
-    /// its master and nothing else. They are still *windowed*, by the R44
-    /// predicate `Todo::occurs_in_range`: the window is the query, and the
+    /// Tasks are **modelled, never expanded** — a recurring task yields
+    /// its master and nothing else. They are still *windowed*, by
+    /// `Todo::occurs_in_range`: the window is the query, and the
     /// `--json` renderer has no second filter behind it, so a task placed
     /// outside `[from, to)` would otherwise escape the range the caller asked
-    /// for (ADR-10 D5). An **undated** task is unconditionally in-window there
-    /// (R46, INVIOLABLE) — no date is invented to make the predicate work.
+    /// for. An **undated** task is unconditionally in-window there — no date
+    /// is ever invented to make the predicate work.
     pub fn expanded_events_in_range(
         &self,
         from: DateTime<Utc>,
@@ -378,7 +378,7 @@ impl Calendar {
 
     /// `expanded_events_in_range`, plus the `.ics` files it could not read.
     ///
-    /// A listing is never silently short (R77), and a view that drops the
+    /// A listing is never silently short, and a view that drops the
     /// skips is exactly that. The caller that shows the items to a user is the
     /// caller that must show the skips, so the two arrive together.
     pub fn expanded_items_in_range(

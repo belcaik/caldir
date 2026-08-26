@@ -82,7 +82,7 @@ The honest option for a general ICS store; caldir is not one (`specs/caldir.md`
 | 2 VEVENTs | `ExpectedSingleEvent { found: 2 }` | `ExpectedSingleComponent { found: 2 }` |
 | 2 VTODOs | `ExpectedSingleEvent { found: 0 }` | `ExpectedSingleComponent { found: 2 }` |
 | 1 VEVENT + 1 VTODO | **loads, VTODO silently dropped; rewrite deletes it** | `ExpectedSingleComponent { found: 2 }` |
-| 1 VTODO + 1 VJOURNAL/VFREEBUSY | `ExpectedSingleEvent { found: 0 }` | `NoSupportedComponent`-style error naming the unsupported component |
+| 1 VTODO + 1 VJOURNAL/VFREEBUSY | `ExpectedSingleEvent { found: 0 }` | ~~error naming the unsupported component~~ → **superseded by amendment 1**: the VTODO loads, the sibling is ignored and reported by `doctor` |
 | 1 VEVENT + VTIMEZONE | loads, VTIMEZONE dropped on rewrite | unchanged: loads, VTIMEZONE dropped |
 
 ### VTODO filename rule
@@ -163,3 +163,62 @@ is local-tz; and a regression test that VEVENT filenames are byte-identical to t
 4. Is renaming `ExpectedSingleEvent` / `UnexpectedEventCount` acceptable upstream, or should
    the old names be kept for continuity? Pre-1.0 says rename; a maintainer preference
    overrides. *Experiment:* none — ask t4t5.
+
+
+---
+
+## Amendment 1 — unsupported *siblings* are ignored, not fatal
+
+**Status:** ACCEPTED. Supersedes Decision rule 2's second sentence and row 7 of the
+arity table.
+
+### What went wrong
+
+Rule 2 said every component other than `VEVENT`, `VTODO` and `VTIMEZONE` makes the file
+an error, "never a silent drop", on R19's reasoning that a silently dropped component
+reads to the sync engine as a user deletion.
+
+That reasoning is sound for a **supported** component: a `VTODO` that vanishes from a
+parse is a task the diff will propose deleting. It does not transfer to a `VFREEBUSY`
+sitting *beside* a `VEVENT`. That sibling carries no identity the diff could mistake for
+anything, and `Event::from_ics_str` on `main` was `icalendar.events()`, which ignored it —
+harmlessly, for years.
+
+Measured old-binary vs new-binary, a `.ics` holding one `VEVENT` beside a `VFREEBUSY`, a
+`VJOURNAL`, a top-level `VALARM` or an `X-WR-CUSTOM` — all legal `icalbody` content per
+RFC 5545 §3.4 — went from `--json` visibility **1 to 0**. Exit 0, no warning on
+`sync`/`push`/`status`. The now-incomplete listing then suppressed every delete for that
+calendar (C7), so it silently stopped converging. This hit users with **no tasks at all**.
+
+### The rule as amended
+
+| File contents | Amended |
+|---|---|
+| 1 supported + N unsupported siblings | **loads**; the siblings are ignored and named by `doctor` |
+| 2 supported (+ any siblings) | unchanged — `ExpectedSingleComponent { found: 2 }` |
+| 0 supported, ≥1 unsupported | unchanged — error naming every unsupported component found |
+| 0 components | unchanged — `NoSupportedComponent { found: "nothing" }` |
+| 1 supported + `VTIMEZONE` | unchanged — loads, `VTIMEZONE` not reported |
+
+`VTIMEZONE` was already exempted this way. The exemption was simply too narrow.
+
+The same amendment applies at the RPC wire seam (`rpc::ics::decode_item`), for the same
+reason and by the "both arity rules move together" constraint in the Context.
+
+### What R19 still buys
+
+R19's real property is that a document **never silently yields nothing**. That is the
+zero-supported row, and it stays an error naming what was there.
+
+For the ignored siblings, R19 is honoured by *reporting*, not by failing:
+`CalendarEvent::ignored_components()` carries the names up, and `caldir doctor` prints
+`⚠ VFREEBUSY in sibling.ics is ignored; caldir will drop it if it rewrites the file`.
+
+`doctor` is the right surface and the only one that changes. The asymmetry is deliberate:
+`main` ignored these components silently, so matching `main` is not a regression, but
+inventing a new loud failure — or a new warning on the agenda, or a non-zero exit — for a
+file that worked before **is**. `doctor` is the surface built for "tell me about my
+files"; it is non-fatal, it does not change any exit code, and it says the one thing the
+user can act on, which is that a rewrite of that file will drop the component
+(`write_best_event_file` serializes one item and nothing else — Context, unchanged by
+rule 4).

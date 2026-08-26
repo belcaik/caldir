@@ -95,7 +95,7 @@ fn title(item: &CalendarItem) -> &Option<String> {
 /// The `None` a kind this crate cannot read borrows its title from.
 static UNTITLED: Option<String> = None;
 
-/// The `kind` discriminator (ADR-10 D6). Additive: it is the one key a
+/// The `kind` discriminator. Additive: it is the one key a
 /// consumer needs to migrate, via `select(.kind == "event")`.
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
@@ -171,7 +171,7 @@ impl<'a> From<&'a CalendarItem> for ItemJson<'a> {
             // being added in this same tree.
             _ => unreachable!(
                 "caldir_core::CalendarItem grew a variant; give it a `kind` \
-                 discriminator and a field set here (ADR-10 D6)"
+                 discriminator and a field set here"
             ),
         }
     }
@@ -246,8 +246,8 @@ impl<'a> ItemJson<'a> {
             status,
             completed,
             percent_complete,
-            // No key of its own yet: PRIORITY is not part of the schema ADR-10
-            // D6 tabulates. Adding one obeys the same additive rule.
+            // No key of its own yet: PRIORITY is not part of the documented
+            // JSON schema. Adding one obeys the same additive rule.
             priority: _,
             url,
             recurrence,
@@ -295,9 +295,9 @@ impl<'a> ItemJson<'a> {
     }
 }
 
-/// `TodoStatus` projected onto the `status` key's existing value set (ADR-10
-/// D6). Only `CANCELLED` is not live; the other three are ordinary items that a
-/// consumer filtering on `status` must keep seeing.
+/// `TodoStatus` projected onto the `status` key's existing value set. Only
+/// `CANCELLED` is not live; the other three are ordinary items that a consumer
+/// filtering on `status` must keep seeing.
 fn event_status_of(status: TodoStatus) -> Status {
     match status {
         TodoStatus::NeedsAction | TodoStatus::InProcess | TodoStatus::Completed => {

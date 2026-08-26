@@ -25,7 +25,7 @@ fn duplicate_file_sets(events: &[CalendarEvent]) -> Vec<(ComponentKind, Vec<Path
     let mut by_id: HashMap<EventInstanceId, Vec<PathBuf>> = HashMap::new();
     for ce in events {
         // Bucket the item, never a narrowed event: the identity carries the
-        // component kind (R36), so a VEVENT and a VTODO sharing a UID land in
+        // component kind, so a VEVENT and a VTODO sharing a UID land in
         // two buckets, while two files of the same kind still collide.
         by_id
             .entry(ce.item().instance_id())

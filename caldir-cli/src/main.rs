@@ -303,18 +303,27 @@ async fn main() -> Result<()> {
             undated,
         } => {
             let view = commands::events::run(&caldir, calendar, from, to, undated)?;
-            output::emit(&view, output_format);
-            Ok(())
+            output::emit_agenda(&view, output_format);
+            // Printed first, then the verdict: a calendar that could not be
+            // read at all leaves a partial agenda, and a script must be able
+            // to tell that from a complete one.
+            view.exit_status()
         }
         Commands::Today { calendar, undated } => {
             let view = commands::today::run(&caldir, calendar, undated)?;
-            output::emit(&view, output_format);
-            Ok(())
+            output::emit_agenda(&view, output_format);
+            // Printed first, then the verdict: a calendar that could not be
+            // read at all leaves a partial agenda, and a script must be able
+            // to tell that from a complete one.
+            view.exit_status()
         }
         Commands::Week { calendar, undated } => {
             let view = commands::week::run(&caldir, calendar, undated)?;
-            output::emit(&view, output_format);
-            Ok(())
+            output::emit_agenda(&view, output_format);
+            // Printed first, then the verdict: a calendar that could not be
+            // read at all leaves a partial agenda, and a script must be able
+            // to tell that from a complete one.
+            view.exit_status()
         }
         Commands::New {
             title,

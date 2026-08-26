@@ -13,8 +13,7 @@ use super::parse_item;
 /// Fetch a CalDAV calendar's items: events in the window, and every task.
 ///
 /// Item-typed, because a `VTODO` has nowhere else to go — narrowing back to
-/// `Event` here would re-create the silent drop this listing exists to avoid
-/// (R19, R53).
+/// `Event` here would re-create the silent drop this listing exists to avoid.
 pub async fn fetch_events(
     username: &str,
     password: &str,
@@ -43,10 +42,10 @@ pub async fn fetch_events(
 
 /// Decode every fetched resource, or fail the whole listing.
 ///
-/// **A partially-decoded listing is forbidden (R74, AC 3).** Core reads a
+/// **A partially-decoded listing is forbidden.** Core reads a
 /// remote listing as the complete remote state, so an item missing from it is
 /// a delete. "Log and continue" here would turn one unreadable resource into a
-/// deleted local file; the run aborts instead, before any apply (R19, R48).
+/// deleted local file; the run aborts instead, before any apply.
 fn decode_resources(resources: Vec<CalendarResource>) -> Result<Vec<CalendarItem>> {
     resources
         .into_iter()
@@ -59,7 +58,7 @@ fn decode_resources(resources: Vec<CalendarResource>) -> Result<Vec<CalendarItem
 
 /// The REPORTs one `fetch_events` run issues, in order.
 ///
-/// **Two REPORTs, never one query with sibling comp-filters (R59).** RFC 4791
+/// **Two REPORTs, never one query with sibling comp-filters.** RFC 4791
 /// §9.7.1 says a comp-filter matches when its children *all* match, so
 /// `VEVENT` and `VTODO` side by side under one `VCALENDAR` filter read as AND
 /// and would match nothing; whether any given server ORs siblings is
@@ -96,10 +95,10 @@ struct CalendarQuery<'a> {
 enum ComponentFilter<'a> {
     /// `VEVENT` narrowed by `<C:time-range>` — server-side filtering, far
     /// cheaper than fetching every event. `start`/`end` are in CalDAV format,
-    /// `YYYYMMDDTHHMMSSZ`. Byte-identical to what caldir has always sent
-    /// (R1/R2): this arm must not move.
+    /// `YYYYMMDDTHHMMSSZ`. Byte-identical to what caldir has always sent:
+    /// this arm must not move.
     EventsInRange { start: &'a str, end: &'a str },
-    /// `VTODO`, **bare** — no `<C:time-range>` child (R51, R58, INVIOLABLE).
+    /// `VTODO`, **bare** — no `<C:time-range>` child.
     ///
     /// RFC 4791 §9.9's VTODO time-range table evaluates FALSE for a task whose
     /// only date property is a `COMPLETED` older than `start`, so a *compliant*
@@ -143,7 +142,7 @@ fn calendar_query_body(filter: ComponentFilter<'_>) -> String {
 /// The REPORT bodies one `fetch_events` run actually puts on the wire, in
 /// order, taken from `prepare_request` rather than re-derived.
 ///
-/// Test-only seam (R51/R58, T-54). The live tier asserts on the **request**,
+/// Test-only seam. The live tier asserts on the **request**,
 /// not on a server's answer: Radicale implements RFC 4791 §9.9 faithfully, so
 /// a reintroduced `<C:time-range>` on the VTODO query silently omits an
 /// undated task and core turns that absence into a delete of the user's file.

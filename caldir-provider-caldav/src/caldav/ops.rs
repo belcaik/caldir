@@ -33,20 +33,20 @@ pub use update_event::update_event;
 ///
 /// A CalDAV resource holds exactly one supported component — a `VEVENT` (plus
 /// any `RECURRENCE-ID` overrides) or a `VTODO` — optionally beside a
-/// `VTIMEZONE`, which is exempt from the count (R18, R102). Anything else is
+/// `VTIMEZONE`, which is exempt from the count. Anything else is
 /// an error naming what it found.
 ///
 /// Loud, never a skip: a resource that decodes to nothing is indistinguishable
 /// from a resource the server never returned, and that absence is exactly what
-/// the delete path acts on (R19, R48, R74). The arity and component-name rules
-/// are `CalendarItem`'s, not re-derived here (R54).
+/// the delete path acts on. The arity and component-name rules
+/// are `CalendarItem`'s, not re-derived here.
 pub(super) fn parse_item(ics: &str) -> Result<CalendarItem> {
     Ok(CalendarItem::from_single_ics_str(ics)?)
 }
 
 /// Send a PUT, having first proved the body is a single-component document.
 ///
-/// **The only place in this crate that sends a PUT** (R64, R80, INVIOLABLE).
+/// **The only place in this crate that sends a PUT**.
 /// Both write paths hand their request here rather than to `request_raw`, so
 /// the guard cannot be bypassed by adding a third write site — it is reached
 /// structurally, not by remembering to call it.
@@ -62,15 +62,15 @@ pub(super) async fn put_ics(
 
 /// Reject a document that does not hold exactly one supported component.
 ///
-/// R64/R80, INVIOLABLE: Radicale answers a multi-component `VCALENDAR` with
+/// Radicale answers a multi-component `VCALENDAR` with
 /// `400 "Multiple component types in object: 'VEVENT', 'VTODO'"`, and a `400`
-/// behind a retry path spins forever. `to_ics_string` cannot emit that shape
-/// (R27), so this never fires in production — a structural guard is cheaper
+/// behind a retry path spins forever. `to_ics_string` cannot emit that shape,
+/// so this never fires in production — a structural guard is cheaper
 /// than a proof that it stays that way.
 ///
 /// Counts **top-level** components only: `VALARM` is nested inside its
 /// `VTODO`, and counting `BEGIN:` lines would brick every task with a
-/// reminder (R24). `VTIMEZONE` is exempt (R18) — Radicale synthesizes one
+/// reminder. `VTIMEZONE` is exempt — Radicale synthesizes one
 /// beside every zoned task.
 fn ensure_single_component(ics: &str) -> Result<()> {
     let found = top_level_components(ics);
@@ -94,7 +94,7 @@ fn ensure_single_component(ics: &str) -> Result<()> {
 }
 
 /// The data-bearing components directly inside the `VCALENDAR`, in document
-/// order. `VTIMEZONE` is not one (R18); anything nested deeper is not one
+/// order. `VTIMEZONE` is not one; anything nested deeper is not one
 /// either.
 fn top_level_components(ics: &str) -> Vec<&str> {
     const IGNORED: [&str; 1] = ["VTIMEZONE"];
@@ -129,7 +129,7 @@ fn component_name(kind: ComponentKind) -> &'static str {
     match kind {
         ComponentKind::Event => "VEVENT",
         ComponentKind::Todo => "VTODO",
-        // R60/R61: the kind is load-bearing for this lookup. Filtering a
+        // The kind is load-bearing for this lookup. Filtering a
         // later kind under VEVENT would point its PUT at somebody's meeting,
         // which is exactly the defect the kind was threaded through to stop.
         _ => unreachable!(
@@ -145,10 +145,10 @@ fn component_name(kind: ComponentKind) -> &'static str {
 /// If nothing of the requested kind is there, falls back to a UID-based calendar-query
 /// REPORT (for servers like Runbox/Sabre that use server-assigned filenames).
 ///
-/// **The kind is part of the lookup, on both paths (R60, R61).** Radicale enforces UID
+/// **The kind is part of the lookup, on both paths.** Radicale enforces UID
 /// uniqueness per collection component-agnostically, so "the wrong kind at this href"
 /// is a real state — and returning it would point a task's PUT at somebody's meeting.
-/// The href itself is `{uid}.ics` for both kinds, unchanged (R62).
+/// The href itself is `{uid}.ics` for both kinds, unchanged.
 pub(super) async fn find_event_location(
     caldav: &CalDavClient_,
     calendar_href: &str,
@@ -223,10 +223,10 @@ impl<'a> FindEventByUid<'a> {
 /// Pure and `String`-returning so the body is assertable without a transport;
 /// `prepare_request` is the only production caller.
 ///
-/// **No `<C:time-range>`, ever (R60).** The lookup asks for one named item, and
+/// **No `<C:time-range>`, ever.** The lookup asks for one named item, and
 /// a range would hide an undated or long-completed task from its own update.
 /// Only the component name is parameterised: for `ComponentKind::Event` the
-/// bytes are exactly what caldir sent before VTODO support existed (R1/R2).
+/// bytes are exactly what caldir sent before VTODO support existed.
 fn find_event_by_uid_body(uid: &str, kind: ComponentKind) -> String {
     format!(
         r#"<C:calendar-query xmlns="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">

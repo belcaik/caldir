@@ -15,16 +15,16 @@ use chrono::{DateTime, Utc};
 
 /// A VTODO task.
 ///
-/// A sibling of `Event`, never a variant of it (R7): a task's kind comes from
+/// A sibling of `Event`, never a variant of it: a task's kind comes from
 /// the component it was parsed from and is preserved across every boundary.
 /// Adding `VJOURNAL` later is one more struct alongside this one.
 ///
 /// Fields are exactly spec §6's IN set. Deliberate absences:
 /// - no `end`/`duration` — RFC 5545 §3.6.2 forbids `DTEND` in a VTODO, and the
-///   field simply not existing is what makes emitting one impossible (R8).
-/// - `DTSTAMP` is re-stamped on serialize, never modelled (R25).
+///   field simply not existing is what makes emitting one impossible.
+/// - `DTSTAMP` is re-stamped on serialize, never modelled.
 /// - `CATEGORIES` and `RELATED-TO` are OUT: the crate corrupts the first and
-///   parses the second lossily, so modelling them destroys data (R87, R88).
+///   parses the second lossily, so modelling them destroys data.
 #[derive(Debug, Clone, Eq, educe::Educe)]
 #[educe(PartialEq)]
 pub struct Todo {
@@ -33,13 +33,13 @@ pub struct Todo {
     pub description: Option<String>,
     pub location: Option<String>,
     /// `DTSTART`. Independent of `due` — a task may have either, both or
-    /// neither, and neither is ever synthesized from the other (R9, R46).
+    /// neither, and neither is ever synthesized from the other.
     pub start: Option<EventTime>,
     /// `DUE`. The task's anchor.
     pub due: Option<EventTime>,
     pub status: TodoStatus,
     /// `COMPLETED`. `EventTime`, not `DateTime<Utc>`: a floating value is legal
-    /// and must survive (R22).
+    /// and must survive.
     pub completed: Option<EventTime>,
     /// `PERCENT-COMPLETE`, raw. `i32` is RFC 5545's `INTEGER`, not the 0..=100
     /// the property is *supposed* to hold: out-of-range is legal input that
@@ -65,9 +65,9 @@ pub struct Todo {
     #[educe(PartialEq(method(x_properties_eq)))]
     pub x_properties: Vec<XProperty>,
 
-    /// `CREATED`. Ignored by `==` (R38); kept as a field on data-safety
+    /// `CREATED`. Ignored by `==`; kept as a field on data-safety
     /// grounds — it rescues an undated completed task from RFC 4791 §9.9
-    /// time-range omission (ADJUDICATION C-4).
+    /// time-range omission.
     #[educe(PartialEq(ignore))]
     pub created: Option<DateTime<Utc>>,
 
@@ -105,7 +105,7 @@ impl Todo {
         }
     }
 
-    /// Whether this task falls inside `[from, to]` (R44).
+    /// Whether this task falls inside `[from, to]`.
     ///
     /// The "core's rule" column of RFC 4791 §9.9's VTODO time-range table,
     /// with `start = from` and `end = to`:
@@ -121,7 +121,7 @@ impl Todo {
     /// be *more* permissive than any server, never less, or an item a §9.9
     /// server omitted would be read as absent-and-therefore-deleted (§10).
     ///
-    /// No date is ever synthesized for an undated task (R46, INVIOLABLE): a
+    /// No date is ever synthesized for an undated task: a
     /// fabricated epoch `DTSTART` evaluates false here and would silently make
     /// undated tasks unpushable rather than merely undeletable.
     pub fn occurs_in_range(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> bool {
@@ -142,10 +142,9 @@ impl Todo {
         }
     }
 
-    /// Serialize to a single-component `VCALENDAR` document (R27), CRLF
-    /// throughout (R28). `DTSTAMP` is stamped by the crate at write time and
-    /// is never a field (R25); no `DTEND` and no `DURATION` are ever emitted
-    /// (R8, R26).
+    /// Serialize to a single-component `VCALENDAR` document, CRLF throughout.
+    /// `DTSTAMP` is stamped by the crate at write time and is never a field; no
+    /// `DTEND` and no `DURATION` are ever emitted.
     pub fn to_ics_string(&self) -> String {
         let ical_todo: icalendar::Todo = self.into();
 
@@ -162,7 +161,7 @@ impl Todo {
     // icalendar mints a fresh UID and DTSTAMP into every VALARM it serializes,
     // so two generations of the same task would never compare equal and every
     // sync would push forever. We hand-roll the block instead, exactly as the
-    // event path does — see `Reminder::ics_block` (R24).
+    // event path does — see `Reminder::ics_block`.
     fn splice_valarms_into_vtodo(&self, ics: String) -> String {
         if self.reminders.is_empty() {
             return ics;

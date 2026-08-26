@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum EventError {
     #[error("failed to read event from {0}: {1}")]
     Io(PathBuf, #[source] std::io::Error),
@@ -23,11 +24,11 @@ pub enum EventError {
     #[error("event is missing a UID")]
     MissingUid,
 
-    /// A property is present but its value cannot be read. Never a silent drop
-    /// (R19): on a task an unparseable `DUE` would otherwise become "no DUE",
-    /// which R46 makes unconditionally in-window — a typo silently changing an
+    /// A property is present but its value cannot be read. Never a silent drop:
+    /// on a task an unparseable `DUE` would otherwise become "no DUE", and an
+    /// undated task is unconditionally in-window — a typo silently changing an
     /// item's sync visibility. The event codec's own equivalent stays
-    /// `MissingStart`, which is unreachable for a task (R20), unchanged (R1/R2).
+    /// `MissingStart`, which is unreachable for a task, unchanged.
     #[error("property {name} has an unparseable value: {value}")]
     UnparseableProperty { name: String, value: String },
 

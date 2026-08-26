@@ -104,8 +104,8 @@ pub fn run(
     Ok(())
 }
 
-/// Build the VEVENT `new` creates. R90: `new` creates events only — this is
-/// deliberately the one and only item `new` can assemble.
+/// Build the VEVENT `new` creates. `new` creates events only — this is
+/// deliberately the one and only item it can assemble.
 fn assemble_event(
     title: String,
     start_time: EventTime,

@@ -4,10 +4,10 @@ use std::collections::HashMap;
 
 use crate::calendar::{CalendarError, SyncBases};
 use crate::diff::EventChange;
-use crate::event::{ComponentKind, EventInstanceId, EventUid};
+use crate::event::EventInstanceId;
 use crate::item::CalendarItem;
 use crate::{Calendar, CalendarDiff, CalendarEvent, DateRange, Remote, RemoteEvent};
-use error::ConnectionError;
+pub use error::ConnectionError;
 
 /// A connection is a [local calendar] + [remote calendar] pair
 pub struct Connection {
@@ -85,17 +85,6 @@ impl Connection {
         Ok(())
     }
 
-    /// Refuse the whole outgoing push if it holds a change the wire cannot
-    /// carry — before anything is sent, and before a caller renders the diff
-    /// as work about to happen.
-    ///
-    /// Public so `caldir push` can ask *first* and not paint a refused item
-    /// with the green `+` that means "pushed". `apply_outgoing_diff` runs the
-    /// same guard regardless, so skipping this can never push a partial diff.
-    pub fn check_outgoing(&self, diff: &CalendarDiff) -> Result<(), ConnectionError> {
-        refuse_unpushable(diff, &self.events_by_instance_id()?)
-    }
-
     fn events_by_instance_id(
         &self,
     ) -> Result<HashMap<EventInstanceId, CalendarEvent>, ConnectionError> {
@@ -104,7 +93,7 @@ impl Connection {
             .events()?
             .into_events()
             .into_iter()
-            // Keyed by the kind-carrying identity (R36), so a task is
+            // Keyed by the kind-carrying identity, so a task is
             // reachable here and an event/task UID pair never collides.
             .map(|e| (e.item().instance_id(), e))
             .collect())
@@ -231,95 +220,12 @@ fn pull_incoming_changes(
     Ok(())
 }
 
-/// The UID of an outgoing event/task pair, if the outgoing set holds one.
-///
-/// Keyed on `(uid, kind)`: two changes touching the same UID under *different*
-/// kinds are the pair. Same-UID, same-kind changes — a master and its
-/// recurrence override — are ordinary sync and must stay untouched (R1/R2).
-fn same_uid_pair(diff: &CalendarDiff) -> Option<EventUid> {
-    let mut kinds_by_uid: HashMap<&EventUid, ComponentKind> = HashMap::new();
-
-    for change in diff.outgoing() {
-        let item = written_item(change);
-        let kind = item.instance_id().kind();
-
-        match kinds_by_uid.insert(item.uid(), kind) {
-            Some(seen) if seen != kind => return Some(item.uid().clone()),
-            _ => {}
-        }
-    }
-
-    None
-}
-
-/// The item a change *writes*: an update's `to`, never its `from`.
-fn written_item(change: &EventChange) -> &CalendarItem {
-    match change {
-        EventChange::Create(item) | EventChange::Delete(item) => item,
-        EventChange::Update { to, .. } => to,
-    }
-}
-
-/// The first outgoing change the event-only wire cannot carry (R70/R71).
-///
-/// Keyed on the kind, not on the Rust type: anything that is not a `VEVENT`
-/// is refused, so a component kind added later is stopped here rather than
-/// smuggled onto the wire — or, worse, abandoning the changes behind it.
-fn unpushable_item(diff: &CalendarDiff) -> Option<&CalendarItem> {
-    diff.outgoing()
-        .iter()
-        .map(written_item)
-        .find(|item| item.instance_id().kind() != ComponentKind::Event)
-}
-
-/// The whole-push pre-flight, run before *any* RPC.
-///
-/// Both refusals share one reason: a half-pushed calendar is the destructive
-/// outcome, so the push either happens completely or not at all.
-///
-/// - R65 — one collection cannot hold a same-UID event/task pair, and at the
-///   same href the server answers a silent `204` overwrite rather than an
-///   error, so it will not protect the user here.
-/// - R70/R71 — the outbound RPC field is an `Event`, so a task aborts the
-///   loop. Aborting *mid-loop* silently abandoned every change queued behind
-///   it, in `read_dir` order, on every run.
-fn refuse_unpushable(
-    diff: &CalendarDiff,
-    events_by_instance_id: &HashMap<EventInstanceId, CalendarEvent>,
-) -> Result<(), ConnectionError> {
-    if let Some(uid) = same_uid_pair(diff) {
-        return Err(ConnectionError::SameUidPair { uid });
-    }
-
-    if let Some(item) = unpushable_item(diff) {
-        let unpushable = diff
-            .outgoing()
-            .iter()
-            .filter(|change| written_item(change).instance_id().kind() != ComponentKind::Event)
-            .count();
-
-        return Err(ConnectionError::UnpushableTask {
-            uid: item.uid().clone(),
-            // A delete's file is already gone; the message falls back to the
-            // UID rather than inventing a path.
-            file: events_by_instance_id
-                .get(&item.instance_id())
-                .map(|e| e.path().to_path_buf()),
-            pending: diff.outgoing().len() - unpushable,
-        });
-    }
-
-    Ok(())
-}
-
 async fn push_outgoing_changes(
     remote: &Remote,
     diff: &CalendarDiff,
     events_by_instance_id: &mut HashMap<EventInstanceId, CalendarEvent>,
     sync_bases: &mut Vec<CalendarItem>,
 ) -> Result<(), ConnectionError> {
-    refuse_unpushable(diff, events_by_instance_id)?;
-
     for change in diff.outgoing() {
         if let Some(remote_event) = remote.apply_change(change).await? {
             let returned_item = remote_event.item();
@@ -400,6 +306,36 @@ mod tests {
             diff.outgoing().is_empty(),
             "outgoing should be empty for read-only calendars, got {:?}",
             diff.outgoing()
+        );
+    }
+
+    /// A read-only calendar pushes *nothing*, so singling tasks out there
+    /// would report a restriction that is not the one in force: the user would
+    /// read "1 task change not pushed" on a calendar where no event pushed
+    /// either. `discard_outgoing` clears the count with the set.
+    #[tokio::test]
+    async fn a_read_only_calendar_reports_no_withheld_tasks() {
+        let (_tmp, caldir) = test_caldir();
+        let calendar = caldir
+            .create_calendar("read-only-cal", Some(calendar_config(Some(true))))
+            .unwrap();
+        calendar.create_event(test_event()).unwrap();
+        calendar
+            .create_event(Todo::new("Renew the permit"))
+            .unwrap();
+
+        let mock = test_mock_provider();
+        mock.reply::<rpc::ListEvents>(vec![]);
+        let remote = Remote::new(mock.provider(), test_remote_params());
+
+        let mut connection = Connection::new(calendar, remote);
+        let diff = connection.diff(&DateRange::default()).await.unwrap();
+
+        assert!(diff.outgoing().is_empty());
+        assert_eq!(
+            diff.withheld_task_pushes(),
+            0,
+            "read-only is the reason nothing pushes here, not the task",
         );
     }
 
@@ -788,38 +724,39 @@ mod tests {
     /// `T-48`, renamed. **The ticket's `a_task_is_pushed_as_a_vtodo_and_never_
     /// as_a_vevent` is not implementable and the name would assert a
     /// falsehood.** The outbound RPC field is `pub event: Event` (R70), so a
-    /// `BEGIN:VTODO` payload can never reach `CreateEvent`; the same ticket's
-    /// R56 and the ADJUDICATION's ADR-07 ruling say the push *aborts* with
-    /// `expected 1 event(s) in ICS, found 0`. The constraint wins.
+    /// `BEGIN:VTODO` payload can never reach `CreateEvent`.
     ///
     /// What survives, and is the half R1/A-1 item 3 actually calls inviolable:
     /// **no VEVENT is synthesized for a task anywhere in the chain**. Proven
     /// end to end here — real scan, real diff, real apply — by the transport
     /// having seen nothing at all.
     ///
-    /// The *error* the user reads changed with the pre-flight guard: the abort
-    /// now happens before the loop, so this seam reports the refusal, not the
-    /// wire's arity message. The arity message is unchanged and still locked
-    /// where it is raised — `remote::tests::
-    /// a_task_change_aborts_instead_of_reaching_the_provider`.
+    /// **Changed from `a_task_push_aborts_and_never_reaches_the_provider_as_a_
+    /// vevent`, which locked the whole-push refusal.** It asserted
+    /// `ConnectionError::UnpushableTask { uid, file, pending: 0 }`; a task is
+    /// now dropped from the outgoing set instead of refusing the push, so the
+    /// call *succeeds* with nothing to do. Every no-VEVENT assertion below is
+    /// verbatim from the old test — only the error destructuring is gone,
+    /// replaced by the withheld count, which is what R19 now hangs on.
     #[tokio::test]
-    async fn a_task_push_aborts_and_never_reaches_the_provider_as_a_vevent() {
+    async fn a_task_never_reaches_the_provider_as_a_vevent() {
         let (_tmp, mock, mut connection) = writable_connection();
         let todo = Todo::new("Hand in the assignment");
         let cal_event = connection.local().create_event(todo.clone()).unwrap();
         let path = cal_event.path().to_path_buf();
 
-        let err = connection
-            .apply_outgoing_diff(&outgoing_create_diff(todo.clone()))
-            .await
-            .expect_err("a task must never be pushed over the event-only wire");
+        let diff = outgoing_create_diff(todo.clone());
+        assert!(
+            diff.outgoing().is_empty(),
+            "a task is never outgoing, got {:?}",
+            diff.outgoing(),
+        );
+        assert_eq!(diff.withheld_task_pushes(), 1);
 
-        let ConnectionError::UnpushableTask { uid, file, pending } = &err else {
-            panic!("expected the pre-flight refusal, got {err:?}");
-        };
-        assert_eq!(uid, &todo.uid);
-        assert_eq!(file.as_deref(), Some(path.as_path()));
-        assert_eq!(*pending, 0, "the task was the only outgoing change");
+        connection
+            .apply_outgoing_diff(&diff)
+            .await
+            .expect("a task-only calendar has nothing to push, not a failure");
 
         assert!(
             !mock.received_a_request(),
@@ -833,27 +770,107 @@ mod tests {
         assert_eq!(CalendarItem::load(&path).unwrap(), todo.into());
     }
 
-    /// `T-50` — R56, the first accepted skew failure: **new core + old
-    /// provider**. Pinned as a *failure*, never a quiet no-op.
+    /// **The wedge.** CalDAV is the only provider that pulls tasks, so the
+    /// intended user pulls a mixed calendar, edits one task, and pushes. Under
+    /// the whole-push refusal that ticked-off task refused the *calendar*, and
+    /// their meetings stopped syncing on every run until they undid the pull.
     ///
-    /// This test used to pin the *partial* abort: the first event really was
-    /// created remotely and its base flushed, then the task aborted the loop
-    /// and everything behind it was abandoned. QA reproduced the consequence
-    /// against Radicale — 6 events + 1 task edit, 4 pushed, 2 silently
-    /// abandoned, in `read_dir` order — so what it pinned was the defect.
+    /// The contract this pins: a task is never outgoing at all. The events
+    /// around it push exactly as they would in a task-free calendar, and the
+    /// withheld task is counted so the CLI can say so (R19).
     ///
-    /// The contract now: the task fails the calendar **whole**. Nothing is
-    /// pushed, no base is flushed for anything, and the delete queued behind
-    /// the task is still pending rather than lost. Every no-data-loss
-    /// assertion below is unchanged; the "one event got through" assertions
-    /// became their opposite, which is the fix.
+    /// Built through the real path — real files, real `diff()` — because the
+    /// withholding has to happen where the outgoing set is *computed*, not at
+    /// a pre-flight a caller may skip.
     #[tokio::test]
-    async fn pushing_a_task_to_a_task_less_provider_fails_that_calendar_without_data_loss() {
+    async fn a_task_in_a_mixed_calendar_is_withheld_and_every_event_still_pushes() {
+        let (_tmp, mock, mut connection) = writable_connection();
+
+        let events: Vec<Event> = (0..6)
+            .map(|i| Event::new(format!("Lecture {i}"), test_event_time()))
+            .collect();
+        for event in &events {
+            connection.local().create_event(event.clone()).unwrap();
+        }
+        let todo = Todo::new("Hand in the assignment");
+        let todo_path = connection
+            .local()
+            .create_event(todo.clone())
+            .unwrap()
+            .path()
+            .to_path_buf();
+        let todo_bytes_before = std::fs::read(&todo_path).unwrap();
+
+        mock.reply::<rpc::ListEvents>(vec![]);
+        for event in &events {
+            mock.reply::<rpc::CreateEvent>(event.clone());
+        }
+
+        let diff = connection.diff(&DateRange::default()).await.unwrap();
+
+        assert_eq!(
+            diff.outgoing().len(),
+            events.len(),
+            "every event is outgoing and the task is not, got {:?}",
+            diff.outgoing(),
+        );
+        assert!(
+            !diff
+                .outgoing()
+                .iter()
+                .any(|c| matches!(c, EventChange::Create(CalendarItem::Todo(_)))),
+            "no task may be outgoing, got {:?}",
+            diff.outgoing(),
+        );
+        assert_eq!(
+            diff.withheld_task_pushes(),
+            1,
+            "the withheld task must be counted, never silently dropped (R19)",
+        );
+
+        connection
+            .apply_outgoing_diff(&diff)
+            .await
+            .expect("a task in the calendar may not fail the push");
+
+        // Every event really went out, and every base was recorded: the next
+        // run must not re-push them.
+        let reloaded = Calendar::load(connection.local().path()).unwrap();
+        for event in &events {
+            let id = event.event_instance_id();
+            assert_eq!(reloaded.state().sync_base(&id), Some(event), "{id}");
+        }
+
+        // The task is untouched on disk and has no base: it never synced.
+        assert_eq!(std::fs::read(&todo_path).unwrap(), todo_bytes_before);
+        let todo_id = CalendarItem::Todo(todo).instance_id();
+        assert_eq!(reloaded.state().sync_bases().get(&todo_id), None);
+        assert!(!reloaded.state().synced_event_ids().contains(&todo_id));
+    }
+
+    /// `T-50` — R56, the first accepted skew failure: **new core + old
+    /// provider**.
+    ///
+    /// **Renamed from `pushing_a_task_to_a_task_less_provider_fails_that_
+    /// calendar_without_data_loss`, which locked the whole-push refusal.** It
+    /// asserted `expect_err(...)` plus `ConnectionError::UnpushableTask` and
+    /// `!mock.received_a_request()` — the task failed the calendar whole. That
+    /// contract is what the upstream review rejected: CalDAV is the only
+    /// provider that pulls tasks, so failing the calendar is what the intended
+    /// user gets on every run, and their meetings stop syncing.
+    ///
+    /// The contract now: the task is simply not outgoing. The event create and
+    /// the delete queued around it push exactly as they would in a task-free
+    /// calendar, and the withheld task is counted (R19). Every no-data-loss
+    /// assertion below is unchanged; the "nothing reached the wire" assertions
+    /// became their opposite for the *events*, which is the fix.
+    #[tokio::test]
+    async fn pushing_a_task_to_a_task_less_provider_withholds_only_the_task() {
         let (_tmp, mock, mut connection) = writable_connection();
 
         let event = test_event();
         let todo = Todo::new("Hand in the assignment");
-        let doomed = Event::new("Would be deleted remotely", test_event_time());
+        let doomed = Event::new("Deleted remotely", test_event_time());
         let doomed_id = doomed.event_instance_id();
 
         let event_path = connection
@@ -869,9 +886,8 @@ mod tests {
             .path()
             .to_path_buf();
 
-        // A reply is queued for the event, so the transport *could* accept it.
-        // Nothing may consume it.
         mock.reply::<rpc::CreateEvent>(event.clone());
+        mock.reply::<rpc::DeleteEvent>(());
 
         let diff = CalendarDiff::from_changes(
             vec![
@@ -882,35 +898,24 @@ mod tests {
             vec![],
         );
 
+        assert_eq!(
+            diff.outgoing().len(),
+            2,
+            "the event create and the delete survive, the task does not: {:?}",
+            diff.outgoing(),
+        );
+        assert_eq!(
+            diff.withheld_task_pushes(),
+            1,
+            "the withheld task must be counted, never silently dropped",
+        );
+
         let todo_bytes_before = std::fs::read(&todo_path).unwrap();
 
-        let result = connection.apply_outgoing_diff(&diff).await;
-
-        let err = result.expect_err("the task push must fail the calendar");
-
-        // `L6-01`/R71: the pre-flight refusal, not the wire's arity message.
-        // The arity message stays byte-locked where it is raised (`remote::
-        // tests::a_task_change_aborts_instead_of_reaching_the_provider`); a
-        // user who upgraded to fix that string must not be shown its twin.
-        let ConnectionError::UnpushableTask { uid, file, pending } = &err else {
-            panic!("expected the pre-flight refusal, got {err:?}");
-        };
-        assert_eq!(uid, &todo.uid);
-        assert_eq!(file.as_deref(), Some(todo_path.as_path()));
-        assert_eq!(
-            *pending, 2,
-            "the event create and the delete are still pending"
-        );
-
-        // What the user actually reads, via `caldir push`'s renderer. It names
-        // the offending file, so the fix is actionable without guesswork.
-        let message = err.to_string();
-        let filename = todo_path.file_name().unwrap().to_string_lossy();
-        assert!(message.contains(&*filename), "got {message:?}");
-        assert!(
-            !message.contains("expected 1 event(s) in ICS"),
-            "got {message:?}"
-        );
+        connection
+            .apply_outgoing_diff(&diff)
+            .await
+            .expect("a task may not fail the calendar's push");
 
         // Not data loss: both files are still there, and still themselves.
         assert!(event_path.is_file());
@@ -919,29 +924,26 @@ mod tests {
         assert_eq!(
             std::fs::read(&todo_path).unwrap(),
             todo_bytes_before,
-            "the failed item's file must be byte-identical to before the push",
+            "the withheld item's file must be byte-identical to before the push",
         );
 
-        // Nothing at all reached the wire: not the event create ahead of the
-        // task, and not the delete queued behind it.
-        assert!(
-            !mock.received_a_request(),
-            "a refused push may not apply a single change",
-        );
-
-        // No base for the event either. Recording one for a change that was
-        // never pushed is what would make the *next* run read it as synced.
+        // The events really went out, and their bases were recorded.
         let reloaded = Calendar::load(connection.local().path()).unwrap();
         let event_id = event.event_instance_id();
-        assert_eq!(reloaded.state().sync_bases().get(&event_id), None);
-        assert!(!reloaded.state().synced_event_ids().contains(&event_id));
+        assert_eq!(reloaded.state().sync_base(&event_id), Some(&event));
+        assert_eq!(
+            mock.captured_request::<rpc::DeleteEvent>()
+                .event
+                .event_instance_id(),
+            doomed_id,
+            "the delete queued behind the task must reach the wire too",
+        );
 
-        // Same for the item that failed and the delete queued behind it.
+        // The task synced nothing, so it has no base: the next run must not
+        // read it as already pushed.
         let todo_id = CalendarItem::Todo(todo).instance_id();
         assert_eq!(reloaded.state().sync_bases().get(&todo_id), None);
         assert!(!reloaded.state().synced_event_ids().contains(&todo_id));
-        assert_eq!(reloaded.state().sync_bases().get(&doomed_id), None);
-        assert!(!reloaded.state().synced_event_ids().contains(&doomed_id));
     }
 
     /// `T-51` — R57 (INVIOLABLE), the second accepted skew failure: **old core
@@ -1204,9 +1206,7 @@ END:VJOURNAL\r\nEND:VCALENDAR\r\n";
     }
 
     /// **R71**, the delete arm. `L4-03` pinned the `Create` arm; `Update` and
-    /// `Delete` abort through the same `into_event()` on the way to an
-    /// event-only wire, but nothing pinned it — the ADJUDICATION records the
-    /// gap as this ticket's ("a pure task-only outgoing `Delete` has no lock").
+    /// `Delete` reach the same event-only wire, but nothing pinned them.
     ///
     /// It matters because `push_outgoing_changes` carries
     /// `unreachable!("apply_change returns None for Delete")`. That branch is
@@ -1214,8 +1214,18 @@ END:VJOURNAL\r\nEND:VCALENDAR\r\n";
     /// delete is the one shape that would otherwise walk into it. The other
     /// half of that invariant — an *event* delete really does yield `None` —
     /// is pinned in `remote::tests::apply_change_yields_no_remote_event_for_a_delete`.
+    ///
+    /// **Changed from `a_task_only_delete_aborts_before_reaching_the_provider`,
+    /// which locked the whole-push refusal**: it asserted `expect_err` and
+    /// `ConnectionError::UnpushableTask`. The delete is now withheld from the
+    /// outgoing set instead, so it still never reaches the loop — the reason
+    /// the `unreachable!` stays safe is unchanged, only the mechanism is.
+    ///
+    /// R50's counterpart applies here: caldir will not delete a task remotely,
+    /// so a locally-deleted task stays on the server and is reported on every
+    /// run rather than acted on.
     #[tokio::test]
-    async fn a_task_only_delete_aborts_before_reaching_the_provider() {
+    async fn a_task_only_delete_is_withheld_before_reaching_the_provider() {
         let (_tmp, mock, mut connection) = writable_connection();
 
         let task = Todo::new("Renew the parking permit");
@@ -1226,43 +1236,45 @@ END:VJOURNAL\r\nEND:VCALENDAR\r\n";
             .path()
             .to_path_buf();
 
-        let err = connection
-            .apply_outgoing_diff(&outgoing_delete_diff(task.clone()))
-            .await
-            .expect_err("a task delete must never ride the event-only wire");
+        let diff = outgoing_delete_diff(task.clone());
+        assert!(
+            diff.outgoing().is_empty(),
+            "a task delete is never outgoing, got {:?}",
+            diff.outgoing(),
+        );
+        assert_eq!(diff.withheld_task_pushes(), 1);
 
-        // Refused by the pre-flight, so the `Delete` never reaches the loop at
-        // all — which is also why the `unreachable!` below it stays safe.
-        let ConnectionError::UnpushableTask { uid, .. } = &err else {
-            panic!("expected the pre-flight refusal, got {err:?}");
-        };
-        assert_eq!(uid, &task.uid);
+        connection
+            .apply_outgoing_diff(&diff)
+            .await
+            .expect("a withheld delete is not a failure");
 
         assert!(
             !mock.received_a_request(),
             "nothing may reach the transport for a task delete",
         );
-        assert!(task_path.is_file(), "the local file must survive the abort");
+        assert!(task_path.is_file(), "the local file must survive");
         assert_eq!(CalendarItem::load(&task_path).unwrap(), task.into());
     }
 
-    /// **L6-01 / QA.** The silent-abandonment lock.
+    /// **L6-01 / QA.** The silent-abandonment lock, kept and inverted.
     ///
     /// Reproduced against real Radicale: a calendar holding one task plus
     /// several pending event pushes pushed *some* of the events, aborted on
     /// the task, and abandoned the rest — silently, and in `read_dir` order,
-    /// so *which* changes survived was arbitrary. Every later run repeated it,
-    /// because the task fails identically forever.
+    /// so *which* changes survived was arbitrary. The whole-push refusal fixed
+    /// the arbitrariness by pushing *none* of them, which the upstream review
+    /// rejected: on the only task-carrying provider that is the normal path,
+    /// and it wedges the user's meetings.
     ///
-    /// The contract this pins: an outgoing set the event-only wire cannot
-    /// carry is refused **whole, before the first RPC**. Not one change is
-    /// applied, so there is no partial push and nothing to reconcile.
-    ///
-    /// Without the pre-flight guard this test fails on the very first
-    /// assertion: the transport receives the event creates that happen to sort
-    /// before the task.
+    /// **Changed from `a_task_in_the_outgoing_set_refuses_the_whole_push_
+    /// before_the_first_rpc`**, whose `!mock.received_a_request()`, snapshot
+    /// equality and "no base for any event" assertions all inverted here. What
+    /// the two share, and what the original defect actually was, is that
+    /// *which* changes apply must not depend on `read_dir` order: every event
+    /// applies, on every run, regardless of where the task sorts.
     #[tokio::test]
-    async fn a_task_in_the_outgoing_set_refuses_the_whole_push_before_the_first_rpc() {
+    async fn a_task_mid_set_is_withheld_and_every_event_around_it_still_pushes() {
         let (_tmp, mock, mut connection) = writable_connection();
 
         // QA's shape: six event pushes queued behind (and around) one task.
@@ -1280,9 +1292,8 @@ END:VJOURNAL\r\nEND:VCALENDAR\r\n";
             .unwrap()
             .path()
             .to_path_buf();
+        let todo_before = std::fs::read(&todo_path).unwrap();
 
-        // Replies are queued for every event, so the transport *could* accept
-        // them all. Nothing may consume one.
         for event in &events {
             mock.reply::<rpc::CreateEvent>(event.clone());
         }
@@ -1291,63 +1302,57 @@ END:VJOURNAL\r\nEND:VCALENDAR\r\n";
             .iter()
             .map(|e| EventChange::Create(e.clone().into()))
             .collect();
-        // Mid-set, not last: the bug abandoned whatever followed the task.
+        // Mid-set, not last: the original defect abandoned whatever followed.
         changes.insert(3, EventChange::Create(todo.clone().into()));
 
-        let before = ics_snapshot(connection.local().path());
+        let diff = CalendarDiff::from_changes(changes, vec![]);
+        assert_eq!(diff.outgoing().len(), events.len());
+        assert_eq!(diff.withheld_task_pushes(), 1);
 
-        let err = connection
-            .apply_outgoing_diff(&CalendarDiff::from_changes(changes, vec![]))
+        connection
+            .apply_outgoing_diff(&diff)
             .await
-            .expect_err("an outgoing set holding a task must be refused whole");
+            .expect("a task mid-set may not fail the push");
 
-        assert!(
-            !mock.received_a_request(),
-            "not one change may reach the wire when the push is refused",
-        );
-
-        // The error names the offending item by file, not merely by type.
-        let ConnectionError::UnpushableTask { .. } = &err else {
-            panic!("expected the pre-flight refusal, got {err:?}");
-        };
-        let message = err.to_string();
-        let filename = todo_path.file_name().unwrap().to_string_lossy();
-        assert!(
-            message.contains(&*filename),
-            "the message must name the offending file, got {message:?}",
-        );
-
-        // Distinct from the wire-level arity abort, which stays byte-locked at
-        // the `Remote` seam and must not be what the user reads here.
-        assert!(
-            !message.contains("expected 1 event(s) in ICS"),
-            "the pre-flight refusal must not wear the arity error's message, got {message:?}",
-        );
-
-        // Nothing moved on disk, and no base was recorded for anything: a base
-        // for an event would make the next run read it as already pushed.
-        assert_eq!(ics_snapshot(connection.local().path()), before);
+        // Every single event applied — not the ones that happened to sort
+        // before the task, all of them.
         let reloaded = Calendar::load(connection.local().path()).unwrap();
         for event in &events {
             let id = event.event_instance_id();
-            assert_eq!(reloaded.state().sync_bases().get(&id), None, "{id}");
-            assert!(!reloaded.state().synced_event_ids().contains(&id), "{id}");
+            assert_eq!(reloaded.state().sync_base(&id), Some(event), "{id}");
         }
+
+        // The task moved nowhere: same bytes, no base, no synced id.
+        assert_eq!(std::fs::read(&todo_path).unwrap(), todo_before);
+        let todo_id = CalendarItem::Todo(todo).instance_id();
+        assert_eq!(reloaded.state().sync_bases().get(&todo_id), None);
+        assert!(!reloaded.state().synced_event_ids().contains(&todo_id));
     }
 
     /// **R65.** A same-UID event/task pair is a perfectly good *local*
-    /// directory (R4, and `T-52` above proves it works), but it cannot be
-    /// pushed into one CalDAV collection: Radicale enforces UID uniqueness per
-    /// collection component-agnostically — `409` across hrefs, `400` within one
-    /// resource, and, at the same href, a **silent `204` overwrite**. The
-    /// server will not protect the user here, so caldir stops before the wire.
+    /// directory (R4, and `T-52` above proves it works). What cannot work is
+    /// putting *both* into one CalDAV collection, which enforces UID
+    /// uniqueness component-agnostically.
     ///
-    /// The destructive case this pins is the *partial* push: a reply is queued
-    /// for the event, so without the guard the event really is created
-    /// remotely and only the task then fails — leaving the pair half-pushed
-    /// into a collection that cannot hold both.
+    /// It cannot happen any more, and this pins why: the task is never
+    /// outgoing, so only one of the pair is ever offered to the collection.
+    /// The pre-flight that used to refuse the push whole is gone with it.
+    ///
+    /// **Replaces three tests, all locks on that refusal:**
+    /// `a_same_uid_event_task_pair_pushed_to_one_collection_is_an_error`
+    /// (asserted `expect_err` + `!mock.received_a_request()`),
+    /// `a_same_uid_pair_is_refused_as_an_unpushable_task_not_as_a_uid_clash`
+    /// (pinned *which* of two refusals fired — a question with no referent
+    /// once neither exists), and
+    /// `a_pair_split_across_a_delete_and_a_create_is_refused_too` (the same
+    /// refusal under a delete/create split, covered by the second half here).
+    ///
+    /// The server's own protection is untouched and is where it belongs:
+    /// `caldav`'s `If-None-Match: *` makes a create onto an occupied UID fail
+    /// rather than blind-overwrite, pinned live in
+    /// `live::radicale::pushing_a_same_uid_pair_into_one_collection_surfaces_an_error`.
     #[tokio::test]
-    async fn a_same_uid_event_task_pair_pushed_to_one_collection_is_an_error() {
+    async fn a_same_uid_event_task_pair_offers_only_the_event_to_the_collection() {
         let (_tmp, mock, mut connection) = writable_connection();
 
         let uid = EventUid::new("shared-123@u-crawler");
@@ -1373,8 +1378,6 @@ END:VJOURNAL\r\nEND:VCALENDAR\r\n";
             std::fs::read(&todo_path).unwrap(),
         );
 
-        // Queued, and must go unused: without the guard the event's create
-        // succeeds and the pair ends up half-pushed.
         mock.reply::<rpc::CreateEvent>(event.clone());
 
         let diff = CalendarDiff::from_changes(
@@ -1385,80 +1388,48 @@ END:VJOURNAL\r\nEND:VCALENDAR\r\n";
             vec![],
         );
 
-        let err = connection
-            .apply_outgoing_diff(&diff)
-            .await
-            .expect_err("a same-UID pair cannot be pushed to one collection");
-
-        assert!(
-            err.to_string().contains("shared-123@u-crawler"),
-            "the error must name the UID the user has to act on, got: {err}"
-        );
-
-        assert!(
-            !mock.received_a_request(),
-            "no RPC may be sent for ANY change in that push: a partial push is \
-             the destructive case Radicale's silent 204 overwrite produces",
-        );
-
-        assert!(event_path.is_file() && todo_path.is_file());
         assert_eq!(
-            (
-                std::fs::read(&event_path).unwrap(),
-                std::fs::read(&todo_path).unwrap()
-            ),
-            before,
-            "both local files must survive byte-for-byte: the local mixed \
-             directory stays supported (R4), only the push is refused"
+            diff.outgoing(),
+            &[EventChange::Create(event.clone().into())],
+            "only the event half of the pair may be outgoing",
         );
-    }
+        assert_eq!(diff.withheld_task_pushes(), 1);
 
-    /// The pair is a property of the outgoing *set*, not of one change shape.
-    /// Deleting the event while creating the task still puts both kinds under
-    /// one UID into one collection, and the changes carry no guaranteed order:
-    /// create-first is a `409`/silent-`204` against the event's own resource,
-    /// delete-first destroys the event and then fails. Refused either way.
-    #[tokio::test]
-    async fn a_pair_split_across_a_delete_and_a_create_is_refused_too() {
-        let (_tmp, mock, mut connection) = writable_connection();
+        connection.apply_outgoing_diff(&diff).await.unwrap();
 
-        let uid = EventUid::new("shared-123@u-crawler");
-        let mut event = Event::new("Assignment 3 - submission window", test_event_time());
-        event.uid = uid.clone();
-        let mut todo = Todo::new("Assignment 3 - hand in");
-        todo.uid = uid.clone();
+        assert_eq!(
+            mock.captured_request::<rpc::CreateEvent>().event.uid,
+            uid,
+            "the event is what reaches the collection",
+        );
 
-        connection.local().create_event(todo.clone()).unwrap();
+        // The local mixed directory stays supported (R4): both files survive,
+        // and the task's bytes are untouched by a push it took no part in.
+        assert!(event_path.is_file() && todo_path.is_file());
+        assert_eq!(std::fs::read(&todo_path).unwrap(), before.1);
 
-        let diff = CalendarDiff::from_changes(
+        // The same pair split across a delete and a create: still one half.
+        let split = CalendarDiff::from_changes(
             vec![
                 EventChange::Delete(event.into()),
                 EventChange::Create(todo.into()),
             ],
             vec![],
         );
-
-        let err = connection
-            .apply_outgoing_diff(&diff)
-            .await
-            .expect_err("a delete/create pair under one UID is still a pair");
-
-        assert!(
-            err.to_string().contains("shared-123@u-crawler"),
-            "got: {err}"
-        );
-        assert!(
-            !mock.received_a_request(),
-            "the delete must not reach the wire either",
-        );
+        assert_eq!(split.outgoing().len(), 1);
+        assert_eq!(split.withheld_task_pushes(), 1);
+        assert!(matches!(
+            split.outgoing()[0],
+            EventChange::Delete(CalendarItem::Event(_))
+        ));
     }
 
-    /// The guard is about a same-UID **pair across kinds**, and nothing wider.
-    /// A same-kind push of two unrelated items, and two same-UID items of the
-    /// *same* kind (a recurrence override and its master), must still push:
-    /// widening this predicate would break ordinary event sync (R1/R2).
+    /// R1/R2, the other side of the withholding predicate: it keys on the
+    /// component **kind** and nothing wider. Two same-UID items of the *same*
+    /// kind — a recurrence override and its master — are ordinary event sync
+    /// and must still push, in full. Widening the predicate breaks that.
     #[tokio::test]
-    async fn two_outgoing_events_are_not_a_pair_and_still_push() {
+    async fn two_same_uid_events_are_not_a_pair_and_still_push() {
         let (_tmp, mock, mut connection) = writable_connection();
 
         let first = test_event();
@@ -1643,16 +1614,6 @@ END:VCALENDAR\r\n";
             .collect();
         snapshot.sort_by(|a, b| a.0.cmp(&b.0));
         snapshot
-    }
-
-    /// `calendar_snapshot` restricted to calendar data. The sync-state file is
-    /// created by the empty-vec flush even on a refused push, and its presence
-    /// is not a change to any event.
-    fn ics_snapshot(path: &std::path::Path) -> Vec<(String, Option<CalendarItem>)> {
-        calendar_snapshot(path)
-            .into_iter()
-            .filter(|(name, _)| name.ends_with(".ics"))
-            .collect()
     }
 
     fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {

@@ -8,8 +8,8 @@ use std::path::PathBuf;
 /// One supported calendar component parsed from an ICS document.
 ///
 /// An item's kind comes solely from the component it was parsed from and is
-/// preserved across every boundary (R7). Adding `VJOURNAL` later is one more
-/// variant, one more struct and one more match arm (R93).
+/// preserved across every boundary. Adding `VJOURNAL` later is one more
+/// variant, one more struct and one more match arm.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CalendarItem {
@@ -18,16 +18,19 @@ pub enum CalendarItem {
 }
 
 /// Components that are neither supported nor an error: ignored for counting
-/// and never reported as unsupported (R18).
+/// and never reported as unsupported.
 const IGNORED_COMPONENTS: [&str; 1] = ["VTIMEZONE"];
 
 impl CalendarItem {
     /// Parse an ICS document into its supported items, in document order.
     ///
     /// One ordered pass over `icalendar::Calendar::components` — never
-    /// `events()` then `todos()`, which would lose document order (R17).
-    /// An unsupported component aborts the pass with an error naming it; it is
-    /// never dropped, because a silent drop feeds the delete path (R19).
+    /// `events()` then `todos()`, which would lose document order.
+    /// An unsupported component beside a supported one is ignored — `main`
+    /// ignored it too, and it carries no identity the diff could read as a
+    /// delete. A document whose components are *all* unsupported still aborts
+    /// with an error naming them, because yielding nothing is what feeds the
+    /// delete path.
     pub fn from_ics_str(contents: &str) -> Result<Vec<Result<Self, EventError>>, EventError> {
         Ok(Self::parse_document(contents)?.items)
     }
@@ -36,7 +39,8 @@ impl CalendarItem {
     ///
     /// The path-less arity check, for RPC payloads and sync bases. The "none"
     /// case is not given its own variant here: bases are always written by
-    /// caldir, and the wire case is covered by R19 (R76).
+    /// caldir, and on the wire an unsupported component is already an error
+    /// naming itself.
     pub fn from_single_ics_str(contents: &str) -> Result<Self, EventError> {
         let items = Self::from_ics_str(contents)?;
 
@@ -49,12 +53,25 @@ impl CalendarItem {
         }
     }
 
-    /// Load the single supported item from an `.ics` file on disk (R32).
+    /// Load the single supported item from an `.ics` file on disk.
     ///
     /// The path-flavoured arity check, which distinguishes "no supported
     /// component" from "too many" so the message can tell a VTODO-only file
-    /// from an empty `VCALENDAR` (R75).
+    /// from an empty `VCALENDAR`.
     pub fn load(path: impl Into<PathBuf>) -> Result<Self, CalendarEventError> {
+        Self::load_with_ignored(path).map(|(item, _)| item)
+    }
+
+    /// [`Self::load`], plus the names of the unsupported components that sat
+    /// beside the item and were ignored.
+    ///
+    /// The ignored list is the other half of sibling tolerance: the item
+    /// loads, but nothing is dropped *silently* — `doctor` renders these so the user
+    /// learns the file holds data caldir will not preserve if it rewrites it
+    /// (`write_best_event_file` serializes one item and nothing else).
+    pub(crate) fn load_with_ignored(
+        path: impl Into<PathBuf>,
+    ) -> Result<(Self, Vec<String>), CalendarEventError> {
         let path = path.into();
 
         if !path.is_file() {
@@ -67,9 +84,12 @@ impl CalendarItem {
             .map_err(|err| CalendarEventError::InvalidEvent(path.clone(), err))?;
 
         let found_description = parsed.found_description();
+        let ignored = parsed.ignored;
 
         match <[Result<Self, EventError>; 1]>::try_from(parsed.items) {
-            Ok([result]) => result.map_err(|err| CalendarEventError::InvalidEvent(path, err)),
+            Ok([result]) => result
+                .map(|item| (item, ignored))
+                .map_err(|err| CalendarEventError::InvalidEvent(path, err)),
             Err(items) if items.is_empty() => Err(CalendarEventError::NoSupportedComponent {
                 path,
                 found: found_description,
@@ -90,7 +110,7 @@ impl CalendarItem {
     }
 
     /// The item's identity: `(kind, uid, recurrence_id)`. The kind is part of
-    /// the key, so a VEVENT and a VTODO sharing a UID never collide (R3).
+    /// the key, so a VEVENT and a VTODO sharing a UID never collide.
     pub fn instance_id(&self) -> EventInstanceId {
         match self {
             CalendarItem::Event(event) => event.event_instance_id(),
@@ -102,9 +122,9 @@ impl CalendarItem {
 
     /// The event backing this item, or `None` for any other kind.
     ///
-    /// Test-only since `L3-03`: the sync seams are item-typed end to end now,
-    /// so production never narrows here. It survives for the test-side base
-    /// accessor, which asserts against an `Event`.
+    /// Test-only: the sync seams are item-typed end to end, so production never
+    /// narrows here. It survives for the test-side base accessor, which asserts
+    /// against an `Event`.
     #[cfg(test)]
     pub(crate) fn as_event(&self) -> Option<&Event> {
         match self {
@@ -114,7 +134,7 @@ impl CalendarItem {
     }
 
     /// Whether the item is `STATUS:CANCELLED`, in whichever kind's own value
-    /// set (R42).
+    /// set.
     ///
     /// `CANCELLED` **only**. `COMPLETED` is not a tombstone: a task can be
     /// completed on the server and still have to be created locally, and the
@@ -128,7 +148,7 @@ impl CalendarItem {
     }
 
     /// `SEQUENCE`, the tiebreak direction detection falls back on when the
-    /// remote reports no `LAST-MODIFIED` (R40).
+    /// remote reports no `LAST-MODIFIED`.
     pub(crate) fn sequence(&self) -> i32 {
         match self {
             CalendarItem::Event(event) => event.sequence,
@@ -136,19 +156,20 @@ impl CalendarItem {
         }
     }
 
-    /// Narrow to an `Event` for the event-only RPC wire (R70, R71).
+    /// Narrow to an `Event` for the event-only RPC wire.
     ///
     /// Not a drop: the `Err` is the arity error the wire already reports, so a
     /// task push aborts loudly instead of being pushed as something else.
     ///
-    /// **This error text is a contract, not an accident (R71).** ADR-07, which
-    /// would have produced a friendlier message here, was cut by user
-    /// decision; the accepted price is that a task in a calendar backed by an
-    /// event-only provider fails that calendar's push, every sync, with exactly
-    /// `expected 1 event(s) in ICS, found 0`. Ugly, and deliberately so — a
-    /// prettier message reached by inspecting what the provider can carry *is*
-    /// ADR-07, and skipping the task instead would be a silent data drop
-    /// (R19). Locked by `remote::tests::a_task_change_aborts_instead_of_
+    /// **This error text is a contract, not an accident.** A friendlier
+    /// message here would mean asking each provider what component kinds it
+    /// can carry, which was deliberately not built; the accepted price is that
+    /// a task in a calendar backed by an event-only provider fails that
+    /// calendar's push, every sync, with exactly
+    /// `expected 1 event(s) in ICS, found 0`. Ugly, and deliberately so — the
+    /// only prettier alternative is that capability negotiation, and skipping
+    /// the task instead would be a silent data drop.
+    /// Locked by `remote::tests::a_task_change_aborts_instead_of_
     /// reaching_the_provider`, its `_delete_` sibling, and
     /// `connection::tests::pushing_a_task_to_a_task_less_provider_fails_that_
     /// calendar_without_data_loss`. Do not soften it without moving those.
@@ -170,9 +191,9 @@ impl CalendarItem {
         }
     }
 
-    /// The filename stem for this item, from the kind's own slug rule (R33,
-    /// R34). Never a shared rule: an event's stem must stay byte-identical
-    /// (C1) while a task takes the reserved `_task__` prefix.
+    /// The filename stem for this item, from the kind's own slug rule. Never a
+    /// shared rule: an event's stem must stay byte-identical while a task takes
+    /// the reserved `_task__` prefix.
     pub(crate) fn base_slug(&self) -> String {
         match self {
             CalendarItem::Event(event) => event.base_slug(),
@@ -180,7 +201,7 @@ impl CalendarItem {
         }
     }
 
-    /// Serialize to a single-component `VCALENDAR` document (R27, R32), from
+    /// Serialize to a single-component `VCALENDAR` document, from
     /// the kind's own serializer.
     pub(crate) fn to_ics_string(&self) -> String {
         match self {
@@ -190,17 +211,17 @@ impl CalendarItem {
     }
 
     /// Whether this item falls inside `[from, to]` — the in-window predicate
-    /// the diff's delete/create decision hangs on (R44, R45).
+    /// the diff's delete/create decision hangs on.
     ///
     /// One predicate per kind, never one shared rule. Events keep
-    /// [`Event::has_occurrence_in_range`] byte for byte (R45, R2); tasks get
+    /// [`Event::has_occurrence_in_range`] byte for byte; tasks get
     /// RFC 4791 §9.9's "core's rule" via [`Todo::occurs_in_range`].
     ///
-    /// Polarity, because it is easy to state backwards (R47): `false` makes
+    /// Polarity, because it is easy to state backwards: `false` makes
     /// the caller `continue` — **neither** a delete **nor** a create — while
     /// `true` is what *authorizes* a delete. An undated task is unconditionally
-    /// `true`, so it is the CalDAV query being bare of `<C:time-range>`
-    /// (R51/R58), not this predicate, that keeps it from being deleted.
+    /// `true`, so it is the CalDAV query being bare of `<C:time-range>`,
+    /// not this predicate, that keeps it from being deleted.
     pub(crate) fn has_occurrence_in_range(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> bool {
         match self {
             CalendarItem::Event(event) => event.has_occurrence_in_range(from, to),
@@ -241,12 +262,20 @@ impl CalendarItem {
                 }
                 // Ignored for counting, and never reported as unsupported.
                 _ if IGNORED_COMPONENTS.contains(&name.as_str()) => {}
-                // `CalendarComponent` is `#[non_exhaustive]`, so this arm is
-                // required. It errors and names what it found — there is no
-                // skip arm here, ever: a silent drop feeds the delete path
-                // (R19, INVIOLABLE).
-                _ => return Err(EventError::UnsupportedComponent(name)),
+                // Recorded, never dropped on the floor: the pass survives so a
+                // supported sibling still loads, and the name is handed back
+                // for `doctor` to report.
+                _ => parsed.ignored.push(name),
             }
+        }
+
+        // The property being defended is that a document never *silently
+        // yields nothing*. That is the zero-supported case, and it stays an error
+        // naming what was there. A supported component beside unsupported
+        // siblings carries its own identity, so ignoring the siblings cannot
+        // read to the diff as a delete — and `main` ignored them for years.
+        if parsed.items.is_empty() && !parsed.ignored.is_empty() {
+            return Err(EventError::UnsupportedComponent(parsed.ignored.join(", ")));
         }
 
         Ok(parsed)
@@ -272,11 +301,16 @@ struct ParsedDocument {
     /// Every component name seen, in document order — ignored ones included,
     /// so the "no supported component" error can say what *was* there.
     component_names: Vec<String>,
+    /// The unsupported components that were ignored, in document order.
+    /// `VTIMEZONE` is not one of them: it is expected furniture, not something
+    /// the user needs telling about.
+    ignored: Vec<String>,
 }
 
 impl ParsedDocument {
-    /// The `{names}` half of R75's "none" message: the components present, or
-    /// the literal `nothing` for a component-less `VCALENDAR`.
+    /// The `{names}` half of the "no supported component" message: the
+    /// components present, or the literal `nothing` for a component-less
+    /// `VCALENDAR`.
     fn found_description(&self) -> String {
         if self.component_names.is_empty() {
             return "nothing".to_string();
@@ -399,12 +433,19 @@ END:VTODO\r\nEND:VCALENDAR\r\n";
         );
     }
 
-    /// R19 on the wire/base seam: an unsupported component aborts the pass
-    /// rather than yielding a short vector a caller would read as a delete.
+    /// R19 on the wire/base seam, "nothing supported" half: a document whose
+    /// only components are unsupported must not yield an empty vector a caller
+    /// would read as a delete. It aborts, naming what it found.
+    ///
+    /// **Changed by the sibling-tolerance fix.** Before, this document was
+    /// `VEVENT` + `VFREEBUSY` and asserted the whole pass aborted — which is
+    /// exactly the regression the fix removes (`main` loaded the event and
+    /// ignored the sibling). The R19 property it was reaching for lives in the
+    /// *zero-supported* case, so the fixture drops the `VEVENT` and the
+    /// assertion is unchanged.
     #[test]
     fn an_unsupported_component_aborts_rather_than_shortening_the_vec() {
         let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
-BEGIN:VEVENT\r\nUID:a@caldir\r\nDTSTART:20260301T100000Z\r\nEND:VEVENT\r\n\
 BEGIN:VFREEBUSY\r\nUID:b@caldir\r\nEND:VFREEBUSY\r\nEND:VCALENDAR\r\n";
 
         let err = CalendarItem::from_ics_str(ics).unwrap_err();
@@ -416,12 +457,15 @@ BEGIN:VFREEBUSY\r\nUID:b@caldir\r\nEND:VFREEBUSY\r\nEND:VCALENDAR\r\n";
     }
 
     /// `VVENUE` reaches the pass as its own `CalendarComponent` variant, not
-    /// as `Other` — it must still be named, not skipped.
+    /// as `Other` — a document holding only one must still be named, not
+    /// silently empty.
+    ///
+    /// **Changed by the sibling-tolerance fix**, for the same reason as its
+    /// neighbour: the fixture used to carry a `VEVENT` beside the `VVENUE`.
     #[test]
     fn a_vvenue_is_unsupported_and_named() {
         let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
 BEGIN:VVENUE\r\nUID:venue@caldir\r\nEND:VVENUE\r\n\
-BEGIN:VEVENT\r\nUID:a@caldir\r\nDTSTART:20260301T100000Z\r\nEND:VEVENT\r\n\
 END:VCALENDAR\r\n";
 
         let err = CalendarItem::from_ics_str(ics).unwrap_err();
@@ -430,5 +474,112 @@ END:VCALENDAR\r\n";
             matches!(err, EventError::UnsupportedComponent(ref name) if name == "VVENUE"),
             "got {err:?}"
         );
+    }
+
+    /// The regression this whole seam exists to prevent: on `main`,
+    /// `icalendar.events()` ignored every non-`VEVENT` component, so a `VEVENT`
+    /// beside a `VFREEBUSY`, a `VJOURNAL`, a stray top-level `VALARM` or an
+    /// `X-` component loaded fine. All four are legal `icalbody` content per
+    /// RFC 5545 §3.4. Erroring the document lost the event entirely — measured
+    /// as `--json` visibility 1 -> 0 — and then suppressed every delete for
+    /// that calendar (C7).
+    #[test]
+    fn one_supported_component_still_loads_beside_unsupported_siblings() {
+        for sibling in [
+            "BEGIN:VFREEBUSY\r\nUID:fb@caldir\r\nEND:VFREEBUSY\r\n",
+            "BEGIN:VJOURNAL\r\nUID:j@caldir\r\nEND:VJOURNAL\r\n",
+            "BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\n",
+            "BEGIN:X-WR-CUSTOM\r\nX-THING:1\r\nEND:X-WR-CUSTOM\r\n",
+        ] {
+            let ics = format!(
+                "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VEVENT\r\nUID:a@caldir\r\nDTSTART:20260301T100000Z\r\nEND:VEVENT\r\n\
+{sibling}END:VCALENDAR\r\n"
+            );
+
+            let item = CalendarItem::from_single_ics_str(&ics)
+                .unwrap_or_else(|err| panic!("sibling {sibling:?} lost the event: {err:?}"));
+
+            assert!(
+                matches!(item, CalendarItem::Event(ref event) if event.uid.as_str() == "a@caldir"),
+                "sibling {sibling:?} produced {item:?}"
+            );
+        }
+    }
+
+    /// The arity rules the fix must not weaken: two supported components are
+    /// still too many, even when an unsupported sibling sits beside them.
+    #[test]
+    fn two_supported_components_are_still_an_error_beside_a_sibling() {
+        let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VEVENT\r\nUID:a@caldir\r\nDTSTART:20260301T100000Z\r\nEND:VEVENT\r\n\
+BEGIN:VFREEBUSY\r\nUID:fb@caldir\r\nEND:VFREEBUSY\r\n\
+BEGIN:VTODO\r\nUID:b@caldir\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
+
+        assert!(matches!(
+            CalendarItem::from_single_ics_str(ics),
+            Err(EventError::UnexpectedComponentCount {
+                expected: 1,
+                found: 2
+            })
+        ));
+    }
+
+    /// Zero supported components still errors, and still names every
+    /// unsupported component it found — one message, in document order.
+    #[test]
+    fn zero_supported_components_names_everything_it_found() {
+        let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VJOURNAL\r\nUID:j@caldir\r\nEND:VJOURNAL\r\n\
+BEGIN:VFREEBUSY\r\nUID:fb@caldir\r\nEND:VFREEBUSY\r\nEND:VCALENDAR\r\n";
+
+        let err = CalendarItem::from_ics_str(ics).unwrap_err();
+
+        assert!(
+            matches!(err, EventError::UnsupportedComponent(ref names) if names == "VJOURNAL, VFREEBUSY"),
+            "got {err:?}"
+        );
+    }
+
+    /// An ignored sibling is never silent (R19): the loader hands its name
+    /// back so `doctor` can tell the user the file holds something caldir will
+    /// drop the next time it rewrites it.
+    #[test]
+    fn an_ignored_sibling_is_reported_to_the_caller() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("siblings.ics");
+        std::fs::write(
+            &path,
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VEVENT\r\nUID:a@caldir\r\nDTSTART:20260301T100000Z\r\nEND:VEVENT\r\n\
+BEGIN:VFREEBUSY\r\nUID:fb@caldir\r\nEND:VFREEBUSY\r\nEND:VCALENDAR\r\n",
+        )
+        .unwrap();
+
+        let (item, ignored) = CalendarItem::load_with_ignored(&path).unwrap();
+
+        assert!(matches!(item, CalendarItem::Event(_)));
+        assert_eq!(ignored, vec!["VFREEBUSY".to_string()]);
+    }
+
+    /// A `VTIMEZONE` is *ignored for counting* (R18) but is not a surprise —
+    /// it must not be reported as something caldir is dropping, or every zoned
+    /// file in the caldir would grow a warning.
+    #[test]
+    fn a_vtimezone_is_not_reported_as_an_ignored_sibling() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("zoned.ics");
+        std::fs::write(
+            &path,
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VTIMEZONE\r\nTZID:Europe/Stockholm\r\nEND:VTIMEZONE\r\n\
+BEGIN:VEVENT\r\nUID:a@caldir\r\nDTSTART:20260301T100000Z\r\nEND:VEVENT\r\n\
+END:VCALENDAR\r\n",
+        )
+        .unwrap();
+
+        let (_, ignored) = CalendarItem::load_with_ignored(&path).unwrap();
+
+        assert!(ignored.is_empty(), "got {ignored:?}");
     }
 }

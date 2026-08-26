@@ -13,21 +13,21 @@ impl TryFrom<&icalendar::Todo> for Todo {
         let uid = value.get_uid().ok_or(EventError::MissingUid)?.to_string();
 
         // No `MissingStart` mirror: a task legitimately has neither DTSTART nor
-        // DUE (R20). `EventTime::from` is what normalizes an inbound TZID to
-        // IANA, so both go through it (R21).
+        // DUE. `EventTime::from` is what normalizes an inbound TZID to IANA, so
+        // both go through it.
         //
         // `present_or_unparseable` is what keeps *absent* (legal, `None`) apart
         // from *present but unreadable* (an error, F-2). The crate leaves the
         // raw property on the component either way, so without it a malformed
-        // DUE turned a dated task into an undated one — silently, and R46 makes
-        // undated unconditionally in-window.
+        // DUE turned a dated task into an undated one — silently, and undated
+        // is unconditionally in-window.
         let start =
             present_or_unparseable(value, "DTSTART", value.get_start().map(EventTime::from))?;
         let due = present_or_unparseable(value, "DUE", value.get_due().map(EventTime::from))?;
 
         // COMPLETED is read from the raw property: `get_completed()` returns
         // `None` for a non-UTC value while leaving the property in place, so a
-        // floating COMPLETED would vanish (R22).
+        // floating COMPLETED would vanish.
         let completed =
             present_or_unparseable(value, "COMPLETED", raw_date_time(value, "COMPLETED"))?;
 
@@ -35,7 +35,7 @@ impl TryFrom<&icalendar::Todo> for Todo {
         // any value outside its own enum. NEEDS-ACTION is the RFC 5545 default
         // for a task, so an absent line and an explicit NEEDS-ACTION are the
         // same state. An unrecognised value is DROPPED, not round-tripped —
-        // `TodoStatus` is strictly four-valued (R14, pinned by T-14).
+        // `TodoStatus` is strictly four-valued.
         let status = value
             .property_value("STATUS")
             .and_then(TodoStatus::from_ics_str)
@@ -48,7 +48,7 @@ impl TryFrom<&icalendar::Todo> for Todo {
         // failing to fit the type and vanishing (F-4).
         let priority = integer_property(value, "PRIORITY")?;
 
-        // The same filter events use (R23). Only `X-` properties are
+        // The same filter events use. Only `X-` properties are
         // captured; nothing else is ever put into a passthrough bag.
         let x_properties = value
             .properties()
@@ -93,9 +93,9 @@ impl TryFrom<&icalendar::Todo> for Todo {
             due,
             status,
             completed,
-            // Raw, and never synthesized from STATUS — nor STATUS from it
-            // (R68, R46). Same `INTEGER` treatment as PRIORITY, so the two
-            // behave identically at the edge (F-4).
+            // Raw, and never synthesized from STATUS — nor STATUS from it. Same
+            // `INTEGER` treatment as PRIORITY, so the two behave identically at
+            // the edge (F-4).
             percent_complete: integer_property(value, "PERCENT-COMPLETE")?,
             priority,
             url: value.property_value("URL").map(ToString::to_string),
@@ -138,7 +138,7 @@ fn raw_utc_date_time(value: &icalendar::Todo, name: &str) -> Option<DateTime<Utc
 
 // A bare `SUMMARY:` line carries no information `None` doesn't. Mirrors the
 // event rule so cross-provider comparison stays stable; deliberately a copy
-// rather than a shared helper, because R2 forbids touching the event codec.
+// rather than a shared helper, so the event codec stays untouched.
 fn non_empty(s: Option<&str>) -> Option<String> {
     s.filter(|v| !v.is_empty()).map(ToString::to_string)
 }
@@ -151,7 +151,7 @@ fn raw_date_time(value: &icalendar::Todo, name: &str) -> Option<EventTime> {
 
 // `None` from a reader means one of two very different things: the property was
 // absent, or it was there and could not be read. The crate keeps the raw
-// property in the second case, which is how they are told apart (R19).
+// property in the second case, which is how they are told apart.
 fn present_or_unparseable<T>(
     value: &icalendar::Todo,
     name: &str,
@@ -167,8 +167,8 @@ fn present_or_unparseable<T>(
 }
 
 // An RFC 5545 `INTEGER` property, read raw and never clamped. Out of the
-// property's own documented range is legal input and round-trips verbatim
-// (R13); not an integer at all is an error, never a silent drop (R19).
+// property's own documented range is legal input and round-trips verbatim;
+// not an integer at all is an error, never a silent drop.
 fn integer_property(value: &icalendar::Todo, name: &str) -> Result<Option<i32>, EventError> {
     value
         .property_value(name)

@@ -95,12 +95,12 @@ fn collect_invites(
         let cal_slug = cal.slug().unwrap_or("(Unknown calendar)").to_string();
 
         for item in items {
-            // An invitation is meaningless on a task (R81): a VTODO carries no
+            // An invitation is meaningless on a task: a VTODO carries no
             // invite to answer, whether or not it holds an ATTENDEE — the
             // property is in the MVP set and round-trips. So this narrowing is
             // permanent, not deferred. Display-only: the task stays in the
             // calendar listing, and no deletion is inferred from its absence
-            // here (R19).
+            // here.
             let CalendarItem::Event(event) = item else {
                 continue;
             };

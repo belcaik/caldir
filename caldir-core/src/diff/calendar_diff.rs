@@ -2,19 +2,23 @@ use std::collections::{HashMap, HashSet};
 
 use super::event_change::EventChange;
 use crate::calendar::{CalendarListing, SyncBases};
+use crate::event::ComponentKind;
 use crate::item::CalendarItem;
 use crate::{CalendarEvent, DateRange, RemoteEvent};
 
 pub struct CalendarDiff {
     outgoing: Vec<EventChange>,
     incoming: Vec<EventChange>,
-    /// Whether R49's version-skew belt actually suppressed a task delete on
+    /// Whether the version-skew belt actually suppressed a task delete on
     /// this run. See [`CalendarDiff::suppressed_task_deletes`].
     suppressed_task_deletes: bool,
+    /// How many outgoing changes the event-only wire withheld on this run. See
+    /// [`CalendarDiff::withheld_task_pushes`].
+    withheld_task_pushes: usize,
 }
 
 impl CalendarDiff {
-    /// Diff a local listing against the remote. R48: a listing that skipped an
+    /// Diff a local listing against the remote. A listing that skipped an
     /// unreadable file is known-incomplete, so no local absence proves a delete
     /// and every delete for this calendar is suppressed, both directions.
     pub(crate) fn compute_from_listing(
@@ -45,7 +49,7 @@ impl CalendarDiff {
         range: &DateRange,
         deletes: Deletes,
     ) -> Self {
-        // Keyed by the kind-carrying identity (R36): a VEVENT and a VTODO
+        // Keyed by the kind-carrying identity: a VEVENT and a VTODO
         // sharing a UID are two entries on each side, so `.collect()` cannot
         // silently merge them and no lookup can match across kinds.
         let local_item_ids: HashSet<_> = local_events
@@ -58,11 +62,11 @@ impl CalendarDiff {
             .map(|e| (e.item().instance_id(), e))
             .collect();
 
-        // R49 version-skew belt: a pre-VTODO provider still filters on VEVENT
-        // and reports no tasks at all. Their total absence is version skew,
-        // not a delete. Scoped to *tasks*, so event deletes are untouched
-        // (R1, R2), and to the *all-tasks-absent* case, so a task missing from
-        // a task-carrying response is still a real delete (R99).
+        // Version-skew belt: a pre-VTODO provider still filters on VEVENT and
+        // reports no tasks at all. Their total absence is version skew, not a
+        // delete. Scoped to *tasks*, so event deletes are untouched, and to the
+        // *all-tasks-absent* case, so a task missing from a task-carrying
+        // response is still a real delete.
         //
         // Decided once, here, from the inputs: re-deriving it per branch is
         // how the two suppression sites drift apart under a later edit.
@@ -86,7 +90,7 @@ impl CalendarDiff {
 
                 // Both cancelled: treat as in-sync regardless of field drift.
                 // Cancelled items are historical; we don't churn syncing them.
-                // `CANCELLED` only, never `COMPLETED` (R42).
+                // `CANCELLED` only, never `COMPLETED`.
                 if item.is_cancelled() && remote_event.item().is_cancelled() {
                     continue;
                 }
@@ -125,9 +129,9 @@ impl CalendarDiff {
             // Out-of-window items aren't in the remote response, so we
             // can't tell if they're deleted or just out of range. Skip.
             //
-            // Component-aware (R44): events keep `has_occurrence_in_range`
-            // untouched, tasks get RFC 4791 §9.9's "core's rule". Polarity
-            // (R47): `false` here means `continue` — neither the delete below
+            // Component-aware: events keep `has_occurrence_in_range`
+            // untouched, tasks get RFC 4791 §9.9's "core's rule". Polarity:
+            // `false` here means `continue` — neither the delete below
             // nor the create — and `true` is what authorizes the delete.
             if let (Some(from), Some(to)) = (range.from, range.to)
                 && !item.has_occurrence_in_range(from, to)
@@ -136,15 +140,15 @@ impl CalendarDiff {
             }
 
             if sync_bases.get(&id).is_some() {
-                // R48: suppressed when the local listing is incomplete.
-                // R49: suppressed for tasks when the remote reported none.
+                // Suppressed when the local listing is incomplete, and for
+                // tasks when the remote reported none.
                 let suppressed_by_version_skew =
                     matches!(item, CalendarItem::Todo(_)) && !remote_reports_tasks;
 
                 // Recorded only where a delete was actually withheld, so the
                 // signal means "the belt cost you something", not merely "the
                 // response held no tasks" — which is the ordinary state of
-                // every task-free calendar (R50).
+                // every task-free calendar.
                 suppressed_task_deletes |= suppressed_by_version_skew;
 
                 if deletes == Deletes::Allowed && !suppressed_by_version_skew {
@@ -168,7 +172,7 @@ impl CalendarDiff {
             // A missing file is semantically equivalent to STATUS:CANCELLED —
             // both mean "not active". Avoids resurrecting tombstones on pull
             // and avoids spurious push-deletes for events Google has already
-            // cancelled. `CANCELLED` only, never `COMPLETED` (R42): a remote
+            // cancelled. `CANCELLED` only, never `COMPLETED`: a remote
             // completed task must still be created locally.
             if item.is_cancelled() {
                 continue;
@@ -176,8 +180,8 @@ impl CalendarDiff {
 
             if sync_bases.get(&id).is_some() {
                 // Remote item was in local, gone now. Delete remotely —
-                // unless R48 suppressed deletes: the local file may only be
-                // unreadable, not gone.
+                // unless an incomplete local listing suppressed deletes: the
+                // local file may only be unreadable, not gone.
                 if deletes == Deletes::Allowed {
                     outgoing.push(EventChange::Delete(item.clone()));
                 }
@@ -187,28 +191,45 @@ impl CalendarDiff {
             }
         }
 
+        let withheld_task_pushes = withhold_task_pushes(&mut outgoing);
+
         CalendarDiff {
             outgoing,
             incoming,
             suppressed_task_deletes,
+            withheld_task_pushes,
         }
     }
 
-    /// Whether R49's version-skew belt withheld at least one task delete.
+    /// Whether the version-skew belt withheld at least one task delete.
     ///
     /// A remote response carrying **zero** tasks is indistinguishable from a
     /// pre-VTODO provider or a server that cannot answer a VTODO query, so
     /// core refuses to read it as "every task was deleted" and keeps the
-    /// files. R50 names the price: a genuine remote deletion of *every* task
-    /// goes unnoticed until something reports a task again.
+    /// files. The price: a genuine remote deletion of *every* task goes
+    /// unnoticed until something reports a task again.
     ///
     /// The suppression must not be silent — a self-perpetuating belt nobody
     /// is told about is the failure mode this accessor exists to prevent.
-    /// Consumed by the CLI's diff renderer (`L7-07`): `status`, `sync` and
+    /// Consumed by the CLI's diff renderer: `status`, `sync` and
     /// `pull` print a warning line per calendar whenever this is true, and the
     /// warning survives an otherwise-empty diff.
     pub fn suppressed_task_deletes(&self) -> bool {
         self.suppressed_task_deletes
+    }
+
+    /// How many outgoing changes were withheld because they are tasks.
+    ///
+    /// The outbound RPC field is an `Event`, so a task cannot ride the sync
+    /// wire at all. It is therefore dropped from the outgoing set the way a
+    /// read-only calendar drops everything — never queued, never attempted —
+    /// so a mixed calendar's *events* keep syncing exactly as they would
+    /// without it. Tasks are pull-only.
+    ///
+    /// The withholding must not be silent: the CLI renders a warning
+    /// line per calendar on every surface that shows outgoing changes.
+    pub fn withheld_task_pushes(&self) -> usize {
+        self.withheld_task_pushes
     }
 
     pub fn incoming(&self) -> &[EventChange] {
@@ -227,6 +248,9 @@ impl CalendarDiff {
     /// could never be applied — surfacing them as pending pushes is misleading.
     pub fn discard_outgoing(&mut self) {
         self.outgoing.clear();
+        // A read-only calendar pushes nothing at all, so singling tasks out
+        // there would report a restriction that is not the one in force.
+        self.withheld_task_pushes = 0;
     }
 }
 
@@ -250,16 +274,31 @@ impl CalendarDiff {
         )
     }
 
-    pub(crate) fn from_changes(outgoing: Vec<EventChange>, incoming: Vec<EventChange>) -> Self {
+    /// Applies the same R70 withholding as the production path, so a test
+    /// diff cannot hold an outgoing shape production can never produce.
+    pub(crate) fn from_changes(mut outgoing: Vec<EventChange>, incoming: Vec<EventChange>) -> Self {
+        let withheld_task_pushes = withhold_task_pushes(&mut outgoing);
         Self {
             outgoing,
             incoming,
             suppressed_task_deletes: false,
+            withheld_task_pushes,
         }
     }
 }
 
-/// Whether absence from the local listing may be inferred as a delete (R48).
+/// Drop every non-`VEVENT` change from the outgoing set, returning how many
+/// were dropped.
+///
+/// Keyed on the kind, not on the Rust type: a component kind added later is
+/// withheld here rather than smuggled onto an event-only wire.
+fn withhold_task_pushes(outgoing: &mut Vec<EventChange>) -> usize {
+    let before = outgoing.len();
+    outgoing.retain(|change| change.written_item().instance_id().kind() == ComponentKind::Event);
+    before - outgoing.len()
+}
+
+/// Whether absence from the local listing may be inferred as a delete.
 /// Defaults to `Allowed` everywhere the listing is known complete.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Deletes {
@@ -307,7 +346,7 @@ fn local_is_newer(local: &CalendarEvent, local_item: &CalendarItem, remote: &Rem
 
     match (local.modified_at(), remote.modified_at()) {
         (Some(l), Some(r)) => l > r,
-        // R41: Push-biased. A wrong Pull destroys the user's local edit with
+        // Push-biased. A wrong Pull destroys the user's local edit with
         // no recovery, so this arm is not a tiebreak to tidy up.
         (Some(_), None) => true,
         (None, Some(_)) => false,
@@ -1438,8 +1477,14 @@ mod tests {
     /// T-26 (R98, A-4). An undated task with no base is a *create*, never a
     /// skip: R44 row N/N makes the window predicate unconditionally true, so
     /// a bounded window must not swallow it.
+    ///
+    /// **Changed from asserting `outgoing == [Create(Todo)]`.** A task is
+    /// never outgoing now (R70), so the create is withheld — but *withheld*
+    /// and *skipped by the window* are different states, and the withheld
+    /// count is what tells them apart. Assert the count, or R44's window
+    /// predicate could silently invert for undated tasks again.
     #[test]
-    fn an_undated_task_with_no_base_produces_one_outgoing_create() {
+    fn an_undated_task_with_no_base_is_a_withheld_create_not_a_window_skip() {
         let (_tmp, calendar) = test_calendar();
         let todo = Todo::new("Undated, never synced");
         let calendar_event = CalendarEvent::create(&calendar, todo.clone()).unwrap();
@@ -1455,11 +1500,13 @@ mod tests {
         );
 
         assert_eq!(
-            diff.outgoing,
-            vec![EventChange::Create(CalendarItem::Todo(todo))],
-            "R98: an undated task with no base is pushed, not skipped"
+            diff.withheld_task_pushes, 1,
+            "R98: an undated task with no base reaches the outgoing set (and is \
+             then withheld by R70), rather than being skipped by the window"
         );
+        assert_eq!(diff.outgoing, vec![]);
         assert_eq!(diff.incoming, vec![]);
+        let _ = todo;
     }
 
     /// T-27 (R99, A-5). Absence stays meaningful. The remote response is
@@ -1753,8 +1800,14 @@ mod tests {
     /// T-32 (R41). The Push-biased `(Some, None)` fallback is existing VEVENT
     /// behaviour and must not invert for tasks: a wrong Pull destroys the
     /// user's local edit with no recovery.
+    ///
+    /// **Changed from asserting `outgoing == [Update { .. }]`.** A task is
+    /// never outgoing now (R70), so the push is withheld — but the direction
+    /// decision it withholds is exactly what protects the local edit: a Pull
+    /// would overwrite the file, and the assertion that `incoming` is empty is
+    /// the one that catches an inverted bias.
     #[test]
-    fn a_task_with_no_last_modified_and_no_sequence_pushes() {
+    fn a_task_with_no_last_modified_and_no_sequence_pushes_rather_than_pulls() {
         let (_tmp, calendar) = test_calendar();
 
         let mut local = Todo::new("Edited locally");
@@ -1775,11 +1828,7 @@ mod tests {
         );
 
         assert_eq!(
-            diff.outgoing,
-            vec![EventChange::Update {
-                from: CalendarItem::Todo(remote),
-                to: CalendarItem::Todo(local),
-            }],
+            diff.withheld_task_pushes, 1,
             "R41: no LAST-MODIFIED and no SEQUENCE stays Push-biased for tasks"
         );
         assert_eq!(diff.incoming, vec![], "R41: never an incoming update here");

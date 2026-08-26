@@ -98,15 +98,6 @@ async fn push_connection(
         }
     };
 
-    // Asked *before* the diff is rendered. A refused push applies nothing, so
-    // painting its items with the green `+` that means "pushed" would describe
-    // work that never happens — the failure then reads as a success followed
-    // by a confusing error.
-    if let Err(e) = connection.check_outgoing(&diff) {
-        report(&e);
-        return false;
-    }
-
     println!("{}", diff.render_push(verbose, caldir));
 
     if !allow_mass_delete(&diff, force) {

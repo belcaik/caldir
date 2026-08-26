@@ -3,25 +3,25 @@
 //! Two layers, deliberately:
 //! - [`item`] is the codec proper. It encodes and decodes a [`CalendarItem`]
 //!   and applies the **same** arity and unsupported-component rules as the
-//!   disk loader, `VTIMEZONE` exemption included (R54, R18, R102).
+//!   disk loader, `VTIMEZONE` exemption included.
 //! - the module-level [`serialize`]/[`deserialize`] used by
 //!   `#[serde(with = "crate::rpc::ics")]`, and [`Ics`], sit on top of it and
 //!   narrow to an `Event`, because the **outbound** RPC struct field is still
-//!   `Event` (R70).
+//!   `Event`.
 //!
 //! Two wire newtypes, not one, and that asymmetry is deliberate:
 //! - [`Ics`] is the **outbound** payload. It stays `Event`-only, so a task
-//!   pushed to a provider aborts loudly (R70, R71).
+//!   pushed to a provider aborts loudly.
 //! - [`ItemIcs`] is the **inbound** payload, carrying a whole [`CalendarItem`]
-//!   so `list_events` can hand a task back at all (R53).
+//!   so `list_events` can hand a task back at all.
 //!
 //! `WireValue::from_wire` is infallible, so neither newtype may narrow inside
-//! it — a narrowing there has no error channel and could only panic or drop
-//! (R19). Both put every fallible step in `Deserialize`, where serde's error
-//! channel is, and hold an already-decoded value afterwards.
+//! it — a narrowing there has no error channel and could only panic or drop.
+//! Both put every fallible step in `Deserialize`, where serde's error channel
+//! is, and hold an already-decoded value afterwards.
 //!
 //! Decode failure is loud in both layers, and that loudness is the whole
-//! reason an old core paired with a new provider is safe (R57): a VTODO
+//! reason an old core paired with a new provider is safe: a VTODO
 //! payload fails the `Vec<Event>` deserialization, one bad element fails the
 //! whole vector, the call errors, and the sync aborts **before any apply**.
 
@@ -55,7 +55,7 @@ impl<'de> Deserialize<'de> for Ics {
 /// Carries a decoded [`CalendarItem`], never a narrowing. That is what makes
 /// `WireValue::from_wire`'s infallible signature safe here: by the time a
 /// value exists, [`item::deserialize`] has already reported any failure
-/// through serde (R19, R57).
+/// through serde.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ItemIcs(pub(crate) CalendarItem);
 
@@ -78,19 +78,19 @@ impl<'de> Deserialize<'de> for ItemIcs {
 }
 
 /// The item-typed ICS codec — one supported component per document, of
-/// whichever kind (R54).
+/// whichever kind.
 ///
 /// Shaped as a module so a field can reach it as
 /// `#[serde(with = "crate::rpc::ics::item")]` the moment the method structs
-/// are item-typed (`L4-02`). Nothing here knows about `Event` specifically;
+/// are item-typed. Nothing here knows about `Event` specifically;
 /// the narrowing lives one layer up.
 pub(crate) mod item {
     use super::CalendarItem;
     use serde::{Deserialize, Deserializer, Serializer};
 
     /// Encode one item as a single-component `VCALENDAR` string, CRLF
-    /// throughout (R27, R28). The JSON is a bare string — never an object,
-    /// never a new field (R53).
+    /// throughout. The JSON is a bare string — never an object, never a new
+    /// field.
     pub(crate) fn serialize<S: Serializer>(
         item: &CalendarItem,
         serializer: S,
@@ -99,13 +99,13 @@ pub(crate) mod item {
     }
 
     /// Decode one item, routed through [`CalendarItem::from_single_ics_str`]
-    /// rather than a second wire-local counting loop — R54 is literally "the
-    /// same rules", and a wire-local loop is exactly where the `VTIMEZONE`
-    /// exemption gets forgotten (R18): every zoned task Radicale returns is a
-    /// multi-component `VCALENDAR` (probe Q-C, R102).
+    /// rather than a second wire-local counting loop — the wire must apply the
+    /// very same rules as the disk loader, and a wire-local loop is exactly
+    /// where the `VTIMEZONE` exemption gets forgotten: every zoned task
+    /// Radicale returns is a multi-component `VCALENDAR`.
     ///
     /// An unsupported component is an `Err` naming it, never a drop and never
-    /// an empty result (R19, C10). `Error::custom` flattens the error to its
+    /// an empty result. `Error::custom` flattens the error to its
     /// `Display`, which is why the component name has to be *in* that text.
     pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
@@ -117,18 +117,18 @@ pub(crate) mod item {
 
 pub(crate) fn serialize<S: Serializer>(event: &Event, serializer: S) -> Result<S::Ok, S::Error> {
     // One encoding path, not two: a second wire-local `to_ics_string()` call
-    // here is where the kinds would drift apart (R54). The clone costs one
+    // here is where the kinds would drift apart. The clone costs one
     // `Event` beside the ICS string the codec allocates anyway, and the bytes
-    // are `Event::to_ics_string`'s, unchanged (R1, R2).
+    // are `Event::to_ics_string`'s, unchanged.
     item::serialize(&CalendarItem::Event(event.clone()), serializer)
 }
 
 /// The wire payload stays an `Event`: retyping it to `CalendarItem` would put
 /// ~25 `cmd.event` sites across five provider crates in this feature's blast
-/// radius (R70). Decoding goes through the item codec, and a task is narrowed
-/// away here with the arity error the wire already reports (R71).
+/// radius. Decoding goes through the item codec, and a task is narrowed away
+/// here with the arity error the wire already reports.
 pub(crate) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Event, D::Error> {
-    // TODO(L6-01): pushing a task to a provider aborts here.
+    // TODO: pushing a task to a provider aborts here.
     item::deserialize(deserializer)?
         .into_event()
         .map_err(serde::de::Error::custom)
@@ -219,21 +219,44 @@ END:VCALENDAR\r\n";
         );
     }
 
-    /// `T-35` — R19/C10/R57: an unsupported data-bearing component is an
-    /// error naming it, never an `Ok` that quietly forgets it. A silent drop
-    /// makes the remote list arrive short, and a short remote list is what
-    /// feeds the delete path.
+    /// `T-35` — R19/C10/R57: a payload with **nothing** caldir supports is an
+    /// error naming what it held, never an `Ok` that quietly decodes to
+    /// nothing. A short remote list is what feeds the delete path.
+    ///
+    /// **Changed by the sibling-tolerance fix.** The fixture used to carry a
+    /// `VTODO` beside the `VJOURNAL` and assert the whole payload failed —
+    /// the same over-strict shape that lost a `VEVENT` next to a `VFREEBUSY`
+    /// on disk. The property R19 actually protects is "never yields nothing",
+    /// so the fixture drops the `VTODO` and the assertion is unchanged; the
+    /// sibling case is locked by the test below.
     #[test]
     fn decoding_an_unknown_component_errors_rather_than_dropping() {
         let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
 BEGIN:VJOURNAL\r\nUID:journal@u-crawler\r\nDTSTAMP:20260801T090000Z\r\nEND:VJOURNAL\r\n\
-BEGIN:VTODO\r\nUID:task@u-crawler\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
+END:VCALENDAR\r\n";
 
         let err = decode_item(ics).expect_err("an unsupported component must not decode");
 
         assert!(
             err.to_string().contains("VJOURNAL"),
             "the offending component must survive `Error::custom`, got {err}"
+        );
+    }
+
+    /// The wire seam gets the same rule as the disk loader, for the same
+    /// reason: a `VJOURNAL` beside the item carries no identity the diff could
+    /// read as a delete, and a server that returns one must not cost the user
+    /// the item it came with.
+    #[test]
+    fn an_unsupported_sibling_does_not_cost_the_item_on_the_wire() {
+        let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VJOURNAL\r\nUID:journal@u-crawler\r\nDTSTAMP:20260801T090000Z\r\nEND:VJOURNAL\r\n\
+BEGIN:VTODO\r\nUID:task@u-crawler\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
+
+        let item = decode_item(ics).expect("the VTODO must still decode");
+
+        assert!(
+            matches!(item, CalendarItem::Todo(ref todo) if todo.uid.as_str() == "task@u-crawler")
         );
     }
 

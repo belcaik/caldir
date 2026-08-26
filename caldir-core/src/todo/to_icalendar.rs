@@ -4,7 +4,7 @@ use icalendar::{Component, DatePerhapsTime, Property};
 // `icalendar::EventLike` is deliberately NOT imported in this module.
 // `event_impl! { Todo }` (icalendar 0.17.10 `components.rs:665`) implements it
 // for `icalendar::Todo`, which puts the FORBIDDEN `ends()` / `all_day()` in
-// scope and lets a `DTEND` — RFC-invalid on a VTODO (R8) — compile. Keeping the
+// scope and lets a `DTEND` — RFC-invalid on a VTODO — compile. Keeping the
 // trait out of scope is a compile-time barrier, not a convention: `DTSTART`,
 // `LOCATION` and `RECURRENCE-ID` are therefore written as raw properties below
 // rather than through `starts()`, `location()` and `recurrence_id()`.
@@ -16,7 +16,7 @@ impl From<&Todo> for icalendar::Todo {
         todo.uid(value.uid.as_str());
 
         // Both anchors are independent and neither is ever synthesized from the
-        // other (R9, R46). `due` must NEVER be routed through `ends()`.
+        // other. `due` must NEVER be routed through `ends()`.
         if let Some(start) = &value.start {
             todo.append_property(DatePerhapsTime::from(start).to_property("DTSTART"));
         }
@@ -34,7 +34,7 @@ impl From<&Todo> for icalendar::Todo {
         }
 
         // COMPLETED raw: `Todo::completed()` takes a `DateTime<Utc>`, so a
-        // legal floating or zoned value would be coerced or lost (R22).
+        // legal floating or zoned value would be coerced or lost.
         if let Some(completed) = &value.completed {
             todo.append_property(DatePerhapsTime::from(completed).to_property("COMPLETED"));
         }
@@ -45,7 +45,7 @@ impl From<&Todo> for icalendar::Todo {
 
         // PRIORITY raw: `Component::priority()` does `min(priority, 10)`, so an
         // out-of-range value — legal input that must round-trip verbatim — is
-        // silently corrupted on the way out (spec §6 PRIORITY row, T-15).
+        // silently corrupted on the way out (spec §6 PRIORITY row).
         if let Some(priority) = value.priority {
             todo.append_property(Property::new("PRIORITY", priority.to_string()));
         }
@@ -99,7 +99,7 @@ impl From<&Todo> for icalendar::Todo {
         // `Todo::to_ics_string`, never via `todo.alarm(...)`: the crate mints a
         // fresh `Uuid::new_v4()` and `DTSTAMP` into every serialized VALARM, so
         // two generations of the same task compare unequal and sync pushes
-        // forever (R24). See `Reminder::ics_block`.
+        // forever. See `Reminder::ics_block`.
 
         if let Some(url) = &value.url {
             todo.url(url);
@@ -115,7 +115,7 @@ impl From<&Todo> for icalendar::Todo {
 
         // DTSTAMP is deliberately never set: `Component::fmt_write`
         // (`components.rs:99-101`) stamps a fresh one at write time, which is
-        // exactly R25's "emitted, never modelled".
+        // exactly the rule for DTSTAMP: emitted, never modelled.
 
         todo.done()
     }

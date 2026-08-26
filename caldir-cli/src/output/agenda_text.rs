@@ -3,13 +3,15 @@ use chrono::{Duration, NaiveDate, Utc};
 use owo_colors::OwoColorize;
 
 use crate::output::TextRender;
-use crate::output::agenda::{Agenda, AgendaEntry, AgendaView, IncompleteCalendar, anchor};
+use crate::output::agenda::{
+    Agenda, AgendaEntry, AgendaView, IncompleteCalendar, IncompleteCause, UNKNOWN_CALENDAR, anchor,
+};
 use crate::output::event::{format_event_line, format_task_line, render_participation_status};
 use crate::output::time::{format_date_label, local_date};
 
 /// One rendered line: an entry, the day it is listed under, and the anchor it
 /// sits at. Undated items never become one — they have no day to be listed
-/// under (ADR-10 D3) — so this carries a plain `&EventTime`, and the sort below
+/// under — so this carries a plain `&EventTime`, and the sort below
 /// needs no "no time at all" branch.
 struct DisplayLine<'a> {
     day: NaiveDate,
@@ -31,7 +33,8 @@ impl TextRender for Agenda {
     }
 }
 
-/// R77 made visible on the agenda surfaces, not only under `doctor`.
+/// The never-silently-short rule, made visible on the agenda surfaces and not
+/// only under `doctor`.
 ///
 /// Built *before* the body, and prepended rather than appended, so an agenda
 /// that is empty **because** of the skip still says why — the same reason the
@@ -41,22 +44,35 @@ impl TextRender for Agenda {
 ///
 /// Empty when every calendar listed in full, so a clean agenda gains nothing —
 /// not even a trailing blank line (C13).
-fn incomplete_lines(incomplete: &[IncompleteCalendar]) -> Vec<String> {
+pub(crate) fn incomplete_lines(incomplete: &[IncompleteCalendar]) -> Vec<String> {
     incomplete
         .iter()
         .map(|calendar| {
-            let noun = if calendar.skipped == 1 {
-                "file"
-            } else {
-                "files"
-            };
-            format!(
-                "{} {} unreadable {} in {} (caldir doctor)",
-                "⚠".yellow(),
-                calendar.skipped,
-                noun,
-                calendar.calendar.as_deref().unwrap_or("(Unknown calendar)"),
-            )
+            let name = calendar.calendar.as_deref().unwrap_or(UNKNOWN_CALENDAR);
+
+            match calendar.cause {
+                // Byte-for-byte what this line has always said (C13).
+                IncompleteCause::UnreadableFiles(skipped) => {
+                    let noun = if skipped == 1 { "file" } else { "files" };
+                    format!(
+                        "{} {} unreadable {} in {} (caldir doctor)",
+                        "⚠".yellow(),
+                        skipped,
+                        noun,
+                        name,
+                    )
+                }
+                // Worded apart on purpose: no file of this calendar was
+                // reached, so there is no count to give, and nothing of it is
+                // below.
+                IncompleteCause::Unlistable => {
+                    format!(
+                        "{} {} could not be read at all (caldir doctor)",
+                        "⚠".yellow(),
+                        name
+                    )
+                }
+            }
         })
         .collect()
 }
@@ -150,7 +166,7 @@ impl TextRender for AgendaView {
 }
 
 impl AgendaView {
-    /// The undated tail (ADR-10 D3). An undated task belongs to no day, so it
+    /// The undated tail. An undated task belongs to no day, so it
     /// is never placed in a day group and never given an invented date.
     ///
     /// By default it is **counted, not listed**: one dimmed footer, so a
@@ -206,7 +222,7 @@ impl AgendaView {
     }
 }
 
-/// The kind tiebreak, mirroring `agenda.rs` (ADR-10 D2): at an identical
+/// The kind tiebreak, mirroring `agenda.rs`: at an identical
 /// instant an event comes before a task. It can never reorder two events.
 fn kind_ordinal(item: &CalendarItem) -> u8 {
     match item {
@@ -867,7 +883,7 @@ mod tests {
             view: event_only_view(today),
             incomplete: vec![IncompleteCalendar {
                 calendar: Some("work".to_string()),
-                skipped: 1,
+                cause: IncompleteCause::UnreadableFiles(1),
             }],
         };
 
@@ -894,11 +910,11 @@ mod tests {
             incomplete: vec![
                 IncompleteCalendar {
                     calendar: Some("work".to_string()),
-                    skipped: 2,
+                    cause: IncompleteCause::UnreadableFiles(2),
                 },
                 IncompleteCalendar {
                     calendar: None,
-                    skipped: 1,
+                    cause: IncompleteCause::UnreadableFiles(1),
                 },
             ],
         };
@@ -908,6 +924,70 @@ mod tests {
             concat!(
                 "\u{1b}[33m⚠\u{1b}[39m 2 unreadable files in work (caldir doctor)\n",
                 "\u{1b}[33m⚠\u{1b}[39m 1 unreadable file in (Unknown calendar) (caldir doctor)\n",
+                "\n",
+                "\u{1b}[1mToday\u{1b}[0m\n",
+                "  all-day Sprint demo \u{1b}[2m[work]\u{1b}[0m",
+            )
+        );
+    }
+
+    /// MAJOR-1. A calendar that could not be opened at all gets a notice too
+    /// — the same `⚠`, the same yellow, the same `(caldir doctor)` hint — but
+    /// **not** the file-count wording: no file of it was ever reached, so
+    /// there is no count, and nothing of it is in the agenda below.
+    #[test]
+    fn a_calendar_that_could_not_be_read_at_all_says_exactly_that() {
+        let today = chrono::Local::now().date_naive();
+
+        let agenda = Agenda {
+            view: event_only_view(today),
+            incomplete: vec![IncompleteCalendar {
+                calendar: Some("personal".to_string()),
+                cause: IncompleteCause::Unlistable,
+            }],
+        };
+
+        let rendered = agenda.to_text();
+        assert_eq!(
+            rendered,
+            concat!(
+                "\u{1b}[33m⚠\u{1b}[39m personal could not be read at all (caldir doctor)\n",
+                "\n",
+                "\u{1b}[1mToday\u{1b}[0m\n",
+                "  all-day Sprint demo \u{1b}[2m[work]\u{1b}[0m",
+            )
+        );
+        assert!(
+            !rendered.contains("unreadable file"),
+            "the two causes must not borrow each other's wording: {rendered}"
+        );
+    }
+
+    /// Both causes at once, each keeping its own wording — a run where one
+    /// calendar was short and another was gone entirely.
+    #[test]
+    fn the_two_causes_are_reported_side_by_side_without_merging() {
+        let today = chrono::Local::now().date_naive();
+
+        let agenda = Agenda {
+            view: event_only_view(today),
+            incomplete: vec![
+                IncompleteCalendar {
+                    calendar: Some("work".to_string()),
+                    cause: IncompleteCause::UnreadableFiles(2),
+                },
+                IncompleteCalendar {
+                    calendar: None,
+                    cause: IncompleteCause::Unlistable,
+                },
+            ],
+        };
+
+        assert_eq!(
+            agenda.to_text(),
+            concat!(
+                "\u{1b}[33m⚠\u{1b}[39m 2 unreadable files in work (caldir doctor)\n",
+                "\u{1b}[33m⚠\u{1b}[39m (Unknown calendar) could not be read at all (caldir doctor)\n",
                 "\n",
                 "\u{1b}[1mToday\u{1b}[0m\n",
                 "  all-day Sprint demo \u{1b}[2m[work]\u{1b}[0m",
@@ -933,7 +1013,7 @@ mod tests {
             },
             incomplete: vec![IncompleteCalendar {
                 calendar: Some("work".to_string()),
-                skipped: 1,
+                cause: IncompleteCause::UnreadableFiles(1),
             }],
         };
 

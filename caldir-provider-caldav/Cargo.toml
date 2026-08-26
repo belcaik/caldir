@@ -56,9 +56,10 @@ url = "2"
 
 [dev-dependencies]
 tempfile = "3"
-# HTTP double for the CalDAV request/response gates (ADJUDICATION: authorized
-# on L5-01 M7 evidence). Dev-only; never ships in a binary.
+# HTTP double for the CalDAV request/response gates: they assert on the exact
+# bytes sent, which needs a real server socket. Dev-only; never ships in a
+# binary.
 wiremock = "0.6"
-# Serialises the live Radicale tier so its containers never race for a port
-# (L5-05 AC 3). Dev-only; `caldir-core` already depends on it.
+# Serialises the live Radicale tier so its containers never race for a port.
+# Dev-only; `caldir-core` already depends on it.
 serial_test = "3"

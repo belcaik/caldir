@@ -10,9 +10,10 @@ use super::find_event_location;
 /// Delete an item from a CalDAV calendar.
 ///
 /// Tries the standard `{uid}.ics` URL first, falls back to UID-based REPORT query.
-/// Treats "not found" (already deleted) as success — and after `L5-02` a resource
-/// of the *wrong kind* at `{uid}.ics` reaches that same branch, which is the
-/// correct outcome here: never delete somebody else's resource (R61).
+/// Treats "not found" (already deleted) as success — and because the lookup is
+/// kind-aware, a resource of the *wrong kind* at `{uid}.ics` reaches that same
+/// branch, which is the correct outcome here: never delete somebody else's
+/// resource.
 pub async fn delete_event(
     username: &str,
     password: &str,

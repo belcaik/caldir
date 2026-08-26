@@ -1,4 +1,4 @@
-use anyhow::Result as AnyhowResult;
+use anyhow::{Result as AnyhowResult, bail};
 use caldir_core::{Caldir, Calendar, CalendarItem, EventTime, ParticipationStatus, TimeFormat};
 use chrono::{DateTime, NaiveDate, Utc};
 use std::cmp::Ordering;
@@ -12,10 +12,13 @@ pub struct AgendaView {
     pub(crate) range_end: NaiveDate,
     pub(crate) time_format: TimeFormat,
     /// `--undated`: list the undated tasks in a trailing `No date` section
-    /// instead of counting them in the footer (ADR-10 D3). A **text-view**
+    /// instead of counting them in the footer. A **text-view**
     /// concern only — `--json` always emits whatever the schema covers.
     pub(crate) undated: bool,
 }
+
+/// What a calendar with no slug is called in every user-facing string.
+pub(crate) const UNKNOWN_CALENDAR: &str = "(Unknown calendar)";
 
 pub struct AgendaEntry {
     pub item: CalendarItem,
@@ -23,15 +26,30 @@ pub struct AgendaEntry {
     pub rsvp: Option<ParticipationStatus>,
 }
 
-/// A calendar whose listing came back short, and by how many files.
+/// A calendar the agenda could not be built from in full, and why.
 ///
 /// `CalendarListing` records every `.ics` file it could not read precisely so
-/// that nothing is lost silently (R77). `doctor` is not the only surface that
+/// that nothing is lost silently. `doctor` is not the only surface that
 /// owes the user that: an agenda rendered from a short listing is a partial
 /// agenda, and says so.
 pub(crate) struct IncompleteCalendar {
     pub(crate) calendar: Option<String>,
-    pub(crate) skipped: usize,
+    pub(crate) cause: IncompleteCause,
+}
+
+/// The two ways an agenda can come back short, kept apart because the user
+/// acts on them differently — and because one notice must never be worded as
+/// the other. "2 unreadable files in work" said of a calendar whose directory
+/// could not be opened at all names a count nobody ever counted.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum IncompleteCause {
+    /// This many `.ics` files inside the calendar could not be read; whatever
+    /// else the calendar holds is in the agenda.
+    UnreadableFiles(usize),
+
+    /// The calendar could not be listed at all — no file of it was reached,
+    /// so *nothing* of it is in the agenda.
+    Unlistable,
 }
 
 /// An agenda as a command produces it: the view, plus every calendar the view
@@ -60,6 +78,33 @@ impl Agenda {
             incomplete,
         })
     }
+
+    /// What this agenda tells a *script*.
+    ///
+    /// A per-file skip stays exit 0: that has always been its exit code and
+    /// the notice above the agenda is the whole report (C13). A calendar that
+    /// could not be read at all does not — before the error channel was
+    /// dropped from this path it propagated and the command failed, and a
+    /// pipeline that cannot tell a whole missing calendar from an empty one
+    /// is exactly the silence this fix is about. The agenda is still printed:
+    /// the other calendars' events are real, and withholding them helps
+    /// nobody. It is also the *only* channel `--json` has: that schema is the
+    /// item stream and nothing else (C13), so a JSON consumer has no notice to
+    /// read.
+    pub fn exit_status(&self) -> AnyhowResult<()> {
+        let unreadable: Vec<&str> = self
+            .incomplete
+            .iter()
+            .filter(|calendar| calendar.cause == IncompleteCause::Unlistable)
+            .map(|calendar| calendar.calendar.as_deref().unwrap_or(UNKNOWN_CALENDAR))
+            .collect();
+
+        if unreadable.is_empty() {
+            return Ok(());
+        }
+
+        bail!("could not read calendar(s): {}", unreadable.join(", "))
+    }
 }
 
 impl AgendaView {
@@ -87,7 +132,7 @@ impl AgendaView {
 }
 
 /// Where an item sits in time: `DTSTART` for an event, `DUE` falling back to
-/// `DTSTART` for a task (ADR-10 D1). `None` means *undated* — a task with
+/// `DTSTART` for a task. `None` means *undated* — a task with
 /// neither, which belongs to no day and is never given an invented date.
 ///
 /// The single place the CLI answers "where does this item sit in time". For an
@@ -97,15 +142,14 @@ pub(crate) fn anchor(item: &CalendarItem) -> Option<&EventTime> {
     match item {
         CalendarItem::Event(event) => Some(&event.start),
         CalendarItem::Todo(todo) => todo.due.as_ref().or(todo.start.as_ref()),
-        // Undated is a real, kept state (ADR-10 D3) — an unknown kind is
+        // Undated is a real, kept state — an unknown kind is
         // listed in the undated tail rather than given an invented date.
         _ => None,
     }
 }
 
-/// The kind tiebreak: at an identical instant, an event comes before a task
-/// (ADR-10 D2). It can never reorder two events, so it cannot perturb existing
-/// output.
+/// The kind tiebreak: at an identical instant, an event comes before a task.
+/// It can never reorder two events, so it cannot perturb existing output.
 fn kind_ordinal(item: &CalendarItem) -> u8 {
     match item {
         CalendarItem::Event(_) => 0,
@@ -124,7 +168,7 @@ fn kind_ordinal(item: &CalendarItem) -> u8 {
 /// `sort_by` is stable and that is load-bearing, not incidental: entries with
 /// equal keys keep `read_dir` order, which is exactly as (non)deterministic as
 /// it is today. No identity tiebreak is added — one would improve event-vs-event
-/// ordering but change existing text for existing situations (R85, C13).
+/// ordering but change existing text for existing situations.
 fn sort_entries(entries: &mut [AgendaEntry]) {
     entries.sort_by(|a, b| match (anchor(&a.item), anchor(&b.item)) {
         (None, None) => Ordering::Equal,
@@ -155,14 +199,26 @@ fn collect_entries_and_skips(
         let calendar_slug = calendar.slug().map(str::to_owned);
         let remote_email = calendar.remote_email().map(str::to_owned);
 
-        let Ok(listing) = calendar.expanded_items_in_range(from, to) else {
-            continue;
+        // A calendar that cannot be opened at all is *reported*, not skipped
+        // in silence. The `?` this replaced blanked every other calendar's
+        // events (F-6); dropping the error entirely then hid the loss
+        // completely, which is the worse of the two. It contributes nothing
+        // and the others still list.
+        let listing = match calendar.expanded_items_in_range(from, to) {
+            Ok(listing) => listing,
+            Err(_) => {
+                incomplete.push(IncompleteCalendar {
+                    calendar: calendar_slug,
+                    cause: IncompleteCause::Unlistable,
+                });
+                continue;
+            }
         };
 
         if !listing.skipped.is_empty() {
             incomplete.push(IncompleteCalendar {
                 calendar: calendar_slug.clone(),
-                skipped: listing.skipped.len(),
+                cause: IncompleteCause::UnreadableFiles(listing.skipped.len()),
             });
         }
 
@@ -195,8 +251,8 @@ fn collect_entries(
     collect_entries_and_skips(calendars, from, to).0
 }
 
-/// A task has no invite semantics, so it never carries an RSVP (R81, ADR-10
-/// D7): narrow to an event rather than teaching this about tasks.
+/// A task has no invite semantics, so it never carries an RSVP: narrow to an
+/// event rather than teaching this about tasks.
 fn resolve_rsvp(item: &CalendarItem, remote_email: Option<&str>) -> Option<ParticipationStatus> {
     let CalendarItem::Event(event) = item else {
         return None;
@@ -605,7 +661,82 @@ SUMMARY:Draft Q3 report\r\nEND:VTODO\r\nEND:VCALENDAR\r\n",
         );
         assert_eq!(incomplete.len(), 1, "only the short calendar is reported");
         assert_eq!(incomplete[0].calendar.as_deref(), Some("work"));
-        assert_eq!(incomplete[0].skipped, 2);
+        assert_eq!(incomplete[0].cause, IncompleteCause::UnreadableFiles(2));
+    }
+
+    /// MAJOR-1, the regression this file grew: a calendar that cannot be
+    /// listed **at all** used to be `continue`d over with nothing recorded, so
+    /// it vanished from the agenda with no notice — a worse silence than the
+    /// per-file skip `IncompleteCalendar` was built for. It is reported as its
+    /// own cause: "2 unreadable files in work" would be a lie about a calendar
+    /// no file of which was ever reached.
+    #[test]
+    fn a_calendar_that_cannot_be_listed_is_reported_not_silently_dropped() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let healthy = calendar(tmp.path(), "healthy");
+        let start = EventTime::Date(NaiveDate::from_ymd_opt(2026, 8, 14).unwrap());
+        healthy.create_event(Event::new("Healthy", start)).unwrap();
+
+        let broken = calendar(tmp.path(), "broken");
+        std::fs::remove_dir_all(broken.path()).unwrap();
+
+        let from = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+        let to = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+        let (entries, incomplete) = collect_entries_and_skips(vec![broken, healthy], from, to);
+
+        assert_eq!(
+            entries
+                .iter()
+                .filter_map(|entry| entry.item.summary())
+                .collect::<Vec<_>>(),
+            vec!["Healthy"],
+            "the other calendars still list (F-6)",
+        );
+        assert_eq!(incomplete.len(), 1);
+        assert_eq!(incomplete[0].calendar.as_deref(), Some("broken"));
+        assert_eq!(incomplete[0].cause, IncompleteCause::Unlistable);
+    }
+
+    /// The exit contract. A per-file skip has always exited 0 and still does
+    /// (C13); a whole calendar missing from the agenda did **not** exit 0
+    /// before the `Result` was dropped from this path, and must not now — a
+    /// script piping `caldir events` cannot otherwise tell a partial agenda
+    /// from a complete one.
+    #[test]
+    fn an_unlistable_calendar_exits_non_zero_and_a_file_skip_does_not() {
+        let today = chrono::Local::now().date_naive();
+        let view = || AgendaView {
+            time_format: TimeFormat::H24,
+            undated: false,
+            entries: Vec::new(),
+            range_start: today,
+            range_end: today,
+        };
+
+        let skipped_file = Agenda {
+            view: view(),
+            incomplete: vec![IncompleteCalendar {
+                calendar: Some("work".to_string()),
+                cause: IncompleteCause::UnreadableFiles(2),
+            }],
+        };
+        assert!(
+            skipped_file.exit_status().is_ok(),
+            "a per-file skip has always exited 0",
+        );
+
+        let unlistable = Agenda {
+            view: view(),
+            incomplete: vec![IncompleteCalendar {
+                calendar: Some("work".to_string()),
+                cause: IncompleteCause::Unlistable,
+            }],
+        };
+        let err = unlistable
+            .exit_status()
+            .expect_err("a dropped calendar must be visible to a script");
+        assert!(err.to_string().contains("work"), "got: {err}");
     }
 
     /// AC 6: an undated task has no anchor, so it is never placed in a day

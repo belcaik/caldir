@@ -10,7 +10,7 @@ use super::known_event_ids::{KNOWN_IDS_FILE_NAME, KnownEventIds};
 // If no base file, but a known event ID exists -> <EventInstanceId, None>
 //
 // The key carries the component kind, so an event and a task sharing a UID get
-// two distinct entries backed by two distinct base files (R43).
+// two distinct entries backed by two distinct base files.
 #[derive(Debug)]
 pub(crate) struct SyncBases(HashMap<EventInstanceId, Option<Box<CalendarItem>>>);
 

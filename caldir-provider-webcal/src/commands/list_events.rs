@@ -18,11 +18,11 @@ pub async fn handle(cmd: ListEvents) -> Result<Vec<Event>> {
         .into_iter()
         .filter_map(|result| match result {
             Ok(CalendarItem::Event(event)) => Some(event),
-            // TODO(L3-04): THIS ARM IS A SILENT VTODO DROP. `handle` returns
+            // TODO: THIS ARM IS A SILENT VTODO DROP. `handle` returns
             // `Vec<Event>`, so a task in the feed has nowhere to go and is
             // dropped without a word — which the sync engine reads as a
-            // delete (R49). L3-04 owns surfacing feed tasks; this arm exists
-            // only because the loader now yields items, not events.
+            // delete. Surfacing feed tasks is still to be done; this arm
+            // exists only because the loader now yields items, not events.
             Ok(_) => None,
             Err(err) => {
                 eprintln!("caldir-provider-webcal: skipping malformed event: {err}");

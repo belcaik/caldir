@@ -10,7 +10,7 @@ use std::fmt;
 
 /// The time column of an item with no anchor at all. The diff has no footer to
 /// count undated tasks into, so an undated task must still occupy a line
-/// (ADR-10 D7) — printing nothing there is the under-described diff this
+/// — printing nothing there is the under-described diff this
 /// renderer exists to avoid.
 const NO_DATE: &str = "(no date)";
 
@@ -151,6 +151,7 @@ fn pluralize(word: &str, count: usize) -> &str {
     } else {
         match word {
             "event" => "events",
+            "change" => "changes",
             _ => word,
         }
     }
@@ -174,12 +175,25 @@ fn render_bidirectional(
     render_sections(
         diff.outgoing(),
         diff.incoming(),
-        diff.suppressed_task_deletes(),
+        Withheld {
+            task_deletes: diff.suppressed_task_deletes(),
+            task_pushes: diff.withheld_task_pushes(),
+        },
         verbose,
         caldir.config().time_format(),
         push_label,
         pull_label,
     )
+}
+
+/// What caldir kept back on this run, carried together so the two notices
+/// cannot drift apart at a call site.
+#[derive(Clone, Copy)]
+struct Withheld {
+    /// R49's version-skew belt withheld an incoming task delete.
+    task_deletes: bool,
+    /// How many outgoing changes were withheld for being tasks (R70).
+    task_pushes: usize,
 }
 
 /// The bidirectional body, over the diff's contents rather than the diff.
@@ -190,22 +204,26 @@ fn render_bidirectional(
 fn render_sections(
     outgoing: &[EventChange],
     incoming: &[EventChange],
-    suppressed_task_deletes: bool,
+    withheld: Withheld,
     verbose: bool,
     time_format: TimeFormat,
     push_label: &str,
     pull_label: &str,
 ) -> String {
-    // The belt is checked *before* the empty test, not after: R49 suppresses
+    // The belt is checked *before* the empty test, not after: it suppresses
     // an incoming delete, so the diff it leaves behind can be entirely empty.
     // Reporting "No changes" for a run that withheld one is the silent
     // suppression the accessor exists to prevent.
-    let warning = suppression_warning(suppressed_task_deletes);
+    let warnings: Vec<String> = suppression_warning(withheld.task_deletes)
+        .into_iter()
+        .chain(withheld_warning(withheld.task_pushes, "pushed"))
+        .collect();
 
     if outgoing.is_empty() && incoming.is_empty() {
-        return match warning {
-            Some(warning) => warning,
-            None => "   No changes".dimmed().to_string(),
+        return if warnings.is_empty() {
+            "   No changes".dimmed().to_string()
+        } else {
+            warnings.join("\n")
         };
     }
 
@@ -224,22 +242,42 @@ fn render_sections(
         render_diff_list(incoming, verbose, time_format, &mut lines);
     }
 
-    lines.extend(warning);
+    lines.extend(warnings);
 
     lines.join("\n")
 }
 
-/// R49's belt, made audible (R50 defers the wording, not the signal).
+/// The version-skew belt, made audible. The wording may yet improve; the
+/// signal itself must be here.
 ///
 /// Existing colour roles only: the same `⚠` in the same yellow `doctor` uses.
 /// An event-only calendar can never reach this — the belt is scoped to tasks —
-/// so no existing situation changes text (C13).
+/// so no existing situation changes text.
 fn suppression_warning(suppressed_task_deletes: bool) -> Option<String> {
     suppressed_task_deletes.then(|| {
         format!(
             "   {} task deletion withheld: the remote reported no tasks at all, which is \
 indistinguishable from a provider that cannot list them. No task file was removed.",
             "⚠".yellow()
+        )
+    })
+}
+
+/// The withheld task pushes, made audible: caldir never drops a change in
+/// silence.
+///
+/// Same `⚠` in the same yellow as the version-skew belt above — one affordance
+/// for "caldir kept something back", not two. An event-only calendar can never
+/// reach this, so no existing situation changes text.
+fn withheld_warning(withheld_task_pushes: usize, verb: &str) -> Option<String> {
+    (withheld_task_pushes > 0).then(|| {
+        format!(
+            "   {} {} task {} not {}: tasks are pull-only — caldir cannot push tasks to a \
+remote yet.",
+            "⚠".yellow(),
+            withheld_task_pushes,
+            pluralize("change", withheld_task_pushes),
+            verb,
         )
     })
 }
@@ -265,43 +303,65 @@ impl CalendarDiffRender for CalendarDiff {
     }
 
     fn render_push(&self, verbose: bool, caldir: &Caldir) -> String {
-        if self.outgoing().is_empty() {
-            return "   No changes to push".dimmed().to_string();
-        }
-
-        let mut lines = Vec::new();
-        render_diff_list(
+        render_outgoing(
             self.outgoing(),
+            self.withheld_task_pushes(),
             verbose,
             caldir.config().time_format(),
-            &mut lines,
-        );
-        lines.join("\n")
+            None,
+            "pushed",
+            "   No changes to push",
+        )
     }
 
     fn render_discard(&self, verbose: bool, caldir: &Caldir) -> String {
-        if self.outgoing().is_empty() {
-            return "   Nothing to discard".dimmed().to_string();
-        }
-
-        let mut lines = Vec::new();
-        lines.push(
-            format!("   {}:", "Local changes (to discard)")
-                .dimmed()
-                .to_string(),
-        );
-        render_diff_list(
+        render_outgoing(
             self.outgoing(),
+            self.withheld_task_pushes(),
             verbose,
             caldir.config().time_format(),
-            &mut lines,
-        );
-        lines.join("\n")
+            Some("Local changes (to discard)"),
+            "discarded",
+            "   Nothing to discard",
+        )
     }
 }
 
-/// The pull body. Only the *incoming* direction can lose a change to R49's
-/// belt (the suppression sits on the incoming delete branch), so `pull` and the
+/// The outgoing-only body, shared by `push` and `discard`.
+///
+/// Both surfaces act on the outgoing set alone, so both must carry the
+/// withheld-task notice — and, like the version-skew belt on the incoming side, it
+/// survives an otherwise-empty set: a calendar whose only pending change was
+/// a task would otherwise read as "No changes to push".
+fn render_outgoing(
+    outgoing: &[EventChange],
+    withheld_task_pushes: usize,
+    verbose: bool,
+    time_format: TimeFormat,
+    header: Option<&str>,
+    verb: &str,
+    empty: &str,
+) -> String {
+    let warning = withheld_warning(withheld_task_pushes, verb);
+
+    if outgoing.is_empty() {
+        return match warning {
+            Some(warning) => warning,
+            None => empty.dimmed().to_string(),
+        };
+    }
+
+    let mut lines = Vec::new();
+    if let Some(header) = header {
+        lines.push(format!("   {}:", header).dimmed().to_string());
+    }
+    render_diff_list(outgoing, verbose, time_format, &mut lines);
+    lines.extend(warning);
+    lines.join("\n")
+}
+
+/// The pull body. Only the *incoming* direction can lose a change to the
+/// version-skew belt (the suppression sits on the incoming delete branch), so `pull` and the
 /// bidirectional views carry the warning and `push`/`discard` do not — a
 /// warning on a surface that shows only outgoing changes is noise.
 fn render_incoming(
@@ -328,7 +388,7 @@ fn render_incoming(
 /// Render field-by-field differences for a change (only for updates).
 ///
 /// One arm per kind. A cross-kind `Update` is impossible by construction —
-/// identity carries the kind (R3), so a VEVENT and a VTODO never pair — but it
+/// identity carries the kind, so a VEVENT and a VTODO never pair — but it
 /// is constructible in a test, and the answer there is a summary row, never a
 /// panic.
 fn render_field_diffs(diff: &EventChange, time_format: TimeFormat) -> Vec<String> {
@@ -363,10 +423,10 @@ fn render_summary_diff(old: Option<&str>, new: Option<&str>) -> Option<String> {
 
 /// A task's field rows.
 ///
-/// ADR-10 §D7's stated minimum is two rows, `due` and the task status, and that
-/// is what ships here alongside `summary`. `percent_complete`, `priority`,
-/// `completed` and the shared string fields are an explicit non-goal of L7-07,
-/// not an oversight — a task update touching only those still renders its
+/// The stated minimum is two rows, `due` and the task status, and that is what
+/// ships here alongside `summary`. `percent_complete`, `priority`, `completed`
+/// and the shared string fields are an explicit non-goal for now, not an
+/// oversight — a task update touching only those still renders its
 /// header line and no rows.
 fn render_todo_field_diffs(old: &Todo, new: &Todo, time_format: TimeFormat) -> Vec<String> {
     let mut lines = Vec::new();
@@ -939,7 +999,10 @@ mod tests {
         render_sections(
             outgoing,
             incoming,
-            suppressed,
+            Withheld {
+                task_deletes: suppressed,
+                task_pushes: 0,
+            },
             verbose,
             TimeFormat::H24,
             "Local changes (to push)",
@@ -1233,6 +1296,129 @@ mod tests {
         assert_eq!(
             render_incoming(&[], false, false, TimeFormat::H24),
             "\u{1b}[2m   No changes to pull\u{1b}[0m"
+        );
+    }
+    const WITHHELD_PUSH: &str = concat!(
+        "   \u{1b}[33m⚠\u{1b}[39m 1 task change not pushed: tasks are pull-only — ",
+        "caldir cannot push tasks to a remote yet."
+    );
+
+    /// R70's withholding, on the surface the wedge happened on. The events go
+    /// out and the task is named as kept back, in the same `⚠` affordance the
+    /// R49 belt uses — one "caldir kept something back" line, not two.
+    #[test]
+    fn a_withheld_task_push_is_reported_beneath_the_pushed_events() {
+        assert_eq!(
+            render_outgoing(
+                &event_only_incoming(),
+                1,
+                true,
+                TimeFormat::H24,
+                None,
+                "pushed",
+                "   No changes to push",
+            ),
+            concat!(
+                "   \u{1b}[31m-\u{1b}[39m \u{1b}[31m(Untitled)\u{1b}[39m ",
+                "\u{1b}[2mWed Mar 6 2019, all-day\u{1b}[0m\n",
+                "   \u{1b}[33m⚠\u{1b}[39m 1 task change not pushed: tasks are pull-only — ",
+                "caldir cannot push tasks to a remote yet."
+            )
+        );
+    }
+
+    /// A **task-only** calendar: the withholding empties the outgoing set, so
+    /// "No changes to push" would be the silent drop R19 forbids.
+    #[test]
+    fn a_task_only_calendar_is_not_swallowed_by_no_changes_to_push() {
+        let rendered = render_outgoing(
+            &[],
+            1,
+            false,
+            TimeFormat::H24,
+            None,
+            "pushed",
+            "   No changes to push",
+        );
+        assert_eq!(rendered, WITHHELD_PUSH);
+        assert!(!rendered.contains("No changes to push"));
+    }
+
+    /// Off-polarity, both surfaces: without this the notice could be a
+    /// constant and every push would wear it (R1/R2).
+    #[test]
+    fn an_event_only_push_and_discard_carry_no_withheld_notice() {
+        assert_eq!(
+            render_outgoing(
+                &[],
+                0,
+                false,
+                TimeFormat::H24,
+                None,
+                "pushed",
+                "   No changes to push",
+            ),
+            "\u{1b}[2m   No changes to push\u{1b}[0m"
+        );
+        assert_eq!(
+            render_outgoing(
+                &[],
+                0,
+                false,
+                TimeFormat::H24,
+                Some("Local changes (to discard)"),
+                "discarded",
+                "   Nothing to discard",
+            ),
+            "\u{1b}[2m   Nothing to discard\u{1b}[0m"
+        );
+    }
+
+    /// `discard` reverts the outgoing set, so a withheld task is untouched
+    /// there too — and the verb has to say so, not claim a push.
+    #[test]
+    fn discard_names_the_task_it_did_not_discard() {
+        assert_eq!(
+            render_outgoing(
+                &[],
+                2,
+                false,
+                TimeFormat::H24,
+                Some("Local changes (to discard)"),
+                "discarded",
+                "   Nothing to discard",
+            ),
+            concat!(
+                "   \u{1b}[33m⚠\u{1b}[39m 2 task changes not discarded: tasks are pull-only — ",
+                "caldir cannot push tasks to a remote yet."
+            )
+        );
+    }
+
+    /// The bidirectional surface carries both belts, and R49's comes first:
+    /// it is about files caldir refused to delete, which is the scarier one.
+    #[test]
+    fn both_withholding_notices_can_appear_together() {
+        assert_eq!(
+            render_sections(
+                &[],
+                &[],
+                Withheld {
+                    task_deletes: true,
+                    task_pushes: 1,
+                },
+                false,
+                TimeFormat::H24,
+                "Local changes (to push)",
+                "Remote changes (to pull)",
+            ),
+            concat!(
+                "   \u{1b}[33m⚠\u{1b}[39m task deletion withheld: the remote reported no ",
+                "tasks at all, which is indistinguishable from a provider that cannot list ",
+                "them. No task file was removed.\n",
+                "   \u{1b}[33m⚠\u{1b}[39m 1 task change not pushed: tasks are pull-only — ",
+                "caldir cannot push tasks to a remote yet."
+            )
         );
     }
 }

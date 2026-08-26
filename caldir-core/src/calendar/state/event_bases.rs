@@ -13,7 +13,7 @@ pub(crate) const EVENT_BASES_DIR_NAME: &str = "bases";
 /// item at `bases/<sha256(identity_string)>.ics`. An event's identity string
 /// is unprefixed, so an event's base filename is byte-identical to what every
 /// existing caldir already wrote; a task's carries the `VTODO:` sigil and can
-/// never land on an event's file even when they share a UID (R43, R36 hazard 4).
+/// never land on an event's file even when they share a UID.
 pub(crate) struct EventBases(HashMap<EventInstanceId, CalendarItem>);
 
 impl IntoIterator for EventBases {
@@ -63,8 +63,8 @@ impl EventBases {
 
                 if file_path.is_file() && is_hashed_filename(filename) {
                     // An unreadable base is no base — degrade to the legacy
-                    // known-id entry rather than failing the whole load (C5,
-                    // INVIOLABLE). Safe for the delete path: `known_event_ids`
+                    // known-id entry rather than failing the whole load.
+                    // Safe for the delete path: `known_event_ids`
                     // still holds the identity, so the item degrades to
                     // "seen, no base", never to "never seen".
                     let Ok(item) = CalendarItem::load(&file_path) else {

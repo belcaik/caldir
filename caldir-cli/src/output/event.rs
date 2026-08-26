@@ -9,7 +9,7 @@ pub fn is_visible(event: &Event) -> bool {
     event.status != Status::Cancelled
 }
 
-/// Whether an item of any kind belongs in the agenda (ADR-10 D5).
+/// Whether an item of any kind belongs in the agenda.
 ///
 /// A CANCELLED task is hidden exactly as a CANCELLED event is. A COMPLETED
 /// task is **not** hidden: it is history for its day the way a past event is,
@@ -42,7 +42,7 @@ pub fn format_event_line(
     format!("  {} {} {}{}", time, summary_text, cal_tag.dimmed(), status)
 }
 
-/// Format a task line: "  {time} {box} {summary} [{cal_slug}]" (ADR-10 D4).
+/// Format a task line: "  {time} {box} {summary} [{cal_slug}]".
 ///
 /// A sibling of [`format_event_line`], deliberately the same shape: the same
 /// 2-space indent, the same 7-wide right-aligned time column, the same dimmed
@@ -106,7 +106,7 @@ fn format_task_time(anchor: Option<&EventTime>, time_format: TimeFormat) -> Stri
     }
 }
 
-/// The ASCII status box (ADR-10 D4). Same alphabet as `diff.rs`'s `+ ~ -`.
+/// The ASCII status box. Same alphabet as `diff.rs`'s `+ ~ -`.
 fn task_box(status: TodoStatus) -> &'static str {
     match status {
         TodoStatus::NeedsAction => "[ ]",

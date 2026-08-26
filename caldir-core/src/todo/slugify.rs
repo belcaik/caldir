@@ -12,7 +12,7 @@ impl Todo {
     ///
     /// Recurring tasks get no date component (a single date would be
     /// misleading), and an undated task simply has none — never a synthesized
-    /// one (R46).
+    /// one.
     pub fn base_slug(&self) -> String {
         let summary = summary_slug(self.summary.as_deref());
 
@@ -27,7 +27,7 @@ impl Todo {
     }
 
     /// `DUE` is the task's anchor; `DTSTART` is the fallback. Independent
-    /// fields — neither is ever synthesized from the other (R9, R46).
+    /// fields — neither is ever synthesized from the other.
     fn filename_anchor(&self) -> Option<&EventTime> {
         self.due.as_ref().or(self.start.as_ref())
     }

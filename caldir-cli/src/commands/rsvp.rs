@@ -51,7 +51,7 @@ fn run_direct(caldir: &Caldir, path_str: &str, response_str: &str) -> Result<()>
 /// without a `Caldir` (which has no constructor outside `caldir-core`).
 fn rsvp_file(path: &Path, email: &str, response_str: &str) -> Result<()> {
     let mut cal_event = CalendarEvent::load(path).context("Failed to load event")?;
-    // An RSVP is meaningless on a task (R81). Bail here, before `update`, so a
+    // An RSVP is meaningless on a task. Bail here, before `update`, so a
     // task file is never rewritten — and never silently no-ops: the user named
     // this file explicitly.
     let Some(event) = cal_event.event() else {
@@ -105,8 +105,8 @@ fn run_interactive(caldir: &Caldir) -> Result<()> {
         let cal_slug = cal.slug().unwrap_or("(Unknown calendar)").to_string();
 
         for ce in cal.events()?.into_events() {
-            // Tasks have no invites to answer (R81), so they are simply not
-            // listed here; `L7-04` owns the user-facing story.
+            // Tasks have no invites to answer, so they are simply not listed
+            // here.
             let Some(event) = ce.event() else {
                 continue;
             };
