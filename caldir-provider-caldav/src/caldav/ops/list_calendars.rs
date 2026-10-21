@@ -2,12 +2,12 @@
 
 use anyhow::{Context, Result};
 use http::{Method, Request, Uri};
-use libdav::caldav::FindCalendars;
+use libdav::caldav::{CalendarComponent, FindCalendars, GetSupportedComponents};
 use libdav::dav::{GetProperty, make_relative_url};
 use libdav::names;
 use libdav::requests::{DavRequest, ParseResponseError};
 
-use crate::caldav::{absolute_url, create_caldav_client};
+use crate::caldav::{CalDavClient_, absolute_url, create_caldav_client};
 
 /// A raw calendar entry returned by CalDAV discovery.
 pub struct RawCalendar {
@@ -23,6 +23,15 @@ pub struct RawCalendar {
     /// derived from `DAV:current-user-privilege-set`. `None` if the server
     /// did not return a privilege set (assume writable).
     pub read_only: Option<bool>,
+    /// Whether the collection's `supported-calendar-component-set` names
+    /// `VTODO`. Three-valued (R92): `None` when the property could not
+    /// be read at all — absent, malformed, or the request itself failed —
+    /// which must never collapse into `Some(false)`. This is advisory only
+    /// and is never used to gate a request; it is recorded here purely so a
+    /// later rejection can be classified against fresh evidence, not this
+    /// stale snapshot (see `collection_openly_lacks_vtodo` in
+    /// `caldav::ops::list_events`).
+    pub supports_tasks: Option<bool>,
 }
 
 /// List all calendars under a calendar home URL.
@@ -85,6 +94,7 @@ pub async fn list_calendars_raw(
             .map(|privs| !is_writable_privilege_set(&privs));
 
         let url = absolute_url(&caldav, &calendar.href);
+        let supports_tasks = fetch_supports_tasks(&caldav, &calendar.href).await;
 
         calendars.push(RawCalendar {
             href: calendar.href,
@@ -92,10 +102,27 @@ pub async fn list_calendars_raw(
             color,
             url,
             read_only,
+            supports_tasks,
         });
     }
 
     Ok(calendars)
+}
+
+/// Read a collection's `supported-calendar-component-set` and report whether
+/// it names `VTODO`.
+///
+/// Three-valued, deliberately: `None` for anything short of a clean read
+/// (absent property, malformed response, failed request) — collapsing that
+/// into `Some(false)` reproduces R91's bug, where "absent = no VTODO" wiped
+/// out task support for every existing user on upgrade. This value is
+/// recorded for later classification only; it is never a gate.
+async fn fetch_supports_tasks(caldav: &CalDavClient_, href: &str) -> Option<bool> {
+    caldav
+        .request(GetSupportedComponents::new(href))
+        .await
+        .ok()
+        .map(|response| response.components.contains(&CalendarComponent::VTodo))
 }
 
 /// Decide whether a calendar is writable from the privileges returned by
@@ -184,6 +211,51 @@ impl DavRequest for GetCurrentUserPrivilegeSet<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::caldav::create_caldav_client;
+    use crate::caldav::ops::test_dav::{
+        calendar_url, component_set_multistatus, mount_propfind, mount_propfind_status,
+    };
+    use wiremock::MockServer;
+
+    /// AC 3. Three-valued, not a `bool`: `Some(false)` (advertised, no
+    /// `VTODO`) and `None` (unreadable) are the two states this ticket treats
+    /// differently, and collapsing them would re-create R91's bug.
+    #[tokio::test]
+    async fn the_supported_component_set_is_parsed_onto_the_raw_calendar() {
+        let server = MockServer::start().await;
+        mount_propfind(
+            &server,
+            component_set_multistatus(&["VEVENT", "VTODO", "VJOURNAL"]),
+        )
+        .await;
+        let caldav = create_caldav_client(&calendar_url(&server), "user", "pass").unwrap();
+
+        let supports_tasks = fetch_supports_tasks(&caldav, "/cal/").await;
+        assert_eq!(supports_tasks, Some(true));
+    }
+
+    #[tokio::test]
+    async fn a_component_set_without_vtodo_yields_some_false() {
+        let server = MockServer::start().await;
+        mount_propfind(&server, component_set_multistatus(&["VEVENT"])).await;
+        let caldav = create_caldav_client(&calendar_url(&server), "user", "pass").unwrap();
+
+        let supports_tasks = fetch_supports_tasks(&caldav, "/cal/").await;
+        assert_eq!(supports_tasks, Some(false));
+    }
+
+    #[tokio::test]
+    async fn a_failed_propfind_yields_none_never_false() {
+        let server = MockServer::start().await;
+        mount_propfind_status(&server, 500).await;
+        let caldav = create_caldav_client(&calendar_url(&server), "user", "pass").unwrap();
+
+        let supports_tasks = fetch_supports_tasks(&caldav, "/cal/").await;
+        assert_eq!(
+            supports_tasks, None,
+            "an unreadable component set must never collapse into false (R91)"
+        );
+    }
 
     #[test]
     fn writable_when_privilege_set_contains_all() {

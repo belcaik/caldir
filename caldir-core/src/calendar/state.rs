@@ -11,6 +11,9 @@ use std::collections::HashSet;
 
 pub(crate) use sync_bases::SyncBases;
 
+use crate::item::CalendarItem;
+
+#[cfg(test)]
 use crate::Event;
 #[cfg(test)]
 use crate::EventInstanceId;
@@ -33,12 +36,16 @@ impl CalendarState {
         Ok(Self { sync_bases })
     }
 
-    pub(crate) fn record_sync_bases(
+    pub(crate) fn record_sync_bases<I>(
         &mut self,
-        events: impl IntoIterator<Item = Event>,
+        items: I,
         state_dir: &Path,
-    ) -> Result<(), CalendarStateError> {
-        self.sync_bases.record(events, state_dir)
+    ) -> Result<(), CalendarStateError>
+    where
+        I: IntoIterator,
+        I::Item: Into<CalendarItem>,
+    {
+        self.sync_bases.record(items, state_dir)
     }
 
     pub(crate) fn sync_bases(&self) -> &SyncBases {
@@ -50,9 +57,15 @@ impl CalendarState {
         self.sync_bases.iter().map(|(id, _)| id.clone()).collect()
     }
 
+    /// The stored base for an *event* identity. Narrows because every caller
+    /// asserts against an `Event`; a stored base always shares its key's kind,
+    /// so this never hides a task.
     #[cfg(test)]
     pub(crate) fn sync_base(&self, id: &EventInstanceId) -> Option<&Event> {
-        self.sync_bases.get(id).and_then(Option::as_deref)
+        self.sync_bases
+            .get(id)
+            .and_then(Option::as_deref)
+            .and_then(CalendarItem::as_event)
     }
 }
 
@@ -77,7 +90,7 @@ mod tests {
 
         let dst = tempfile::TempDir::new().unwrap();
         state
-            .record_sync_bases(std::iter::empty(), dst.path())
+            .record_sync_bases(std::iter::empty::<CalendarItem>(), dst.path())
             .unwrap();
 
         let written = std::fs::read_to_string(dst.path().join(KNOWN_IDS_FILE_NAME)).unwrap();
@@ -92,7 +105,7 @@ mod tests {
 
         let dst = tempfile::TempDir::new().unwrap();
         state
-            .record_sync_bases(std::iter::empty(), dst.path())
+            .record_sync_bases(std::iter::empty::<CalendarItem>(), dst.path())
             .unwrap();
 
         let written = std::fs::read_to_string(dst.path().join(KNOWN_IDS_FILE_NAME)).unwrap();
@@ -106,7 +119,7 @@ mod tests {
         let mut state = CalendarState::load(dir.path()).unwrap();
 
         state
-            .record_sync_bases(std::iter::empty(), &state_dir)
+            .record_sync_bases(std::iter::empty::<CalendarItem>(), &state_dir)
             .unwrap();
 
         assert!(state_dir.join(KNOWN_IDS_FILE_NAME).is_file());

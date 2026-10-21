@@ -4,7 +4,7 @@ Generic CalDAV provider — speaks plain RFC 4791 with HTTP basic auth. Works wi
 
 ## Shared ops
 
-The pure CalDAV operations in `src/ops.rs` are provider-agnostic and reused by `caldir-provider-icloud`. They take credentials and URLs as parameters, return `caldir-core` types, and hold no provider-specific state. Each provider then wraps these in its own commands, layering on whatever quirks the host needs (iCloud's color normalization, Apple-ID session keys, etc.).
+The pure CalDAV operations in `src/caldav/ops.rs` (plus `src/caldav/ops/`) are provider-agnostic and reused by `caldir-provider-icloud`. They take credentials and URLs as parameters, return `caldir-core` types, and hold no provider-specific state. Each provider then wraps these in its own commands, layering on whatever quirks the host needs (iCloud's color normalization, Apple-ID session keys, etc.).
 
 Custom `DavRequest` impls live in `src/caldav.rs` for things `libdav` doesn't expose.
 

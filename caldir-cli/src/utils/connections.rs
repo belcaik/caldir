@@ -1,5 +1,15 @@
 use caldir_core::{Caldir, CaldirError, Connection, EventChange};
 
+/// The remote provider's slug, for a message that names it. `None` for a
+/// local-only calendar — there is no provider to name.
+pub fn provider_slug(connection: &Connection) -> Option<String> {
+    connection
+        .local()
+        .config()
+        .and_then(|c| c.remote_config())
+        .map(|r| r.provider_slug().to_string())
+}
+
 /// Return the caldir's connections, optionally narrowed to specific calendar slugs.
 /// An empty `calendar_slugs` slice returns all connections.
 pub fn connections(

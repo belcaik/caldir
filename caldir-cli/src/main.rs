@@ -124,18 +124,30 @@ enum Commands {
         /// Show events until this date (YYYY-MM-DD)
         #[arg(long)]
         to: Option<String>,
+
+        /// Include undated tasks in a trailing "No date" section
+        #[arg(long)]
+        undated: bool,
     },
     #[command(about = "Show today's events")]
     Today {
         /// Only show events from this calendar (by slug)
         #[arg(short, long)]
         calendar: Option<String>,
+
+        /// Include undated tasks in a trailing "No date" section
+        #[arg(long)]
+        undated: bool,
     },
     #[command(about = "Show this week's events (through Sunday)")]
     Week {
         /// Only show events from this calendar (by slug)
         #[arg(short, long)]
         calendar: Option<String>,
+
+        /// Include undated tasks in a trailing "No date" section
+        #[arg(long)]
+        undated: bool,
     },
     #[command(about = "Create a new event in caldir")]
     New {
@@ -284,20 +296,34 @@ async fn main() -> Result<()> {
             verbose,
             force,
         } => commands::sync::run(&caldir, calendar, from, to, verbose, force).await,
-        Commands::Events { calendar, from, to } => {
-            let view = commands::events::run(&caldir, calendar, from, to)?;
-            output::emit(&view, output_format);
-            Ok(())
+        Commands::Events {
+            calendar,
+            from,
+            to,
+            undated,
+        } => {
+            let view = commands::events::run(&caldir, calendar, from, to, undated)?;
+            output::emit_agenda(&view, output_format);
+            // Printed first, then the verdict: a calendar that could not be
+            // read at all leaves a partial agenda, and a script must be able
+            // to tell that from a complete one.
+            view.exit_status()
         }
-        Commands::Today { calendar } => {
-            let view = commands::today::run(&caldir, calendar)?;
-            output::emit(&view, output_format);
-            Ok(())
+        Commands::Today { calendar, undated } => {
+            let view = commands::today::run(&caldir, calendar, undated)?;
+            output::emit_agenda(&view, output_format);
+            // Printed first, then the verdict: a calendar that could not be
+            // read at all leaves a partial agenda, and a script must be able
+            // to tell that from a complete one.
+            view.exit_status()
         }
-        Commands::Week { calendar } => {
-            let view = commands::week::run(&caldir, calendar)?;
-            output::emit(&view, output_format);
-            Ok(())
+        Commands::Week { calendar, undated } => {
+            let view = commands::week::run(&caldir, calendar, undated)?;
+            output::emit_agenda(&view, output_format);
+            // Printed first, then the verdict: a calendar that could not be
+            // read at all leaves a partial agenda, and a script must be able
+            // to tell that from a complete one.
+            view.exit_status()
         }
         Commands::New {
             title,
@@ -374,20 +400,53 @@ mod tests {
         assert!(parse_hosted(&["caldir", "connect", "google"]));
     }
 
+    /// AC 7: `--undated` exists on all three agenda commands and defaults off.
+    /// A `bool` flag that clap never learns about is a compile error; a flag
+    /// declared on only two of the three is not, which is what this catches.
+    #[test]
+    fn the_undated_flag_exists_on_all_three_agenda_commands_and_defaults_off() {
+        fn undated(args: &[&str]) -> bool {
+            match Cli::parse_from(args).command {
+                Commands::Events { undated, .. }
+                | Commands::Today { undated, .. }
+                | Commands::Week { undated, .. } => undated,
+                _ => panic!("expected an agenda command"),
+            }
+        }
+
+        for command in ["events", "today", "week"] {
+            assert!(!undated(&["caldir", command]), "{command} default");
+            assert!(undated(&["caldir", command, "--undated"]), "{command} flag");
+        }
+    }
+
     #[test]
     fn views_support_json() {
         assert!(Commands::Calendars.supports_json());
         assert!(Commands::Config.supports_json());
         assert!(
             Commands::Events {
+                undated: false,
                 calendar: None,
                 from: None,
                 to: None,
             }
             .supports_json()
         );
-        assert!(Commands::Today { calendar: None }.supports_json());
-        assert!(Commands::Week { calendar: None }.supports_json());
+        assert!(
+            Commands::Today {
+                calendar: None,
+                undated: false
+            }
+            .supports_json()
+        );
+        assert!(
+            Commands::Week {
+                calendar: None,
+                undated: false
+            }
+            .supports_json()
+        );
         assert!(!Commands::Update.supports_json());
     }
 }

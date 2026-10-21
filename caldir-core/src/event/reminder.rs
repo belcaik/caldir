@@ -58,7 +58,7 @@ impl Reminder {
     /// We intentionally treat all alarms the same,
     /// and don't distinguish between ACTION:DISPLAY, ACTION:AUDIO, or ACTION:EMAIL.
     /// (How alarms are handled should be up to the app layer instead)
-    pub(crate) fn from_ical_event(event: &icalendar::Event) -> Vec<Self> {
+    pub(crate) fn from_ical_event<C: Component + ?Sized>(event: &C) -> Vec<Self> {
         let mut reminders: Vec<Self> = event
             .components()
             .iter()

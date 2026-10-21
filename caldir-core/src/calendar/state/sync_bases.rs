@@ -1,4 +1,4 @@
-use crate::{Event, event::EventInstanceId};
+use crate::{event::EventInstanceId, item::CalendarItem};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -6,22 +6,29 @@ use super::error::CalendarStateError;
 use super::event_bases::{EVENT_BASES_DIR_NAME, EventBases};
 use super::known_event_ids::{KNOWN_IDS_FILE_NAME, KnownEventIds};
 
-// If event base file exists -> <EventInstanceId, Some<Event>>
-// If no event base file, but known event ID exists -> <EventInstanceId, None>
+// If a base file exists -> <EventInstanceId, Some<CalendarItem>>
+// If no base file, but a known event ID exists -> <EventInstanceId, None>
+//
+// The key carries the component kind, so an event and a task sharing a UID get
+// two distinct entries backed by two distinct base files.
 #[derive(Debug)]
-pub(crate) struct SyncBases(HashMap<EventInstanceId, Option<Box<Event>>>);
+pub(crate) struct SyncBases(HashMap<EventInstanceId, Option<Box<CalendarItem>>>);
 
 impl SyncBases {
     pub(crate) fn new() -> Self {
         Self(HashMap::new())
     }
 
-    pub(crate) fn get(&self, id: &EventInstanceId) -> Option<&Option<Box<Event>>> {
+    /// Presence, kind-agnostic: this is what delete detection reads, so it
+    /// must answer for a task exactly as it does for an event.
+    pub(crate) fn get(&self, id: &EventInstanceId) -> Option<&Option<Box<CalendarItem>>> {
         self.0.get(id)
     }
 
     #[cfg(test)]
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (&EventInstanceId, &Option<Box<Event>>)> {
+    pub(crate) fn iter(
+        &self,
+    ) -> impl Iterator<Item = (&EventInstanceId, &Option<Box<CalendarItem>>)> {
         self.0.iter()
     }
 
@@ -39,28 +46,28 @@ impl SyncBases {
         self.0.entry(id).or_insert(None);
     }
 
-    pub(crate) fn insert_event_base(&mut self, id: EventInstanceId, event: Event) {
-        self.0.insert(id, Some(Box::new(event)));
+    pub(crate) fn insert_event_base(&mut self, id: EventInstanceId, item: impl Into<CalendarItem>) {
+        self.0.insert(id, Some(Box::new(item.into())));
     }
 
-    /// Records new bases and persists them. Only the given events' base files
+    /// Records new bases and persists them. Only the given items' base files
     /// are written, so a sync touches O(changes) files, not O(history).
-    pub(crate) fn record(
-        &mut self,
-        events: impl IntoIterator<Item = Event>,
-        state_dir: &Path,
-    ) -> Result<(), CalendarStateError> {
-        let events: Vec<Event> = events.into_iter().collect();
+    pub(crate) fn record<I>(&mut self, items: I, state_dir: &Path) -> Result<(), CalendarStateError>
+    where
+        I: IntoIterator,
+        I::Item: Into<CalendarItem>,
+    {
+        let items: Vec<CalendarItem> = items.into_iter().map(Into::into).collect();
 
-        for event in &events {
-            self.insert_event_base(event.event_instance_id(), event.clone());
+        for item in &items {
+            self.insert_event_base(item.instance_id(), item.clone());
         }
 
         // Keep writing the legacy format for clients using an older caldir-core.
         KnownEventIds::write_from(self.0.keys(), &state_dir.join(KNOWN_IDS_FILE_NAME))?;
 
-        // New format with event bases:
-        EventBases::write_from(events.iter(), &state_dir.join(EVENT_BASES_DIR_NAME))?;
+        // New format with item bases:
+        EventBases::write_from(items.iter(), &state_dir.join(EVENT_BASES_DIR_NAME))?;
 
         Ok(())
     }
@@ -90,8 +97,8 @@ impl SyncBases {
             sync_bases.insert_known_event_id(id.clone());
         }
 
-        for (id, event) in event_bases.into_iter() {
-            sync_bases.insert_event_base(id, event);
+        for (id, item) in event_bases.into_iter() {
+            sync_bases.insert_event_base(id, item);
         }
 
         sync_bases
@@ -124,6 +131,46 @@ mod tests {
         assert_eq!(loaded.get(&id), Some(&None));
     }
 
+    /// AC2 at the map level, and the degradation the L1-06/L3-01 split
+    /// exposes: a task with no base file of its own is *absent* from the
+    /// store — it never resolves to the event's base. "No base" costs a
+    /// three-way compare; a wrong base would corrupt one.
+    #[test]
+    fn a_task_sharing_a_uid_gets_its_own_entry_and_never_the_events_base() {
+        let state_dir = tempfile::TempDir::new().unwrap();
+
+        let mut event = test_event();
+        event.uid = crate::event::EventUid::new("shared@u-crawler".to_string());
+        let event_id = event.event_instance_id();
+        let task_id = crate::EventInstanceId::todo(event.uid.clone(), None);
+
+        let mut sync_bases = SyncBases::new();
+        sync_bases
+            .record([event.clone()], state_dir.path())
+            .unwrap();
+
+        // Before the task has ever synced: no base, and no wrong base.
+        let loaded = SyncBases::load_from_state_dir(state_dir.path()).unwrap();
+        assert_eq!(
+            loaded.get(&event_id),
+            Some(&Some(Box::new(CalendarItem::from(event.clone()))))
+        );
+        assert_eq!(loaded.get(&task_id), None);
+
+        // Once the task has a base of its own, both entries coexist.
+        let mut todo = crate::todo::Todo::new("Shared");
+        todo.uid = event.uid.clone();
+        let task = CalendarItem::from(todo);
+        EventBases::write_from([&task], &state_dir.path().join(EVENT_BASES_DIR_NAME)).unwrap();
+
+        let loaded = SyncBases::load_from_state_dir(state_dir.path()).unwrap();
+        assert_eq!(
+            loaded.get(&event_id),
+            Some(&Some(Box::new(CalendarItem::from(event))))
+        );
+        assert_eq!(loaded.get(&task_id), Some(&Some(Box::new(task))));
+    }
+
     #[test]
     fn record_leaves_other_base_files_untouched() {
         let state_dir = tempfile::TempDir::new().unwrap();
@@ -153,7 +200,7 @@ mod tests {
         let loaded = SyncBases::load_from_state_dir(state_dir.path()).unwrap();
         assert_eq!(
             loaded.get(&event_b.event_instance_id()),
-            Some(&Some(Box::new(event_b)))
+            Some(&Some(Box::new(CalendarItem::from(event_b))))
         );
     }
 }

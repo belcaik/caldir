@@ -21,6 +21,35 @@ fn calendar_base_slug(name: Option<&str>, provider_slug: &ProviderSlug) -> Strin
     Calendar::base_slug_for(name.or(Some(provider_slug.as_str())))
 }
 
+/// Whether a calendar's remote params declare a non-calendar resource kind
+/// (spec §11: two containers can share a display name, so the CLI must not
+/// let a task list read as an ordinary Calendar). A key-suffix match keeps
+/// this provider-agnostic rather than growing a Google-specific branch here
+/// (caldir-core stays provider-agnostic, but there's no reason to spend the
+/// coupling in the CLI either).
+fn is_non_calendar_resource(config: &CalendarConfig) -> bool {
+    config
+        .remote_config()
+        .and_then(|remote| remote.get("google_resource_kind"))
+        .and_then(|v| v.as_str())
+        .map(|kind| kind != "calendar")
+        .unwrap_or(false)
+}
+
+/// The label shown in the connect selection list. Built here — not by
+/// decorating `CalendarConfig::name()` in the provider — because `name()`
+/// is the slug source (`calendar_base_slug`); annotating it would rename
+/// the user's directory.
+fn selection_label(config: &CalendarConfig) -> String {
+    let name = config.name().unwrap_or("Unnamed");
+
+    if is_non_calendar_resource(config) {
+        format!("{name} [Tasks]")
+    } else {
+        name.to_string()
+    }
+}
+
 pub async fn run(caldir: &mut Caldir, provider: Option<String>, hosted: bool) -> Result<()> {
     let provider_slug = provider.context(missing_provider_message(caldir))?;
 
@@ -155,14 +184,7 @@ async fn run_parsed(caldir: &mut Caldir, provider_slug: ProviderSlug, hosted: bo
     let calendar_configs = new_configs;
 
     // Build selection items with calendar names
-    let items: Vec<String> = calendar_configs
-        .iter()
-        .map(|c| {
-            c.name()
-                .map(String::from)
-                .unwrap_or_else(|| "Unnamed".to_string())
-        })
-        .collect();
+    let items: Vec<String> = calendar_configs.iter().map(selection_label).collect();
 
     // Show multi-select (all selected by default)
     let defaults: Vec<bool> = vec![true; items.len()];
@@ -401,6 +423,7 @@ fn prompt_password(label: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use caldir_core::{RemoteConfig, RemoteConfigParams};
 
     #[test]
     fn unnamed_calendar_uses_provider_slug() {
@@ -417,5 +440,38 @@ mod tests {
             calendar_base_slug(Some("Personal Calendar"), &provider_slug),
             "personal-calendar"
         );
+    }
+
+    fn google_config(name: &str, resource_kind: Option<&str>) -> CalendarConfig {
+        let mut params = RemoteConfigParams::new();
+        params.insert(
+            "google_account".to_string(),
+            toml::Value::String("alice@gmail.com".to_string()),
+        );
+        if let Some(kind) = resource_kind {
+            params.insert(
+                "google_resource_kind".to_string(),
+                toml::Value::String(kind.to_string()),
+            );
+        }
+        let remote = RemoteConfig::new(ProviderSlug::from("google"), params);
+
+        CalendarConfig::new(Some(name.to_string()), None, Some(false), Some(remote))
+    }
+
+    #[test]
+    fn a_task_list_row_is_labelled_distinctly_from_a_calendar_row() {
+        let calendar = google_config("Work", Some("calendar"));
+        let task_list = google_config("Work", Some("tasklist"));
+
+        assert_ne!(selection_label(&calendar), selection_label(&task_list));
+    }
+
+    #[test]
+    fn the_selection_label_does_not_change_the_calendar_slug() {
+        let provider_slug = ProviderSlug::from("google");
+        let task_list = google_config("Work", Some("tasklist"));
+
+        assert_eq!(calendar_base_slug(task_list.name(), &provider_slug), "work");
     }
 }

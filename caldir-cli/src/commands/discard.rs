@@ -1,10 +1,10 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use caldir_core::{Caldir, CalendarDiff, Connection, EventChange};
 use dialoguer::Confirm;
 use owo_colors::OwoColorize;
 
 use crate::output::diff::{CalendarDiffRender, Render};
-use crate::utils::{resolve_sync_range, tui};
+use crate::utils::{provider_slug, resolve_sync_range, tui};
 
 pub async fn run(
     caldir: &Caldir,
@@ -26,6 +26,7 @@ pub async fn run(
 
     let range = resolve_sync_range(from, to)?;
     let mut pending: Vec<(Connection, CalendarDiff)> = Vec::new();
+    let mut failed = 0usize;
     let total = connections.len();
 
     for (i, connection) in connections.into_iter().enumerate() {
@@ -40,15 +41,29 @@ pub async fn run(
 
                 match result {
                     Ok(diff) => {
-                        println!("{}", diff.render_discard(verbose, caldir));
+                        // No unpushable-task pre-flight here: `discard` only
+                        // ever writes to the local calendar, and dropping the
+                        // task is one of the two remedies the push refusal
+                        // offers. Refusing it would strand the user.
+                        let provider = provider_slug(&connection);
+                        println!(
+                            "{}",
+                            diff.render_discard(verbose, caldir, provider.as_deref())
+                        );
                         if !diff.outgoing().is_empty() {
                             pending.push((connection, diff));
                         }
                     }
-                    Err(e) => println!("   {}", e.to_string().red()),
+                    Err(e) => {
+                        report(&e);
+                        failed += 1;
+                    }
                 }
             }
-            Err(e) => println!("   {}", e.to_string().red()),
+            Err(e) => {
+                report(&e);
+                failed += 1;
+            }
         }
 
         if i < total - 1 {
@@ -59,7 +74,7 @@ pub async fn run(
     let total_changes: usize = pending.iter().map(|(_, d)| d.outgoing().len()).sum();
 
     if total_changes == 0 {
-        return Ok(());
+        return finish(failed);
     }
 
     if !force {
@@ -78,7 +93,7 @@ pub async fn run(
             .interact()?;
 
         if !confirmed {
-            return Ok(());
+            return finish(failed);
         }
     }
 
@@ -108,6 +123,23 @@ pub async fn run(
         updated,
         deleted
     );
+
+    finish(failed)
+}
+
+/// Failures go to stderr, so a pipeline capturing stdout still sees them and a
+/// reader can tell them from the diff.
+fn report(error: &impl std::fmt::Display) {
+    eprintln!("   {}", error.to_string().red());
+}
+
+/// A calendar that could not be inspected had its changes left in place, which
+/// a script must be able to detect: the details are already on stderr, so this
+/// only carries the non-zero exit `main` turns it into.
+fn finish(failed: usize) -> Result<()> {
+    if failed > 0 {
+        bail!("discard failed for {} calendar(s)", failed);
+    }
 
     Ok(())
 }

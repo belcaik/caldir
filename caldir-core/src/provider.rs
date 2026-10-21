@@ -1,4 +1,5 @@
 mod account;
+mod capabilities;
 mod error;
 mod handler;
 mod registry;
@@ -15,11 +16,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use transport::{ProviderTransport, SubprocessTransport};
 
-pub(crate) use error::ProviderError;
-pub use handler::{Error, Handler, Result, process_request, run_provider};
+pub use capabilities::{Capability, ProviderCapabilities};
+pub use error::ProviderError;
+pub use handler::{Error, Handler, Result, classified_error, process_request, run_provider};
 pub use registry::ProviderRegistry;
 pub use slug::{ProviderSlug, provider_slug_from_filename};
 pub use storage::{ProviderStorage, StorageError};
+pub use transport::ProviderTransportError;
 
 #[derive(Debug, Clone)]
 pub struct Provider {
@@ -83,7 +86,7 @@ impl Provider {
 
         match response {
             rpc::Response::Success { data } => Ok(rpc::WireValue::from_wire(data)),
-            rpc::Response::Error { error } => Err(ProviderError::Provider(error)),
+            rpc::Response::Error { error, code } => Err(error::classify(error, code)),
         }
     }
 
@@ -131,7 +134,7 @@ fn is_executable(path: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::rpc::Rpc;
-    use crate::test_utils::test_binary;
+    use crate::test_utils::{legacy_provider_binary, test_binary};
     use serde::{Deserialize, Serialize};
     use std::time::Duration;
     use transport::ProviderTransportError;
@@ -265,6 +268,116 @@ mod tests {
         assert!(matches!(err, ProviderError::Provider(msg) if msg == "oh no"));
     }
 
+    /// `P1-02`'s fail-closed branch and `P2-04`'s taxonomy both need to tell
+    /// "too old to answer" from "answered and failed" without substring
+    /// matching on the message (`CROSS-4`, §16).
+    #[tokio::test]
+    async fn an_unsupported_method_reply_becomes_a_typed_provider_error() {
+        let mock = Arc::new(MockTransport::with_response(
+            r#"{"status":"error","error":"unknown command: list_todos","code":"unsupported_method"}"#,
+        ));
+        let provider = provider_with_transport(mock);
+
+        let err = provider
+            .call(EchoCommand { value: "x".into() })
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, ProviderError::UnsupportedMethod(ref msg) if msg.contains("list_todos")),
+            "got: {err:?}"
+        );
+    }
+
+    /// `W2-C2`: `error::classify` is `Provider::call`'s only production
+    /// caller and had zero test callers — a mutation scrambling four of the
+    /// six §16 match arms left 650/650 tests passing. Drives every wire code
+    /// through the real envelope-to-typed-error path (not `classify` in
+    /// isolation), one assertion per row so a partial match can't pass.
+    #[tokio::test]
+    async fn each_wire_error_code_maps_to_its_specific_provider_error_variant() {
+        struct Case {
+            code: Option<rpc::ErrorCode>,
+            check: fn(&ProviderError) -> bool,
+            name: &'static str,
+        }
+
+        let cases = [
+            Case {
+                code: Some(rpc::ErrorCode::UnsupportedMethod),
+                check: |e| matches!(e, ProviderError::UnsupportedMethod(msg) if msg == "boom"),
+                name: "UnsupportedMethod",
+            },
+            Case {
+                code: Some(rpc::ErrorCode::UnsupportedOperation),
+                check: |e| matches!(e, ProviderError::UnsupportedOperation(msg) if msg == "boom"),
+                name: "UnsupportedOperation",
+            },
+            Case {
+                code: Some(rpc::ErrorCode::MissingAuthScope),
+                check: |e| matches!(e, ProviderError::MissingAuthScope(msg) if msg == "boom"),
+                name: "MissingAuthScope",
+            },
+            Case {
+                code: Some(rpc::ErrorCode::RemoteNotFound),
+                check: |e| matches!(e, ProviderError::RemoteNotFound(msg) if msg == "boom"),
+                name: "RemoteNotFound",
+            },
+            Case {
+                code: Some(rpc::ErrorCode::Conflict),
+                check: |e| matches!(e, ProviderError::Conflict(msg) if msg == "boom"),
+                name: "Conflict",
+            },
+            Case {
+                code: Some(rpc::ErrorCode::SemanticLimitation),
+                check: |e| matches!(e, ProviderError::SemanticLimitation(msg) if msg == "boom"),
+                name: "SemanticLimitation",
+            },
+            Case {
+                code: Some(rpc::ErrorCode::Network),
+                // Pinned specifically (§16's asymmetric row): `Network`
+                // folds into the transport error family, not a second
+                // network-flavoured `ProviderError` variant of its own.
+                check: |e| {
+                    matches!(
+                        e,
+                        ProviderError::Transport(ProviderTransportError::Network(msg))
+                            if msg == "boom"
+                    )
+                },
+                name: "Network",
+            },
+            Case {
+                code: Some(rpc::ErrorCode::Unrecognized),
+                check: |e| matches!(e, ProviderError::Provider(msg) if msg == "boom"),
+                name: "Unrecognized",
+            },
+            Case {
+                code: None,
+                check: |e| matches!(e, ProviderError::Provider(msg) if msg == "boom"),
+                name: "None",
+            },
+        ];
+
+        for case in cases {
+            let response_json = rpc::Response::<()>::error("boom", case.code);
+            let mock = Arc::new(MockTransport::with_response(&response_json));
+            let provider = provider_with_transport(mock);
+
+            let err = provider
+                .call(EchoCommand { value: "x".into() })
+                .await
+                .unwrap_err();
+
+            assert!(
+                (case.check)(&err),
+                "code {:?} (case {}) classified as {err:?}",
+                case.code,
+                case.name
+            );
+        }
+    }
+
     #[tokio::test]
     async fn call_returns_deserialize_error_on_garbage_response() {
         let mock = Arc::new(MockTransport::with_response("not json at all"));
@@ -294,5 +407,116 @@ mod tests {
             err,
             ProviderError::Transport(ProviderTransportError::Timeout(_))
         ));
+    }
+
+    /// `P6-02`. Drives a real subprocess standing in for a binary whose
+    /// `Method` enum predates `capabilities` entirely — not a mock that
+    /// returns a canned envelope, which would only prove the decode.
+    ///
+    /// The stub answers a `capabilities` request the way a binary that
+    /// predates `P1-01`'s two-stage envelope decode does: the whole request
+    /// line fails to parse, verbatim, with no `code` field at all (`P1-01`'s
+    /// `RawRequest` indirection, and the `code` field it needs to name a
+    /// verb, do not exist yet at that vintage). `classify` has nothing to
+    /// key on but the generic arm, so the caller gets `ProviderError::
+    /// Provider` rather than the named, typed `UnsupportedMethod` a binary
+    /// built *after* `P1-01` (but still before `P1-02`) would produce —
+    /// `connection::tests::an_unknown_capabilities_method_withholds_every_task_push`
+    /// already proves that better-case shape end to end. Either way the call
+    /// fails closed: no panic, no malformed-JSON crash, no silent `Ok`.
+    ///
+    /// Discovered gap (reported, not patched here per this ticket's
+    /// non-goals): for *this* vintage specifically, the surfaced message
+    /// cannot name the provider slug the way §17's "clear version/capability
+    /// error" aspires to, because the old binary itself never puts that
+    /// information on the wire and nothing on `Provider::call`'s generic
+    /// arm adds it back in.
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn a_pre_capability_binary_yields_a_version_error_for_the_capabilities_verb() {
+        let (_tmp, bin) = legacy_provider_binary();
+        let provider = Provider::from_binary_path(bin).unwrap();
+        assert_eq!(provider.slug().as_str(), "legacy");
+
+        let err = provider
+            .call(rpc::Capabilities {
+                remote: crate::RemoteConfigParams::new(),
+            })
+            .await
+            .unwrap_err();
+
+        let ProviderError::Provider(msg) = &err else {
+            panic!("expected the generic Provider arm for a pre-RawRequest binary, got {err:?}");
+        };
+        assert!(
+            msg.contains("capabilities"),
+            "the offending verb must still be visible in the message: {msg}"
+        );
+        assert!(
+            !msg.contains("legacy"),
+            "a genuinely pre-P1-01 binary cannot know its own slug; if this \
+             now passes, `Provider::call` grew slug-naming and this test \
+             (and its doc comment) is stale: {msg}"
+        );
+    }
+
+    /// `P6-02`. §18's migration-burden bound only holds if the six
+    /// unmodified verbs are shown *unmodified*, driven against the very
+    /// same real subprocess the test above proves degrades correctly on the
+    /// seventh — "fail closed" must not be implementable by refusing the
+    /// whole binary.
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn a_pre_capability_binary_still_serves_every_original_verb() {
+        let (_tmp, bin) = legacy_provider_binary();
+        let provider = Provider::from_binary_path(bin).unwrap();
+
+        provider
+            .call(rpc::Connect {
+                options: Default::default(),
+                data: Default::default(),
+            })
+            .await
+            .expect("connect");
+
+        provider
+            .call(rpc::ListCalendars {
+                account_identifier: "legacy@example.com".to_string(),
+            })
+            .await
+            .expect("list_calendars");
+
+        provider
+            .call(rpc::ListEvents {
+                remote: crate::RemoteConfigParams::new(),
+                from: "2026-01-01T00:00:00+00:00".into(),
+                to: "2026-12-31T23:59:59+00:00".into(),
+            })
+            .await
+            .expect("list_events");
+
+        provider
+            .call(rpc::CreateItem {
+                remote: crate::RemoteConfigParams::new(),
+                event: crate::test_utils::test_event().into(),
+            })
+            .await
+            .expect("create_event");
+
+        provider
+            .call(rpc::UpdateItem {
+                remote: crate::RemoteConfigParams::new(),
+                event: crate::test_utils::test_event().into(),
+            })
+            .await
+            .expect("update_event");
+
+        provider
+            .call(rpc::DeleteItem {
+                remote: crate::RemoteConfigParams::new(),
+                event: crate::test_utils::test_event().into(),
+            })
+            .await
+            .expect("delete_event");
     }
 }

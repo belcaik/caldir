@@ -30,6 +30,18 @@ impl MockProvider {
         self.transport.set_response(envelope.to_string());
     }
 
+    /// Stub the next RPC call with a raw JSON `data` payload.
+    ///
+    /// For wire shapes no typed response can express — a provider *newer* than
+    /// this core, sending a component this core cannot decode.
+    pub(crate) fn reply_raw_data(&self, data: serde_json::Value) {
+        let envelope = serde_json::json!({
+            "status": "success",
+            "data": data,
+        });
+        self.transport.set_response(envelope.to_string());
+    }
+
     /// Stub the next RPC call to fail with a transport-level error.
     pub(crate) fn reply_error(&self, error: ProviderTransportError) {
         self.transport.set_error(error);
@@ -40,6 +52,12 @@ impl MockProvider {
             self.slug.clone(),
             self.transport.clone() as Arc<dyn ProviderTransport>,
         )
+    }
+
+    /// Whether any request reached the transport at all. For seams that must
+    /// abort *before* the wire.
+    pub(crate) fn received_a_request(&self) -> bool {
+        self.transport.captured_request().is_some()
     }
 
     /// Decode the captured request as `C`, asserting the wire method matches `C::METHOD`.

@@ -91,7 +91,7 @@ impl KnownEventIds {
 mod tests {
     use super::*;
     use crate::EventTime;
-    use crate::event::{EventUid, RecurrenceId};
+    use crate::event::{ComponentKind, EventUid, RecurrenceId};
     use chrono::{NaiveDate, TimeZone, Utc};
     use pretty_assertions::assert_eq;
 
@@ -125,6 +125,75 @@ mod tests {
             "t5slp0vorqgoasogqkvadjt9jj@hooli.com__20240625T180000",
             "t81pd0rkq8ujaughbrjhh87svo@hooli.com",
         ]
+    }
+
+    // T-21 (C4 AMENDED, INVIOLABLE for the event form). The downgrade argument
+    // in ADJUDICATION B-4 depends on this file staying one-id-per-line
+    // plaintext, so an older caldir sees a task line as an inert unknown id.
+    #[test]
+    fn event_form_lines_are_byte_identical_and_task_lines_are_prefixed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("known_event_ids");
+
+        // (a) An existing, pre-ComponentKind file loads as kind Event...
+        std::fs::write(&path, sample_lines().join("\n")).unwrap();
+        let loaded = KnownEventIds::load(&path).unwrap();
+        assert_eq!(loaded.0, sample_ids());
+        for id in loaded.iter() {
+            assert_eq!(
+                id.kind(),
+                ComponentKind::Event,
+                "{id} must load as an event"
+            );
+        }
+
+        // ...and re-writes byte-identically.
+        loaded.write(&path).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            sample_lines().join("\n")
+        );
+
+        // (b) A task id goes into the SAME file, sigil-prefixed, one per line,
+        // sorted — task lines simply sort under "V".
+        let mut ids = sample_ids();
+        ids.insert(EventInstanceId::todo(
+            EventUid::new("assignment-123@u-crawler".to_string()),
+            None,
+        ));
+        // Hazard 1 verbatim: this task shares UID *and* recurrence id with the
+        // third sample event line. Without kind in Hash/Eq the pair collapses
+        // to one set entry and one line.
+        ids.insert(EventInstanceId::todo(
+            EventUid::new("t81pd0rkq8ujaughbrjhh87svo@hooli.com".to_string()),
+            None,
+        ));
+        KnownEventIds(ids).write(&path).unwrap();
+
+        // `write_from` sorts the strings, so task lines land under "V" — ahead
+        // of the lowercase event UIDs. That is byte ordering doing its job and
+        // must not be "fixed" with a custom Ord.
+        let mut expected = vec![
+            "VTODO:assignment-123@u-crawler",
+            "VTODO:t81pd0rkq8ujaughbrjhh87svo@hooli.com",
+        ];
+        expected.extend(sample_lines());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            expected.join("\n"),
+            "event lines unchanged, task lines prefixed, sorted, one per line"
+        );
+
+        // And the whole file round-trips through load with kinds intact.
+        let reloaded = KnownEventIds::load(&path).unwrap();
+        assert_eq!(reloaded.0.len(), 5);
+        assert_eq!(
+            reloaded
+                .iter()
+                .filter(|id| id.kind() == ComponentKind::Todo)
+                .count(),
+            2
+        );
     }
 
     #[test]

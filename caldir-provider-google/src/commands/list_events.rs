@@ -3,16 +3,31 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use caldir_core::provider::ProviderStorage;
 use caldir_core::rpc::ListEvents;
-use caldir_core::{Availability, Event, EventTime, EventUid, RecurrenceId, Status, XProperty};
+use caldir_core::{
+    Availability, CalendarItem, Event, EventTime, EventUid, RecurrenceId, Status, XProperty,
+};
 use google_calendar::types::OrderBy;
 
 use crate::app_config::AppConfigStore;
 use crate::constants::{PROVIDER_EVENT_ID_PROPERTY, PROVIDER_NAME};
 use crate::google_event::{FromGoogle, google_dt_to_event_time};
-use crate::remote_config::GoogleRemoteConfig;
+use crate::google_tasks::{self, task_to_calendar_item};
+use crate::remote_config::{
+    GoogleRemoteConfig, GoogleResourceKind, GoogleTaskListRemoteConfig, resolve_resource_kind,
+};
 use crate::session::SessionStore;
 
-pub async fn handle(cmd: ListEvents) -> Result<Vec<Event>> {
+/// Resolves the remote's resource kind and branches once, at the top: a
+/// task-list remote takes the Tasks path, a calendar remote takes the
+/// Calendar path. The two never call both APIs and merge (spec §9).
+pub async fn handle(cmd: ListEvents) -> Result<Vec<CalendarItem>> {
+    match resolve_resource_kind(&cmd.remote)? {
+        GoogleResourceKind::Calendar => handle_calendar(cmd).await,
+        GoogleResourceKind::TaskList => handle_task_list(cmd).await,
+    }
+}
+
+async fn handle_calendar(cmd: ListEvents) -> Result<Vec<CalendarItem>> {
     let config = GoogleRemoteConfig::try_from(&cmd.remote)?;
     let account_email = &config.google_account;
     let calendar_id = &config.google_calendar_id;
@@ -49,7 +64,46 @@ pub async fn handle(cmd: ListEvents) -> Result<Vec<Event>> {
         .context("Failed to fetch events")?
         .body;
 
-    process_google_events(google_events)
+    Ok(process_google_events(google_events)?
+        .into_iter()
+        .map(CalendarItem::Event)
+        .collect())
+}
+
+/// The Tasks half of the split (spec §9): never touches the Calendar API,
+/// never returns anything but `CalendarItem::Todo`.
+async fn handle_task_list(cmd: ListEvents) -> Result<Vec<CalendarItem>> {
+    let config = GoogleTaskListRemoteConfig::try_from(&cmd.remote)?;
+    let account_email = &config.google_account;
+    let task_list_id = &config.google_resource_id;
+
+    let storage = ProviderStorage::for_provider(PROVIDER_NAME)?;
+    let session_store = SessionStore::new(storage.clone());
+    let app_config_store = AppConfigStore::new(storage);
+
+    let session = session_store
+        .load_valid(account_email, &app_config_store)
+        .await?;
+    session.require_tasks_scope()?;
+
+    let tasks = google_tasks::list_tasks(session.access_token(), task_list_id)
+        .await
+        .context("Failed to fetch Google Tasks")?;
+
+    process_google_tasks(tasks)
+}
+
+/// Converts Google Tasks into `CalendarItem::Todo`s, dropping `deleted`
+/// tasks (a remote delete) but keeping `hidden` ones (Google's own
+/// completed-task UI hiding, not a delete — see `google_tasks::from_google`).
+fn process_google_tasks(tasks: Vec<google_tasks::Task>) -> Result<Vec<CalendarItem>> {
+    let mut items = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        if let Some(item) = task_to_calendar_item(task)? {
+            items.push(item);
+        }
+    }
+    Ok(items)
 }
 
 /// Convert Google's raw events list into caldir Events.
@@ -285,5 +339,63 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].uid.as_str(), "uid1@google.com");
         assert_eq!(result[0].status, Status::Cancelled);
+    }
+
+    /// GOOGLE-12 control: the refactor that lets `handle` return
+    /// `Vec<CalendarItem>` is exactly when an event could start arriving as
+    /// something else. Assert on the serialized bytes, not just the type
+    /// (CROSS-6): a VEVENT never becomes a VTODO tag on the wire.
+    #[test]
+    fn the_event_path_still_yields_only_events() {
+        let result = process_google_events(vec![master("m1", "uid1@google.com", "Weekly retro")])
+            .unwrap()
+            .into_iter()
+            .map(CalendarItem::Event)
+            .collect::<Vec<_>>();
+
+        assert_eq!(result.len(), 1);
+        assert!(
+            result
+                .iter()
+                .all(|item| matches!(item, CalendarItem::Event(_)))
+        );
+        let CalendarItem::Event(ref event) = result[0] else {
+            panic!("expected an Event");
+        };
+        let ics = event.to_ics_string();
+        assert!(ics.contains("BEGIN:VEVENT"));
+        assert!(!ics.contains("BEGIN:VTODO"));
+    }
+
+    fn minimal_task(id: &str, title: &str) -> google_tasks::Task {
+        // `google_tasks::Task` fields are all `pub(crate)`-visible from here;
+        // built directly rather than through JSON since this test exercises
+        // `process_google_tasks`, not deserialization.
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "title": title,
+        }))
+        .unwrap()
+    }
+
+    /// Mirrors `standalone_cancelled_tombstone_is_dropped` for the task path.
+    /// `hidden` is the trap: Google hides *completed* tasks in its own UI, so
+    /// treating `hidden` as a delete would remove every completed task from
+    /// the user's directory on the next sync.
+    #[test]
+    fn a_deleted_google_task_is_dropped_from_the_listing() {
+        let mut deleted = minimal_task("t1", "Buy milk");
+        deleted.deleted = true;
+
+        let mut hidden_completed = minimal_task("t2", "File taxes");
+        hidden_completed.status = "completed".into();
+        hidden_completed.hidden = true;
+
+        let result = process_google_tasks(vec![deleted, hidden_completed]).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert!(
+            matches!(&result[0], CalendarItem::Todo(todo) if todo.summary.as_deref() == Some("File taxes"))
+        );
     }
 }

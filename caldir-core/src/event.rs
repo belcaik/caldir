@@ -1,6 +1,7 @@
 mod attachment;
 mod attendee;
 mod availability;
+pub(crate) mod equality;
 mod error;
 mod from_icalendar;
 mod instance_id;
@@ -8,7 +9,7 @@ mod occurrences;
 mod organizer;
 mod recurrence;
 mod reminder;
-mod slugify;
+pub(crate) mod slugify;
 mod status;
 mod time;
 mod to_icalendar;
@@ -16,12 +17,17 @@ pub mod tz_normalize;
 mod visibility;
 mod x_property;
 
+// Test-only: the last production narrowing now lives in
+// `CalendarItem::into_event`.
+#[cfg(test)]
+use crate::item::CalendarItem;
 pub use attachment::Attachment;
 pub use attendee::{Attendee, ParticipationStatus};
 pub use availability::Availability;
 use chrono::{DateTime, Utc};
+use equality::{attachments_eq, x_properties_eq};
 pub use error::EventError;
-pub use instance_id::{EventInstanceId, EventUid, RecurrenceId};
+pub use instance_id::{ComponentKind, EventInstanceId, EventUid, RecurrenceId};
 pub use occurrences::expand_in_range;
 pub use organizer::Organizer;
 pub use recurrence::Recurrence;
@@ -31,8 +37,8 @@ pub use time::EventTime;
 pub use visibility::Visibility;
 pub use x_property::XProperty;
 
-const ICS_PRODID: &str = "CALDIR";
-const ICS_VERSION: &str = "2.0";
+pub(crate) const ICS_PRODID: &str = "CALDIR";
+pub(crate) const ICS_VERSION: &str = "2.0";
 const ICS_UID_DOMAIN: &str = "caldir";
 
 #[derive(Debug, Clone, Eq, educe::Educe)]
@@ -89,34 +95,6 @@ impl Event {
             url: None,
             attachments: Vec::new(),
             x_properties: Vec::new(),
-        }
-    }
-
-    /// Parse ICS document to list of events
-    pub fn from_ics_str(contents: &str) -> Result<Vec<Result<Self, EventError>>, EventError> {
-        let icalendar: icalendar::Calendar = contents
-            .parse()
-            .map_err(|err| EventError::InvalidIcs(contents.to_string(), err))?;
-
-        Ok(icalendar.events().map(Event::try_from).collect())
-    }
-
-    pub(crate) fn load_single(path: &std::path::Path) -> Result<Self, EventError> {
-        let contents =
-            std::fs::read_to_string(path).map_err(|err| EventError::Io(path.to_path_buf(), err))?;
-
-        Self::from_single_ics_str(&contents)
-    }
-
-    pub(crate) fn from_single_ics_str(contents: &str) -> Result<Self, EventError> {
-        let events = Self::from_ics_str(contents)?;
-
-        match <[Result<Self, EventError>; 1]>::try_from(events) {
-            Ok([result]) => result,
-            Err(events) => Err(EventError::UnexpectedEventCount {
-                expected: 1,
-                found: events.len(),
-            }),
         }
     }
 
@@ -234,7 +212,9 @@ impl Event {
     /// Panics on any deviation — for use in tests with known-good fixtures.
     #[cfg(test)]
     pub(crate) fn parse_single_ics(contents: &str) -> Event {
-        Self::from_single_ics_str(contents).expect("expected exactly one valid event in ICS")
+        CalendarItem::from_single_ics_str(contents)
+            .and_then(CalendarItem::into_event)
+            .expect("expected exactly one valid event in ICS")
     }
 
     // icalendar library adds UID to every VALARM
@@ -273,22 +253,9 @@ impl Event {
     }
 }
 
-fn new_uid() -> EventUid {
+pub(crate) fn new_uid() -> EventUid {
     let uid = format!("{}@{}", uuid::Uuid::new_v4(), ICS_UID_DOMAIN);
     EventUid::new(uid)
-}
-
-// Order-independent compare: BTreeMap-parsed ICS files give alphabetical
-// order, but providers (e.g. Google) build x_properties in insertion order.
-fn x_properties_eq(a: &[XProperty], b: &[XProperty]) -> bool {
-    a.len() == b.len() && a.iter().all(|x| b.contains(x))
-}
-
-// The URI is the attachment's identity. Compare on it alone (order-independent)
-// so adding/removing/changing an attachment registers as a content change,
-// while volatile params (SIZE, MANAGED-ID) drifting doesn't cause sync churn.
-fn attachments_eq(a: &[Attachment], b: &[Attachment]) -> bool {
-    a.len() == b.len() && a.iter().all(|x| b.iter().any(|y| y.uri == x.uri))
 }
 
 #[cfg(test)]
@@ -330,7 +297,7 @@ SUMMARY:Test Event
 END:VEVENT"
             .replace('\n', "\r\n");
 
-        let result = Event::from_ics_str(&ics);
+        let result = CalendarItem::from_ics_str(&ics);
         assert!(matches!(result, Err(EventError::InvalidIcs(_, _))));
     }
 
@@ -958,7 +925,7 @@ VERSION:2.0
 END:VCALENDAR
 "
         .replace('\n', "\r\n");
-        let events = Event::from_ics_str(&ics).unwrap();
+        let events = CalendarItem::from_ics_str(&ics).unwrap();
         assert!(events.is_empty());
     }
 
@@ -975,12 +942,12 @@ END:VCALENDAR
 "
         .replace('\n', "\r\n");
 
-        let events = Event::from_ics_str(&ics).unwrap();
+        let events = CalendarItem::from_ics_str(&ics).unwrap();
 
         assert_eq!(events.len(), 1);
         let event = events.into_iter().next().unwrap().unwrap();
-        assert_eq!(event.uid.as_str(), "only@caldir");
-        assert_eq!(event.summary.as_deref(), Some("Only event"));
+        assert_eq!(event.uid().as_str(), "only@caldir");
+        assert_eq!(event.summary(), Some("Only event"));
     }
 
     #[test]
@@ -1006,16 +973,16 @@ END:VCALENDAR
 "
         .replace('\n', "\r\n");
 
-        let events: Vec<Event> = Event::from_ics_str(&ics)
+        let events: Vec<CalendarItem> = CalendarItem::from_ics_str(&ics)
             .unwrap()
             .into_iter()
             .map(Result::unwrap)
             .collect();
 
         assert_eq!(events.len(), 3);
-        assert_eq!(events[0].uid.as_str(), "first@caldir");
-        assert_eq!(events[1].uid.as_str(), "second@caldir");
-        assert_eq!(events[2].uid.as_str(), "third@caldir");
+        assert_eq!(events[0].uid().as_str(), "first@caldir");
+        assert_eq!(events[1].uid().as_str(), "second@caldir");
+        assert_eq!(events[2].uid().as_str(), "third@caldir");
     }
 
     #[test]
@@ -1068,7 +1035,7 @@ END:VEVENT
 "
         .replace('\n', "\r\n");
 
-        let result = Event::from_ics_str(&ics);
+        let result = CalendarItem::from_ics_str(&ics);
 
         assert!(matches!(result, Err(EventError::InvalidIcs(_, _))));
     }
@@ -1093,10 +1060,10 @@ END:VCALENDAR
 "
         .replace('\n', "\r\n");
 
-        let events = Event::from_ics_str(&ics).unwrap();
+        let events = CalendarItem::from_ics_str(&ics).unwrap();
 
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].as_ref().unwrap().uid.as_str(), "good@caldir");
+        assert_eq!(events[0].as_ref().unwrap().uid().as_str(), "good@caldir");
         assert!(matches!(events[1], Err(EventError::MissingUid)));
     }
 
@@ -1114,5 +1081,666 @@ END:VCALENDAR
             .collect::<Vec<_>>()
             .join("\r\n")
             + "\r\n"
+    }
+
+    // --- VTODO support (RED regression tests) ---
+
+    #[test]
+    fn from_ics_str_parses_a_vtodo_document() {
+        use crate::test_utils::VTODO_ICS;
+
+        let parsed = CalendarItem::from_ics_str(VTODO_ICS)
+            .unwrap_or_else(|err| panic!("VTODO document failed to parse: {err:?}"));
+
+        assert_eq!(
+            parsed.len(),
+            1,
+            "VTODO document yielded {} entries; icalendar::Calendar::events() \
+             (caldir-core/src/event.rs:101) filters to VEVENT only",
+            parsed.len()
+        );
+
+        let event = parsed
+            .into_iter()
+            .next()
+            .unwrap()
+            .unwrap_or_else(|err| panic!("VTODO could not be converted to an Event: {err:?}"));
+
+        assert_eq!(event.uid().as_str(), "assignment-123@u-crawler");
+        assert_eq!(
+            event.summary(),
+            Some("Assignment 3 - Recursive descent parser")
+        );
+    }
+
+    #[test]
+    fn from_single_ics_str_parses_a_vtodo_document() {
+        use crate::test_utils::VTODO_ICS;
+
+        match CalendarItem::from_single_ics_str(VTODO_ICS) {
+            Ok(event) => assert_eq!(event.uid().as_str(), "assignment-123@u-crawler"),
+            Err(EventError::UnexpectedComponentCount { expected, found }) => panic!(
+                "VTODO rejected by arity check at caldir-core/src/event.rs:116 \
+                 (expected {expected}, found {found})"
+            ),
+            Err(err) => panic!("VTODO rejected for an unexpected reason: {err:?}"),
+        }
+    }
+
+    /// Control: the VEVENT half of the same u_crawler output must keep working.
+    #[test]
+    fn from_single_ics_str_parses_the_vevent_control_document() {
+        use crate::test_utils::VEVENT_CONTROL_ICS;
+
+        let event = CalendarItem::from_single_ics_str(VEVENT_CONTROL_ICS).unwrap();
+
+        assert_eq!(event.uid().as_str(), "window-123@u-crawler");
+        assert_eq!(event.summary(), Some("Assignment 3 - submission window"));
+    }
+
+    /// Observed, and correct, behaviour for a component-less document: nothing
+    /// to parse. Documented so a VTODO fix does not accidentally change it.
+    #[test]
+    fn from_ics_str_yields_nothing_for_a_component_less_document() {
+        use crate::test_utils::EMPTY_VCALENDAR_ICS;
+
+        let parsed = CalendarItem::from_ics_str(EMPTY_VCALENDAR_ICS).unwrap();
+
+        assert!(parsed.is_empty());
+        assert!(matches!(
+            CalendarItem::from_single_ics_str(EMPTY_VCALENDAR_ICS),
+            Err(EventError::UnexpectedComponentCount {
+                expected: 1,
+                found: 0
+            })
+        ));
+    }
+
+    // --- VEVENT no-regression control lock (T-5, R2/R45/R104, C2) ---
+
+    /// One corpus entry: the bytes on disk, the bytes caldir must write back,
+    /// and the answers the two range predicates must keep giving.
+    struct VeventControlCase {
+        name: &'static str,
+        /// The document as it exists on disk.
+        input: String,
+        /// The exact bytes `to_ics_string` must emit for it (DTSTAMP aside).
+        expected_ics: String,
+        /// `(from, to, expected)` for `occurs_in_range`.
+        occurs_probes: Vec<(DateTime<Utc>, DateTime<Utc>, bool)>,
+        /// `(from, to, expected)` for `has_occurrence_in_range`.
+        occurrence_probes: Vec<(DateTime<Utc>, DateTime<Utc>, bool)>,
+    }
+
+    fn crlf(ics: &str) -> String {
+        ics.replace('\n', "\r\n")
+    }
+
+    fn utc(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(y, m, d, h, min, 0).unwrap()
+    }
+
+    /// Local midnight, as an instant. All-day events anchor to the system zone
+    /// (`EventTime::to_utc` goes through `chrono::Local`), so the edges of an
+    /// all-day event's range are only sharp when expressed this way — which is
+    /// what makes this case meaningful in all three CI zones (R106).
+    fn local_midnight(y: i32, m: u32, d: u32) -> DateTime<Utc> {
+        chrono::Local
+            .with_ymd_and_hms(y, m, d, 0, 0, 0)
+            .single()
+            .expect("local midnight should be unambiguous on these dates")
+            .with_timezone(&Utc)
+    }
+
+    /// The canonical form of `VEVENT_CONTROL_ICS`: caldir rewrites the
+    /// VCALENDAR headers (its own PRODID, no CALSCALE) but must not touch
+    /// anything inside the VEVENT.
+    const VEVENT_CONTROL_CANONICAL_ICS: &str = "BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:CALDIR
+BEGIN:VEVENT
+DTSTAMP:20260801T090000Z
+DESCRIPTION:Submission window for assignment 3.
+DTEND:20260815T120000Z
+DTSTART:20260815T100000Z
+SUMMARY:Assignment 3 - submission window
+UID:window-123@u-crawler
+URL:https://example.edu/courses/cs101/assignments/123
+END:VEVENT
+END:VCALENDAR
+";
+
+    const ALL_DAY_ICS: &str = "BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:CALDIR
+BEGIN:VEVENT
+DTSTAMP:20260801T090000Z
+DTEND;VALUE=DATE:20260816
+DTSTART;VALUE=DATE:20260815
+SUMMARY:Study day
+UID:all-day-1@caldir
+END:VEVENT
+END:VCALENDAR
+";
+
+    const RECURRING_MASTER_ICS: &str = "BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:CALDIR
+BEGIN:VEVENT
+DTSTAMP:20260801T090000Z
+DTEND;TZID=Europe/Oslo:20260515T164500
+DTSTART;TZID=Europe/Oslo:20260515T160000
+RRULE:FREQ=WEEKLY;BYDAY=FR;UNTIL=20260605T140000Z
+SUMMARY:Friday retro
+UID:recurring-1@caldir
+EXDATE;TZID=Europe/Oslo:20260522T160000
+END:VEVENT
+END:VCALENDAR
+";
+
+    /// The fields `L1-02` moved out of `event.rs`: `x_properties` (compared
+    /// order-independently, parameters ignored) and `attachments` (compared by
+    /// URI alone). A corpus without them cannot see that regression.
+    const X_PROPS_AND_ATTACHMENT_ICS: &str = "BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:CALDIR
+BEGIN:VEVENT
+DTSTAMP:20260801T090000Z
+DTEND:20260515T144500Z
+DTSTART:20260515T140000Z
+SUMMARY:Design review
+UID:x-props-1@caldir
+X-ALT-DESC;FMTTYPE=text/html:<html>agenda</html>
+X-HOOLI-EVENT-ID:hooli-abc123
+ATTACH;FILENAME=agenda.pdf;FMTTYPE=application/pdf:https://drive.example.co
+ m/f/abc
+END:VEVENT
+END:VCALENDAR
+";
+
+    fn vevent_control_corpus() -> Vec<VeventControlCase> {
+        vec![
+            VeventControlCase {
+                name: "VEVENT_CONTROL_ICS",
+                input: crate::test_utils::VEVENT_CONTROL_ICS.to_string(),
+                expected_ics: crlf(VEVENT_CONTROL_CANONICAL_ICS),
+                occurs_probes: vec![
+                    // Range ending exactly at DTSTART does not overlap.
+                    (utc(2026, 8, 15, 8, 0), utc(2026, 8, 15, 10, 0), false),
+                    (utc(2026, 8, 15, 8, 0), utc(2026, 8, 15, 10, 1), true),
+                    (utc(2026, 8, 15, 10, 30), utc(2026, 8, 15, 11, 0), true),
+                    (utc(2026, 8, 15, 11, 59), utc(2026, 8, 15, 14, 0), true),
+                    // Range starting exactly at DTEND does not overlap.
+                    (utc(2026, 8, 15, 12, 0), utc(2026, 8, 15, 14, 0), false),
+                ],
+                occurrence_probes: vec![
+                    (utc(2026, 8, 15, 8, 0), utc(2026, 8, 15, 10, 0), false),
+                    (utc(2026, 8, 15, 8, 0), utc(2026, 8, 15, 10, 1), true),
+                    (utc(2026, 8, 15, 12, 0), utc(2026, 8, 15, 14, 0), false),
+                ],
+            },
+            VeventControlCase {
+                name: "all-day event",
+                input: crlf(ALL_DAY_ICS),
+                expected_ics: crlf(ALL_DAY_ICS),
+                occurs_probes: vec![
+                    (
+                        local_midnight(2026, 8, 14),
+                        local_midnight(2026, 8, 15),
+                        false,
+                    ),
+                    (
+                        local_midnight(2026, 8, 15),
+                        local_midnight(2026, 8, 16),
+                        true,
+                    ),
+                    (
+                        local_midnight(2026, 8, 16),
+                        local_midnight(2026, 8, 17),
+                        false,
+                    ),
+                    (local_midnight(2026, 8, 1), local_midnight(2026, 9, 1), true),
+                ],
+                occurrence_probes: vec![
+                    (
+                        local_midnight(2026, 8, 14),
+                        local_midnight(2026, 8, 15),
+                        false,
+                    ),
+                    (
+                        local_midnight(2026, 8, 15),
+                        local_midnight(2026, 8, 16),
+                        true,
+                    ),
+                    (
+                        local_midnight(2026, 8, 16),
+                        local_midnight(2026, 8, 17),
+                        false,
+                    ),
+                ],
+            },
+            VeventControlCase {
+                name: "recurring master",
+                input: crlf(RECURRING_MASTER_ICS),
+                expected_ics: crlf(RECURRING_MASTER_ICS),
+                // occurs_in_range looks at the master's own DTSTART/DTEND only:
+                // it deliberately does NOT expand the RRULE.
+                occurs_probes: vec![
+                    (utc(2026, 5, 15, 14, 0), utc(2026, 5, 15, 14, 45), true),
+                    (utc(2026, 5, 15, 14, 45), utc(2026, 5, 16, 0, 0), false),
+                    (utc(2026, 5, 29, 0, 0), utc(2026, 5, 30, 0, 0), false),
+                ],
+                // has_occurrence_in_range does expand it, and honours EXDATE
+                // and UNTIL.
+                occurrence_probes: vec![
+                    (utc(2026, 5, 15, 0, 0), utc(2026, 5, 16, 0, 0), true),
+                    // Excluded by EXDATE.
+                    (utc(2026, 5, 22, 0, 0), utc(2026, 5, 23, 0, 0), false),
+                    (utc(2026, 5, 29, 0, 0), utc(2026, 5, 30, 0, 0), true),
+                    // Past UNTIL.
+                    (utc(2026, 6, 19, 0, 0), utc(2026, 6, 26, 0, 0), false),
+                ],
+            },
+            VeventControlCase {
+                name: "x-properties and attachment",
+                input: crlf(X_PROPS_AND_ATTACHMENT_ICS),
+                expected_ics: crlf(X_PROPS_AND_ATTACHMENT_ICS),
+                occurs_probes: vec![
+                    (utc(2026, 5, 15, 13, 0), utc(2026, 5, 15, 14, 0), false),
+                    (utc(2026, 5, 15, 14, 0), utc(2026, 5, 15, 14, 45), true),
+                    (utc(2026, 5, 15, 14, 45), utc(2026, 5, 15, 15, 0), false),
+                ],
+                occurrence_probes: vec![
+                    (utc(2026, 5, 15, 13, 0), utc(2026, 5, 15, 14, 0), false),
+                    (utc(2026, 5, 15, 14, 0), utc(2026, 5, 15, 14, 45), true),
+                    (utc(2026, 5, 15, 14, 45), utc(2026, 5, 15, 15, 0), false),
+                ],
+            },
+        ]
+    }
+
+    /// T-5 (R2, R45, R104, C2). VTODO support must leave VEVENT behaviour
+    /// observably untouched. Each of the three properties below fails silently
+    /// and separately: equality drift changes sync *direction*, serialization
+    /// drift rewrites every user's files on the next write, and predicate drift
+    /// changes what gets deleted. So each is asserted on its own.
+    #[test]
+    fn vevent_control_round_trips_identically_after_vtodo_support() {
+        for case in vevent_control_corpus() {
+            let name = case.name;
+            let event = Event::parse_single_ics(&case.input);
+            let serialized = event.to_ics_string();
+            let reparsed = Event::parse_single_ics(&serialized);
+
+            // 1. Structural equality survives a full disk round trip (C2).
+            assert_eq!(event, reparsed, "{name}: structural equality drifted");
+
+            // 2. The bytes caldir writes back are the bytes it wrote before
+            //    (DTSTAMP is re-stamped on every serialize, R25).
+            assert_eq!(
+                strip_dtstamp(&case.expected_ics),
+                strip_dtstamp(&serialized),
+                "{name}: serialized bytes drifted"
+            );
+
+            // 3. Both range predicates still answer the same at the edges (R45).
+            for (from, to, expected) in case.occurs_probes {
+                assert_eq!(
+                    event.occurs_in_range(from, to),
+                    expected,
+                    "{name}: occurs_in_range({from}, {to})"
+                );
+            }
+
+            for (from, to, expected) in case.occurrence_probes {
+                assert_eq!(
+                    event.has_occurrence_in_range(from, to),
+                    expected,
+                    "{name}: has_occurrence_in_range({from}, {to})"
+                );
+            }
+        }
+    }
+
+    /// C2 companion lock: `Event`'s `==` answers "has the content changed?",
+    /// and that answer decides sync direction. `L1-02` moved the two custom
+    /// comparators out of this file, so pin what they mean here.
+    #[test]
+    fn event_equality_semantics_are_unchanged_after_vtodo_support() {
+        let base = Event::parse_single_ics(&crlf(X_PROPS_AND_ATTACHMENT_ICS));
+        assert_eq!(
+            base.x_properties.len(),
+            2,
+            "fixture must carry X- properties"
+        );
+        assert_eq!(
+            base.attachments.len(),
+            1,
+            "fixture must carry an attachment"
+        );
+        assert!(
+            base.x_properties.iter().any(|x| !x.params.is_empty()),
+            "fixture must carry an X- property with parameters"
+        );
+        assert!(
+            !base.attachments[0].params.is_empty(),
+            "fixture must carry an attachment with parameters"
+        );
+
+        // Sync bookkeeping, not content: ignored by ==.
+        let mut volatile = base.clone();
+        volatile.last_modified = Some(utc(2099, 1, 1, 0, 0));
+        volatile.sequence = base.sequence + 41;
+        assert_eq!(base, volatile, "last_modified/sequence must not affect ==");
+
+        // X- properties: order-independent, parameters ignored.
+        let mut reshuffled = base.clone();
+        reshuffled.x_properties.reverse();
+        for x in &mut reshuffled.x_properties {
+            x.params.clear();
+        }
+        assert_eq!(
+            base, reshuffled,
+            "x_properties order/params must not affect =="
+        );
+
+        // ...but a changed or dropped X- property IS a content change.
+        let mut changed_x = base.clone();
+        changed_x.x_properties[0].value = "drifted".to_string();
+        assert_ne!(
+            base, changed_x,
+            "a changed X- property value is a content change"
+        );
+
+        let mut dropped_x = base.clone();
+        dropped_x.x_properties.pop();
+        assert_ne!(base, dropped_x, "a dropped X- property is a content change");
+
+        // The other direction: a superset must not compare equal either.
+        let mut added_x = base.clone();
+        added_x
+            .x_properties
+            .push(XProperty::new("X-CALDIR-EXTRA", "1"));
+        assert_ne!(base, added_x, "an added X- property is a content change");
+
+        // Attachments: compared by URI alone, so volatile params don't churn.
+        let mut attachment_params = base.clone();
+        attachment_params.attachments[0].params.clear();
+        assert_eq!(
+            base, attachment_params,
+            "attachment params must not affect =="
+        );
+
+        // ...but a changed or dropped attachment IS a content change.
+        let mut changed_attachment = base.clone();
+        changed_attachment.attachments[0].uri = "https://drive.example.com/f/other".to_string();
+        assert_ne!(
+            base, changed_attachment,
+            "a changed attachment URI is a content change"
+        );
+
+        let mut dropped_attachment = base.clone();
+        dropped_attachment.attachments.pop();
+        assert_ne!(
+            base, dropped_attachment,
+            "a dropped attachment is a content change"
+        );
+
+        // The other direction: a superset must not compare equal either.
+        let mut added_attachment = base.clone();
+        added_attachment
+            .attachments
+            .push(Attachment::new("https://drive.example.com/f/extra"));
+        assert_ne!(
+            base, added_attachment,
+            "an added attachment is a content change"
+        );
+
+        // Guard against == degenerating into "always equal".
+        let mut retitled = base.clone();
+        retitled.summary = Some("Something else".to_string());
+        assert_ne!(base, retitled, "a changed summary is a content change");
+    }
+
+    // --- R19: a document that yields nothing is a hard error that names
+    // what it found; an unsupported component *beside* a supported one is
+    // ignored, exactly as `main` ignored it ---
+
+    #[test]
+    fn an_unsupported_component_errors_and_names_it() {
+        use crate::item::CalendarItem;
+
+        let vjournal = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+BEGIN:VJOURNAL\r\n\
+UID:journal@caldir\r\n\
+SUMMARY:A journal entry\r\n\
+END:VJOURNAL\r\n\
+END:VCALENDAR\r\n";
+
+        let err = CalendarItem::from_ics_str(vjournal)
+            .expect_err("a document with nothing supported must not yield an empty vec");
+        assert!(
+            err.to_string().contains("VJOURNAL"),
+            "error must name the component, got: {err}"
+        );
+
+        let x_foo = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+BEGIN:X-FOO\r\n\
+UID:foo@caldir\r\n\
+END:X-FOO\r\n\
+END:VCALENDAR\r\n";
+
+        let err = CalendarItem::from_ics_str(x_foo)
+            .expect_err("a document with nothing supported must not yield an empty vec");
+        assert!(
+            err.to_string().contains("X-FOO"),
+            "error must name the component, got: {err}"
+        );
+    }
+
+    /// The other half of the same rule, and the regression it was written
+    /// against: both documents above used to carry a supported component
+    /// beside the unsupported one, and asserting they errored is what lost a
+    /// `VEVENT` next to a `VJOURNAL`. The supported component must survive.
+    #[test]
+    fn an_unsupported_sibling_does_not_cost_the_supported_component() {
+        use crate::item::CalendarItem;
+
+        let ics = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+BEGIN:VEVENT\r\n\
+UID:event@caldir\r\n\
+DTSTART:20260301T100000Z\r\n\
+END:VEVENT\r\n\
+BEGIN:X-FOO\r\n\
+UID:foo@caldir\r\n\
+END:X-FOO\r\n\
+END:VCALENDAR\r\n";
+
+        let items = CalendarItem::from_ics_str(ics).expect("the VEVENT must still load");
+
+        assert_eq!(items.len(), 1);
+        assert!(matches!(items[0], Ok(CalendarItem::Event(_))));
+    }
+    /// One row of the equality table: the field's name, and a mutation that
+    /// changes only that field.
+    type Mutation = (&'static str, fn(&mut Event));
+
+    /// The `Event` twin of `todo::tests::every_content_field_participates_in_
+    /// equality`. `Event`'s `PartialEq` is the sync predicate too: `==` means
+    /// "content unchanged", and that is what picks push over pull.
+    ///
+    /// Pre-existing hole, not one this branch opened: `location`,
+    /// `description` and `reminders` could all be dropped from `==` with the
+    /// whole suite still green. The exhaustive destructure has no `..`, so a
+    /// new field on `Event` stops this test compiling until a row names it.
+    #[test]
+    fn every_content_field_participates_in_equality() {
+        let base = fully_populated_event();
+
+        let Event {
+            uid,
+            summary,
+            description,
+            location,
+            start,
+            end,
+            status,
+            availability,
+            visibility,
+            recurrence,
+            recurrence_id,
+            organizer,
+            attendees,
+            reminders,
+            url,
+            attachments,
+            x_properties,
+            last_modified,
+            sequence,
+        } = base.clone();
+
+        // Non-vacuity: every row below mutates an already-populated value.
+        assert!(!uid.as_str().is_empty());
+        assert!(summary.is_some() && description.is_some() && location.is_some());
+        assert_eq!(start, EventTime::Date(event_day(2026, 8, 10)));
+        assert!(end.is_some() && visibility.is_some() && url.is_some());
+        assert_eq!(status, Status::Tentative);
+        assert_eq!(availability, Availability::Free);
+        assert!(recurrence.is_some() && recurrence_id.is_some() && organizer.is_some());
+        assert!(!attendees.is_empty() && !reminders.is_empty());
+        assert!(!attachments.is_empty() && !x_properties.is_empty());
+        assert!(last_modified.is_some());
+        assert_eq!(sequence, 4);
+
+        let mutations: [Mutation; 17] = [
+            ("uid", |e| e.uid = EventUid::new("someone-else@caldir")),
+            ("summary", |e| e.summary = Some("Not everything".into())),
+            ("description", |e| {
+                e.description = Some("Some other rows".into())
+            }),
+            ("location", |e| e.location = Some("Room 4".into())),
+            ("start", |e| {
+                e.start = EventTime::Date(event_day(2027, 1, 2))
+            }),
+            ("end", |e| {
+                e.end = Some(EventTime::Date(event_day(2027, 3, 4)))
+            }),
+            ("status", |e| e.status = Status::Cancelled),
+            ("availability", |e| e.availability = Availability::Busy),
+            ("visibility", |e| e.visibility = Some(Visibility::Private)),
+            ("recurrence", |e| {
+                e.recurrence.as_mut().unwrap().rrule = "FREQ=DAILY".into()
+            }),
+            ("recurrence_id", |e| {
+                e.recurrence_id = Some(RecurrenceId::from_event_time(EventTime::Date(event_day(
+                    2027, 7, 8,
+                ))))
+            }),
+            ("organizer", |e| {
+                e.organizer = Some(Organizer::new("someone.else@example.com"))
+            }),
+            ("attendees", |e| {
+                e.attendees.push(Attendee::new("bo@example.com"))
+            }),
+            ("reminders", |e| {
+                e.reminders.push(Reminder::from_minutes(60))
+            }),
+            ("url", |e| e.url = Some("https://example.edu/a/2".into())),
+            ("attachments", |e| {
+                e.attachments
+                    .push(Attachment::new("https://example.com/b.pdf"))
+            }),
+            ("x_properties", |e| {
+                e.x_properties.push(XProperty::new("X-OTHER", "2"))
+            }),
+        ];
+
+        for (field, mutate) in mutations {
+            let mut changed = base.clone();
+            mutate(&mut changed);
+            assert_ne!(
+                base, changed,
+                "`{field}` is content: changing it must make the event unequal, \
+                 or an edit to it never syncs",
+            );
+        }
+
+        // ---- the three deliberate exclusions, pinned so they cannot widen ----
+
+        // 1. last_modified and sequence are ignored.
+        let mut bookkeeping = base.clone();
+        bookkeeping.last_modified = Some(Utc.with_ymd_and_hms(2002, 2, 2, 0, 0, 0).unwrap());
+        bookkeeping.sequence = sequence + 99;
+        assert_eq!(
+            base, bookkeeping,
+            "last_modified/sequence are bookkeeping: drift in them must not read \
+             as a content change",
+        );
+
+        // 2. attachments compare by URI alone, order-independently.
+        let mut reparametrized = base.clone();
+        for attachment in &mut reparametrized.attachments {
+            attachment.params.push(("SIZE".into(), "8192".into()));
+        }
+        assert_ne!(
+            base.attachments, reparametrized.attachments,
+            "non-vacuity: the attachment vectors really do differ",
+        );
+        assert_eq!(
+            base, reparametrized,
+            "an attachment's identity is its URI; params must not churn sync",
+        );
+
+        let mut two = base.clone();
+        two.attachments
+            .push(Attachment::new("https://example.com/b.pdf"));
+        let mut reversed = two.clone();
+        reversed.attachments.reverse();
+        assert_eq!(two, reversed, "attachment order is not content");
+
+        // 3. x_properties compare order-independently.
+        let mut two = base.clone();
+        two.x_properties.push(XProperty::new("X-OTHER", "2"));
+        let mut reversed = two.clone();
+        reversed.x_properties.reverse();
+        assert_eq!(two, reversed, "x-property order is not content");
+    }
+
+    fn event_day(year: i32, month: u32, day: u32) -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(year, month, day).expect("a real calendar date")
+    }
+
+    /// Every field of `Event` set to a distinguishable non-default value.
+    fn fully_populated_event() -> Event {
+        Event {
+            uid: EventUid::new("full@caldir"),
+            summary: Some("Everything".into()),
+            description: Some("All the rows".into()),
+            location: Some("Room 3".into()),
+            start: EventTime::Date(event_day(2026, 8, 10)),
+            end: Some(EventTime::Date(event_day(2026, 8, 11))),
+            status: Status::Tentative,
+            availability: Availability::Free,
+            visibility: Some(Visibility::Public),
+            recurrence: Some(Recurrence {
+                rrule: "FREQ=WEEKLY".into(),
+                exdates: vec![EventTime::Date(event_day(2026, 8, 22))],
+                rdates: vec![EventTime::Date(event_day(2026, 8, 29))],
+            }),
+            recurrence_id: Some(RecurrenceId::from_event_time(EventTime::Date(event_day(
+                2026, 8, 15,
+            )))),
+            organizer: Some(Organizer::new("boss@example.com")),
+            attendees: vec![Attendee::new("ann@example.com")],
+            reminders: vec![Reminder::from_minutes(15)],
+            url: Some("https://example.edu/a/1".into()),
+            attachments: vec![Attachment::new("https://example.com/a.pdf")],
+            x_properties: vec![XProperty::new("X-GOOGLE-ID", "abc123")],
+            last_modified: Some(Utc.with_ymd_and_hms(2026, 8, 2, 10, 15, 0).unwrap()),
+            sequence: 4,
+        }
     }
 }

@@ -6,7 +6,7 @@ use anyhow::Result;
 use caldir_core::{Caldir, Calendar};
 use owo_colors::OwoColorize;
 use std::io::{self, Write};
-use warning::{DoctorWarning, event_warnings};
+use warning::{DoctorWarning, event_warnings, skipped_warnings};
 
 /// Checks local caldir for bad calendar data:
 pub fn run(caldir: &Caldir) -> Result<()> {
@@ -53,7 +53,11 @@ fn calendar_reports(caldir: &Caldir) -> Vec<CalendarReport> {
 
 fn calendar_report(calendar: Calendar) -> CalendarReport {
     let warnings = match calendar.events() {
-        Ok(events) => event_warnings(&events),
+        Ok(listing) => {
+            let mut warnings = skipped_warnings(listing.skipped());
+            warnings.extend(event_warnings(listing.events()));
+            warnings
+        }
         Err(err) => vec![DoctorWarning::UnreadableEvents(err.to_string())],
     };
 
@@ -70,6 +74,59 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let calendar = Calendar::create(&tmp.path().join("work"), None).unwrap();
         (tmp, calendar)
+    }
+
+    /// T-43 (R77): unlike `treats_unreadable_events_as_warnings`, whose document
+    /// holds no component at all, this file *has* a VEVENT — the component itself
+    /// is broken. Skipping the file must still be audible, never silent.
+    #[test]
+    fn a_malformed_vevent_is_still_a_warning_after_component_skipping() {
+        let (_tmp, calendar) = test_calendar();
+        std::fs::write(
+            calendar.path().join("broken.ics"),
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:broken@caldir\r\nDTSTART:not-a-timestamp\r\nSUMMARY:Broken\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        )
+        .unwrap();
+
+        let report = calendar_report(calendar);
+
+        assert_eq!(report.warnings.len(), 1);
+        assert!(matches!(
+            report.warnings[0],
+            DoctorWarning::UnreadableEvents(_)
+        ));
+    }
+
+    /// R77 control: degradation must not become a swallow in the other
+    /// direction either. A well-formed VTODO beside a well-formed VEVENT is
+    /// two first-class items, so `calendar_report` reports nothing at all —
+    /// neither a skip nor a duplicate.
+    #[test]
+    fn a_valid_vtodo_sibling_is_not_a_warning() {
+        let (_tmp, calendar) = test_calendar();
+        let uid = "assignment-123@u-crawler";
+        std::fs::write(
+            calendar.path().join("window.ics"),
+            format!(
+                "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:{uid}\r\n\
+                 SUMMARY:Assignment window\r\nDTSTART:20260301T100000\r\n\
+                 DTEND:20260301T110000\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            calendar.path().join("_task__hand-in-assignment.ics"),
+            format!(
+                "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VTODO\r\nUID:{uid}\r\n\
+                 SUMMARY:Hand in assignment\r\nDUE:20260301T235900\r\n\
+                 END:VTODO\r\nEND:VCALENDAR\r\n"
+            ),
+        )
+        .unwrap();
+
+        let report = calendar_report(calendar);
+
+        assert!(report.warnings.is_empty(), "got {:?}", report.warnings);
     }
 
     #[test]

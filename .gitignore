@@ -4,3 +4,4 @@ other-libs
 website/node_modules
 website/dist
 website/.astro
+.claude/worktrees/

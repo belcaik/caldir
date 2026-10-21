@@ -52,7 +52,7 @@ impl Recurrence {
         }
     }
 
-    pub(crate) fn from_ical_event(event: &icalendar::Event) -> Option<Self> {
+    pub(crate) fn from_ical_event<C: Component + ?Sized>(event: &C) -> Option<Self> {
         let rrule = event.property_value("RRULE")?;
 
         let exdates = parse_event_time_list(event, "EXDATE");
@@ -98,7 +98,11 @@ impl Recurrence {
         }
     }
 
-    pub(crate) fn apply_to(&self, event: &mut icalendar::Event) {
+    // Generic over `Component` for the same reason `from_ical_event` is: the
+    // VTODO codec emits RRULE/EXDATE/RDATE identically (spec §6), and a copy
+    // would be a second place for the two to drift apart. Behaviour for
+    // `icalendar::Event` is unchanged.
+    pub(crate) fn apply_to<C: Component + ?Sized>(&self, event: &mut C) {
         event.append_property(Property::new("RRULE", &self.rrule));
         for exdate in &self.exdates {
             event.append_multi_property(DatePerhapsTime::from(exdate).to_property("EXDATE"));
@@ -154,7 +158,7 @@ fn with_until(rrule: &str, until_value: &str) -> String {
     parts.join(";")
 }
 
-fn parse_event_time_list(event: &icalendar::Event, name: &str) -> Vec<EventTime> {
+fn parse_event_time_list<C: Component + ?Sized>(event: &C, name: &str) -> Vec<EventTime> {
     event
         .multi_properties()
         .get(name)

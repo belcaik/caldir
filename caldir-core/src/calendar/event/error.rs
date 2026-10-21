@@ -3,12 +3,25 @@ use std::path::PathBuf;
 use crate::event::EventError;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum CalendarEventError {
     #[error("invalid event in ICS file {0}: {1}")]
     InvalidEvent(PathBuf, EventError),
 
     #[error("expected exactly one event in {path}, found {found}")]
     ExpectedSingleEvent { path: PathBuf, found: usize },
+
+    #[error("this item is a task, not an event")]
+    NotAnEvent,
+
+    #[error(
+        "expected exactly one VEVENT or VTODO in {path}, found {found}; \
+         split it into one file per item"
+    )]
+    ExpectedSingleComponent { path: PathBuf, found: usize },
+
+    #[error("no VEVENT or VTODO in {path} (found: {found})")]
+    NoSupportedComponent { path: PathBuf, found: String },
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),

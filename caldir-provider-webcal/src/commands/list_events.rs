@@ -1,8 +1,8 @@
 //! List events within a time range from a webcal subscription.
 
 use anyhow::Result;
-use caldir_core::Event;
 use caldir_core::rpc::ListEvents;
+use caldir_core::{CalendarItem, Event};
 use chrono::{DateTime, Utc};
 
 use crate::http;
@@ -13,11 +13,17 @@ pub async fn handle(cmd: ListEvents) -> Result<Vec<Event>> {
 
     let feed = http::fetch_feed(&config.webcal_url).await?;
 
-    let all_events: Vec<Event> = Event::from_ics_str(&feed.body)
+    let all_events: Vec<Event> = CalendarItem::from_ics_str(&feed.body)
         .map_err(|e| anyhow::anyhow!("Failed to parse webcal feed: {e}"))?
         .into_iter()
         .filter_map(|result| match result {
-            Ok(event) => Some(event),
+            Ok(CalendarItem::Event(event)) => Some(event),
+            // TODO: THIS ARM IS A SILENT VTODO DROP. `handle` returns
+            // `Vec<Event>`, so a task in the feed has nowhere to go and is
+            // dropped without a word — which the sync engine reads as a
+            // delete. Surfacing feed tasks is still to be done; this arm
+            // exists only because the loader now yields items, not events.
+            Ok(_) => None,
             Err(err) => {
                 eprintln!("caldir-provider-webcal: skipping malformed event: {err}");
                 None
@@ -78,10 +84,14 @@ mod tests {
         to: &str,
         feed_last_modified: Option<DateTime<Utc>>,
     ) -> Vec<Event> {
-        let all: Vec<Event> = Event::from_ics_str(body)
+        let all: Vec<Event> = CalendarItem::from_ics_str(body)
             .unwrap()
             .into_iter()
             .map(Result::unwrap)
+            .map(|item| match item {
+                CalendarItem::Event(event) => event,
+                item => panic!("these fixtures are VEVENT-only, got {item:?}"),
+            })
             .map(|mut event| {
                 if event.last_modified.is_none() {
                     event.last_modified = feed_last_modified;

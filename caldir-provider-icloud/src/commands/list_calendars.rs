@@ -55,6 +55,7 @@ mod tests {
             color: color.map(str::to_string),
             url: url.to_string(),
             read_only,
+            supports_tasks: None,
         }
     }
 

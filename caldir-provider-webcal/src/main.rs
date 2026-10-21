@@ -9,7 +9,7 @@ mod remote_config;
 
 use async_trait::async_trait;
 use caldir_core::rpc::{Connect, ConnectResponse, ListEvents};
-use caldir_core::{Event, provider};
+use caldir_core::{CalendarItem, provider};
 
 struct WebcalProvider;
 
@@ -19,8 +19,10 @@ impl provider::Handler for WebcalProvider {
         Ok(commands::connect::handle(cmd).await?)
     }
 
-    async fn list_events(&self, cmd: ListEvents) -> provider::Result<Vec<Event>> {
-        Ok(commands::list_events::handle(cmd).await?)
+    async fn list_events(&self, cmd: ListEvents) -> provider::Result<Vec<CalendarItem>> {
+        let events = commands::list_events::handle(cmd).await?;
+
+        Ok(events.into_iter().map(CalendarItem::from).collect())
     }
 }
 
