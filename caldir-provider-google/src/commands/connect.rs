@@ -20,6 +20,17 @@ use crate::app_config::{AppConfig, AppConfigStore};
 use crate::constants::{PROVIDER_NAME, REQUESTED_SCOPES};
 use crate::session::{AuthMode, Session, SessionData, SessionStore};
 
+fn authorization_url(client: &Client) -> Result<(Url, Vec<String>)> {
+    let scopes: Vec<String> = REQUESTED_SCOPES
+        .iter()
+        .map(|scope| scope.to_string())
+        .collect();
+    let mut url = Url::parse(&client.user_consent_url(&[]))?;
+    url.query_pairs_mut()
+        .append_pair("scope", &scopes.join(" "));
+    Ok((url, scopes))
+}
+
 pub async fn handle(cmd: Connect) -> Result<ConnectResponse> {
     let storage = ProviderStorage::for_provider(PROVIDER_NAME)?;
     let session_store = SessionStore::new(storage.clone());
@@ -147,19 +158,15 @@ To connect to Google Calendar, you need to create OAuth credentials:\n\
         String::new(),
     );
 
-    let scopes: Vec<String> = REQUESTED_SCOPES.iter().map(|s| s.to_string()).collect();
-
-    let authorization_url = client.user_consent_url(&scopes);
-
-    let parsed_url = Url::parse(&authorization_url)?;
-    let state = parsed_url
+    let (authorization_url, scopes) = authorization_url(&client)?;
+    let state = authorization_url
         .query_pairs()
         .find(|(k, _)| k == "state")
         .map(|(_, v)| v.to_string())
         .ok_or_else(|| anyhow::anyhow!("No state parameter in authorization URL"))?;
 
     let oauth_data = OAuthData {
-        authorization_url,
+        authorization_url: authorization_url.to_string(),
         state,
         scopes,
     };
@@ -279,7 +286,7 @@ async fn complete_auth(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::{CALENDAR_CALENDARS_SCOPE, TASKS_SCOPE};
+    use url::form_urlencoded;
 
     #[test]
     fn the_consent_url_requests_the_full_scope_set() {
@@ -291,10 +298,14 @@ mod tests {
             String::new(),
         );
 
-        let scopes: Vec<String> = REQUESTED_SCOPES.iter().map(|s| s.to_string()).collect();
-        let url = client.user_consent_url(&scopes);
+        let (url, _) = authorization_url(&client).unwrap();
 
-        assert!(url.contains(TASKS_SCOPE));
-        assert!(url.contains(CALENDAR_CALENDARS_SCOPE));
+        for scope in REQUESTED_SCOPES {
+            let encoded: String = form_urlencoded::byte_serialize(scope.as_bytes()).collect();
+            assert!(
+                url.as_str().contains(&encoded),
+                "authorization URL is missing encoded scope {scope}: {url}"
+            );
+        }
     }
 }

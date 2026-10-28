@@ -457,6 +457,15 @@ impl Calendar {
         Ok(())
     }
 
+    pub(crate) fn forget_sync_bases<I>(&mut self, ids: I) -> Result<(), CalendarError>
+    where
+        I: IntoIterator<Item = EventInstanceId>,
+    {
+        self.state
+            .forget_sync_bases(ids, &calendar_state_dir(&self.path))?;
+        Ok(())
+    }
+
     pub fn base_slug_for(name: Option<&str>) -> String {
         name.map(slugify).unwrap_or_else(|| "calendar".to_string())
     }

@@ -437,7 +437,7 @@ For a conflict, caldir first uses `SEQUENCE` when the remote event has no `LAST-
 
 Deletes do not use base content. If an identity has synced before, absence on either side is treated as a deletion and propagated even when the surviving copy was edited. For delete detection, a missing local file and remote `STATUS:CANCELLED` are already in sync; an active local copy still pulls a remote cancellation as a status update. Local events without an occurrence in the requested sync window are left untouched because remote absence is ambiguous outside that window.
 
-Bases are never removed. Retaining them after deletion preserves the knowledge that the identity synced before. Successful incoming creates and updates record the remote event as the new base. Successful outgoing creates and updates record the canonical event returned by the provider. If an already-synced local and remote event agree but their base is missing or stale, caldir backfills it during diff calculation. Unchanged bases are not rewritten.
+Bases are removed after a delete is successfully applied, whether incoming or outgoing. The matching legacy known ID is removed at the same time, so an item recreated later with the same identity is treated as new. A failed delete keeps its base. Successful incoming creates and updates record the remote event as the new base. Successful outgoing creates and updates record the canonical event returned by the provider. If an already-synced local and remote event agree but their base is missing or stale, caldir backfills it during diff calculation. Unchanged bases are not rewritten.
 
 Unreadable or malformed base files are skipped when state is loaded. The event then falls back to presence-only legacy state and revision-based direction detection.
 
@@ -451,7 +451,7 @@ abc123@google.com__20250317T100000Z
 def456@icloud.com
 ```
 
-IDs are retained after deletion. When both formats contain an identity, the ICS base supplies its content; an identity found only in `known_event_ids` is treated as previously synced but has no three-way comparison anchor.
+IDs are removed after a delete is successfully applied. When both formats contain an identity, the ICS base supplies its content; an identity found only in `known_event_ids` is treated as previously synced but has no three-way comparison anchor.
 
 ---
 

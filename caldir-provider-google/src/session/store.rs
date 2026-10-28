@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use caldir_core::provider::ProviderStorage;
 use chrono::{Duration, Utc};
-use google_calendar::Client;
+use google_calendar::{AccessToken, Client};
 use serde::Deserialize;
 use std::path::PathBuf;
 
@@ -12,6 +12,20 @@ use crate::app_config::AppConfigStore;
 use super::types::{AuthMode, Session, SessionData};
 
 const HOSTED_REFRESH_URL: &str = "https://caldir.org/auth/google/refresh";
+
+fn merge_refreshed_session_data(tokens: &AccessToken, previous: &SessionData) -> SessionData {
+    let mut refreshed: SessionData = tokens.into();
+
+    if tokens.refresh_token.is_empty() {
+        refreshed.refresh_token = previous.refresh_token.clone();
+    }
+    if tokens.scope.trim().is_empty() {
+        refreshed.granted_scopes = previous.granted_scopes.clone();
+    }
+
+    refreshed.auth_mode = AuthMode::Local;
+    refreshed
+}
 
 /// Reads and writes [`Session`] files under a provider's storage root.
 ///
@@ -185,19 +199,12 @@ impl SessionStore {
             session.data.refresh_token.clone(),
         );
 
-        let mut tokens = client
+        let tokens = client
             .refresh_access_token()
             .await
             .context("Failed to refresh token")?;
 
-        // Google typically doesn't return a new refresh_token on refresh
-        if tokens.refresh_token.is_empty() {
-            tokens.refresh_token = session.data.refresh_token.clone();
-        }
-
-        let mut new_data: SessionData = (&tokens).into();
-        new_data.auth_mode = AuthMode::Local;
-        session.data = new_data;
+        session.data = merge_refreshed_session_data(&tokens, &session.data);
         self.save(session)?;
 
         Ok(())
@@ -236,6 +243,51 @@ mod tests {
                 granted_scopes: vec![],
             },
         }
+    }
+
+    fn refreshed_tokens(scope: Option<&str>) -> AccessToken {
+        AccessToken {
+            access_token: "new-access".to_string(),
+            expires_in: 3600,
+            scope: scope.unwrap_or_default().to_string(),
+            ..AccessToken::default()
+        }
+    }
+
+    #[test]
+    fn omitted_refresh_scope_keeps_previous_scopes() {
+        let mut session = sample_session();
+        session.data.granted_scopes = vec!["scope-a".to_string(), "scope-b".to_string()];
+
+        let refreshed = merge_refreshed_session_data(&refreshed_tokens(None), &session.data);
+
+        assert_eq!(refreshed.granted_scopes, session.data.granted_scopes);
+        assert_eq!(refreshed.refresh_token, session.data.refresh_token);
+    }
+
+    #[test]
+    fn present_refresh_scope_replaces_previous_scopes() {
+        let mut session = sample_session();
+        session.data.granted_scopes = vec!["old-scope".to_string()];
+
+        let refreshed =
+            merge_refreshed_session_data(&refreshed_tokens(Some("scope-a scope-b")), &session.data);
+
+        assert_eq!(
+            refreshed.granted_scopes,
+            vec!["scope-a".to_string(), "scope-b".to_string()]
+        );
+    }
+
+    #[test]
+    fn present_narrower_refresh_scope_removes_unreported_scopes() {
+        let mut session = sample_session();
+        session.data.granted_scopes = vec!["scope-a".to_string(), "scope-b".to_string()];
+
+        let refreshed =
+            merge_refreshed_session_data(&refreshed_tokens(Some("scope-a")), &session.data);
+
+        assert_eq!(refreshed.granted_scopes, vec!["scope-a".to_string()]);
     }
 
     #[test]

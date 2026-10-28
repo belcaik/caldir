@@ -95,6 +95,7 @@ impl Connection {
         let mut events_by_instance_id = self.events_by_instance_id()?;
 
         let mut sync_bases = Vec::new();
+        let mut forgotten_bases = Vec::new();
 
         // Same partial-failure flush pattern as `apply_outgoing_diff`: a
         // local-fs error mid-loop must not drop changes already applied to disk.
@@ -103,11 +104,14 @@ impl Connection {
             diff,
             &mut events_by_instance_id,
             &mut sync_bases,
+            &mut forgotten_bases,
         );
 
+        let forget_result = self.local.forget_sync_bases(forgotten_bases);
         let record_result = self.local.record_sync_bases(sync_bases);
 
         loop_result?;
+        forget_result?;
         record_result?;
         Ok(())
     }
@@ -134,6 +138,7 @@ impl Connection {
         let mut events_by_instance_id = self.events_by_instance_id()?;
 
         let mut sync_bases = Vec::new();
+        let mut forgotten_bases = Vec::new();
 
         // Handles mid-loop errors gracefully
         let loop_result = push_outgoing_changes(
@@ -141,12 +146,15 @@ impl Connection {
             diff,
             &mut events_by_instance_id,
             &mut sync_bases,
+            &mut forgotten_bases,
         )
         .await;
 
+        let forget_result = self.local.forget_sync_bases(forgotten_bases);
         let record_result = self.local.record_sync_bases(sync_bases);
 
         loop_result?;
+        forget_result?;
         record_result?;
         Ok(())
     }
@@ -221,6 +229,7 @@ fn pull_incoming_changes(
     diff: &CalendarDiff,
     events_by_instance_id: &mut HashMap<EventInstanceId, CalendarEvent>,
     sync_bases: &mut Vec<CalendarItem>,
+    forgotten_bases: &mut Vec<EventInstanceId>,
 ) -> Result<(), ConnectionError> {
     for change in diff.incoming() {
         match change {
@@ -237,9 +246,11 @@ fn pull_incoming_changes(
                 sync_bases.push(to.clone());
             }
             EventChange::Delete(item) => {
-                if let Some(cal_event) = events_by_instance_id.remove(&item.instance_id()) {
+                let id = item.instance_id();
+                if let Some(cal_event) = events_by_instance_id.remove(&id) {
                     cal_event.delete().map_err(CalendarError::from)?;
                 }
+                forgotten_bases.push(id);
             }
         }
     }
@@ -252,9 +263,12 @@ async fn push_outgoing_changes(
     diff: &CalendarDiff,
     events_by_instance_id: &mut HashMap<EventInstanceId, CalendarEvent>,
     sync_bases: &mut Vec<CalendarItem>,
+    forgotten_bases: &mut Vec<EventInstanceId>,
 ) -> Result<(), ConnectionError> {
     for change in diff.outgoing() {
-        if let Some(remote_event) = remote.apply_change(change).await? {
+        let applied = remote.apply_change(change).await?;
+
+        if let Some(remote_event) = applied {
             let returned_item = remote_event.item();
 
             // Sometimes provider overwrite the event's UID:
@@ -271,6 +285,8 @@ async fn push_outgoing_changes(
             }
 
             sync_bases.push(returned_item.clone());
+        } else if let EventChange::Delete(item) = change {
+            forgotten_bases.push(item.instance_id());
         }
     }
 
@@ -1074,17 +1090,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_incoming_diff_does_not_record_deletes_in_state() {
+    async fn apply_incoming_diff_forgets_deleted_items_in_persisted_state() {
         let (_tmp, _mock, mut connection) = writable_connection();
         let event = test_event();
         let id = event.event_instance_id();
-        connection.local().create_event(event.clone()).unwrap();
+        connection
+            .apply_incoming_diff(&incoming_create_diff(event.clone()))
+            .unwrap();
 
         connection
             .apply_incoming_diff(&incoming_delete_diff(event))
             .unwrap();
 
-        assert!(!connection.local().state().synced_event_ids().contains(&id));
+        let reloaded = Calendar::load(connection.local().path()).unwrap();
+        assert!(!reloaded.state().synced_event_ids().contains(&id));
+    }
+
+    #[tokio::test]
+    async fn a_locally_recreated_item_is_created_after_an_incoming_delete() {
+        let (_tmp, mock, mut connection) = writable_connection();
+        let event = test_event();
+
+        connection
+            .apply_incoming_diff(&incoming_create_diff(event.clone()))
+            .unwrap();
+        connection
+            .apply_incoming_diff(&incoming_delete_diff(event.clone()))
+            .unwrap();
+
+        connection.local = Calendar::load(connection.local().path()).unwrap();
+        connection.local().create_event(event.clone()).unwrap();
+
+        mock.reply::<rpc::Capabilities>(ProviderCapabilities::default());
+        mock.reply::<rpc::ListEvents>(vec![]);
+        let diff = connection.diff(&DateRange::default()).await.unwrap();
+
+        assert_eq!(
+            diff.outgoing(),
+            &[EventChange::Create(CalendarItem::Event(event))]
+        );
+        assert!(diff.incoming().is_empty());
     }
 
     #[tokio::test]
@@ -1129,6 +1174,17 @@ mod tests {
     async fn apply_outgoing_diff_sends_delete_event_for_outgoing_delete() {
         let (_tmp, mock, mut connection) = writable_connection();
         let event = test_event();
+        let id = event.event_instance_id();
+        connection
+            .apply_incoming_diff(&incoming_create_diff(event.clone()))
+            .unwrap();
+        connection
+            .local()
+            .event_by_instance_id(&id)
+            .unwrap()
+            .unwrap()
+            .delete()
+            .unwrap();
 
         mock.reply::<rpc::DeleteItem>(());
         connection
@@ -1140,6 +1196,37 @@ mod tests {
             mock.captured_request::<rpc::DeleteItem>().event,
             CalendarItem::Event(event)
         );
+        let reloaded = Calendar::load(connection.local().path()).unwrap();
+        assert!(!reloaded.state().synced_event_ids().contains(&id));
+    }
+
+    #[tokio::test]
+    async fn a_failed_outgoing_delete_keeps_its_base() {
+        use crate::provider::transport::ProviderTransportError;
+        use std::time::Duration;
+
+        let (_tmp, mock, mut connection) = writable_connection();
+        let event = test_event();
+        let id = event.event_instance_id();
+        connection
+            .apply_incoming_diff(&incoming_create_diff(event.clone()))
+            .unwrap();
+        connection
+            .local()
+            .event_by_instance_id(&id)
+            .unwrap()
+            .unwrap()
+            .delete()
+            .unwrap();
+
+        mock.reply_error(ProviderTransportError::Timeout(Duration::from_secs(1)));
+        let result = connection
+            .apply_outgoing_diff(&outgoing_delete_diff(event.clone()))
+            .await;
+
+        assert!(result.is_err());
+        let reloaded = Calendar::load(connection.local().path()).unwrap();
+        assert_eq!(reloaded.state().sync_base(&id), Some(&event));
     }
 
     #[tokio::test]

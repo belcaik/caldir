@@ -26,6 +26,17 @@ impl IntoIterator for EventBases {
 }
 
 impl EventBases {
+    pub(crate) fn remove(id: &EventInstanceId, path: &Path) -> Result<(), CalendarStateError> {
+        let filename = hash_filename(&id.to_string());
+        let item_path = path.join(format!("{filename}.ics"));
+
+        match std::fs::remove_file(item_path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err.into()),
+        }
+    }
+
     pub(crate) fn write_from<'a>(
         items: impl IntoIterator<Item = &'a CalendarItem>,
         path: &Path,

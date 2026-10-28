@@ -22,7 +22,7 @@ The `Caldir` struct is the runtime context object. Every CLI command receives a 
 
 A *calendar* is any non-hidden subdirectory of `calendar_dir`. The directory itself is the source of truth — even an empty directory full of hand-authored `.ics` files is a valid local-only calendar.
 
-If a calendar is connected to a remote, it gets a `.caldir/` (analogous to `.git/`) holding `config.toml` (provider settings) and `state/known_event_ids` (append-only sync state for delete detection).
+If a calendar is connected to a remote, it gets a `.caldir/` (analogous to `.git/`) holding `config.toml` (provider settings) and `state/known_event_ids` (legacy sync state for delete detection).
 
 Calendars come in three flavors: 
 - **local-only** (no remote)
@@ -35,7 +35,7 @@ Bidirectional, last-write-wins, no merge: calendar events are atomic.
 
 Direction is decided by a **three-way comparison against a stored base** — the ICS snapshot of the last state both sides agreed on, under `.caldir/state/bases/` (`caldir-core/src/diff/calendar_diff.rs`, `update_direction`). Whichever side differs from the base is the side that changed. Local file mtime, remote `LAST-MODIFIED`, and `SEQUENCE` are only the *fallback*: they break a conflict where both sides changed, or handle legacy state with no readable base.
 
-Deletes are detected against that same sync state: a base's presence records that an identity has synced before, so absence on either side is a delete rather than a never-seen item. `.caldir/state/known_event_ids` is the legacy presence-only format, still read and written for compatibility. Identities are retained after deletes so caldir can keep distinguishing a user delete from a never-seen remote event.
+Deletes are detected against that same sync state: a base's presence records that an identity has synced before, so absence on either side is a delete rather than a never-seen item. `.caldir/state/known_event_ids` is the legacy presence-only format, still read and written for compatibility. A successfully applied delete forgets the identity, so recreating it later is treated as a new item.
 
 `specs/caldir.md` §"Sync State" is the canonical description.
 
