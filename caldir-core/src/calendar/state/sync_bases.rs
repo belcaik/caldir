@@ -72,6 +72,31 @@ impl SyncBases {
         Ok(())
     }
 
+    pub(crate) fn forget<I>(&mut self, ids: I, state_dir: &Path) -> Result<(), CalendarStateError>
+    where
+        I: IntoIterator<Item = EventInstanceId>,
+    {
+        let ids: Vec<_> = ids.into_iter().collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+
+        for id in &ids {
+            EventBases::remove(id, &state_dir.join(EVENT_BASES_DIR_NAME))?;
+        }
+
+        KnownEventIds::write_from(
+            self.0.keys().filter(|id| !ids.contains(id)),
+            &state_dir.join(KNOWN_IDS_FILE_NAME),
+        )?;
+
+        for id in ids {
+            self.0.remove(&id);
+        }
+
+        Ok(())
+    }
+
     // Legacy file:
     fn load_known_event_ids(state_dir: &Path) -> Result<KnownEventIds, CalendarStateError> {
         let known_ids_path = state_dir.join(KNOWN_IDS_FILE_NAME);
@@ -201,6 +226,32 @@ mod tests {
         assert_eq!(
             loaded.get(&event_b.event_instance_id()),
             Some(&Some(Box::new(CalendarItem::from(event_b))))
+        );
+    }
+
+    #[test]
+    fn forget_removes_the_known_id_and_event_base_after_reload() {
+        let state_dir = tempfile::TempDir::new().unwrap();
+        let event = test_event();
+        let id = event.event_instance_id();
+
+        let mut sync_bases = SyncBases::new();
+        sync_bases.record([event], state_dir.path()).unwrap();
+
+        sync_bases.forget([id.clone()], state_dir.path()).unwrap();
+
+        let loaded = SyncBases::load_from_state_dir(state_dir.path()).unwrap();
+        assert_eq!(loaded.get(&id), None);
+        assert!(
+            std::fs::read_dir(state_dir.path().join(EVENT_BASES_DIR_NAME))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        assert!(
+            std::fs::read_to_string(state_dir.path().join(KNOWN_IDS_FILE_NAME))
+                .unwrap()
+                .is_empty()
         );
     }
 }

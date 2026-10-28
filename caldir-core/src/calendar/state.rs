@@ -11,12 +11,10 @@ use std::collections::HashSet;
 
 pub(crate) use sync_bases::SyncBases;
 
-use crate::item::CalendarItem;
+use crate::{EventInstanceId, item::CalendarItem};
 
 #[cfg(test)]
 use crate::Event;
-#[cfg(test)]
-use crate::EventInstanceId;
 
 #[derive(Debug)]
 pub struct CalendarState {
@@ -46,6 +44,17 @@ impl CalendarState {
         I::Item: Into<CalendarItem>,
     {
         self.sync_bases.record(items, state_dir)
+    }
+
+    pub(crate) fn forget_sync_bases<I>(
+        &mut self,
+        ids: I,
+        state_dir: &Path,
+    ) -> Result<(), CalendarStateError>
+    where
+        I: IntoIterator<Item = EventInstanceId>,
+    {
+        self.sync_bases.forget(ids, state_dir)
     }
 
     pub(crate) fn sync_bases(&self) -> &SyncBases {
