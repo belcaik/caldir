@@ -1,4 +1,5 @@
 mod error;
+mod task_identity;
 
 use std::collections::HashMap;
 
@@ -59,6 +60,29 @@ impl Connection {
         };
 
         let remote_events = self.remote().list_events(range).await?;
+
+        // A UID-less task store lists every task under a derived UID; give
+        // each one back the local UID it was pushed under before diffing.
+        let adopted = task_identity::adopt_local_task_uids(remote_events, local_listing.events());
+        let remote_events = adopted.remote_events;
+
+        // A local copy stored under the derived UID duplicates a task the
+        // diff now sees under its local UID. Giving it a base makes it an
+        // ordinary incoming delete instead of a create pushed back remotely.
+        let unbased_shadows: Vec<_> = adopted
+            .shadows
+            .into_iter()
+            .filter(|shadow| {
+                self.local
+                    .state()
+                    .sync_bases()
+                    .get(&shadow.instance_id())
+                    .is_none()
+            })
+            .collect();
+        if !unbased_shadows.is_empty() {
+            self.local.record_sync_bases(unbased_shadows)?;
+        }
 
         // State migration: in-sync pairs never produce a change to apply, so
         // this is the only place their base can be recorded. Without it,
@@ -307,7 +331,7 @@ mod tests {
         test_caldir, test_event, test_event_time, test_mock_provider, test_remote_config,
         test_remote_params,
     };
-    use crate::todo::Todo;
+    use crate::todo::{Todo, TodoStatus};
     use crate::{CalendarConfig, rpc};
     use pretty_assertions::assert_eq;
 
@@ -2520,5 +2544,218 @@ END:VCALENDAR\r\n";
             .path()
             .join("2026-01-01T1200__test-event.ics");
         assert!(expected_path.is_file());
+    }
+
+    /// What Google Tasks does: no iCalendar UID is stored, so a listing
+    /// always reports `<id>@google-tasks.com`, while the push response keeps
+    /// the local UID and adds `X-GOOGLE-TASK-ID`.
+    fn google_listed(local: &Todo, google_id: &str) -> Todo {
+        let mut listed = local.clone();
+        listed.uid = EventUid::new(format!("{google_id}@google-tasks.com"));
+        listed.x_properties = vec![XProperty::new("X-GOOGLE-TASK-ID", google_id)];
+        listed
+    }
+
+    fn pushed_task(uid: &str, summary: &str, google_id: &str) -> Todo {
+        let mut todo = Todo::new(summary);
+        todo.uid = EventUid::new(uid);
+        todo.x_properties = vec![XProperty::new("X-GOOGLE-TASK-ID", google_id)];
+        todo
+    }
+
+    /// The 2026-10 incident: a task pushed under its local UID came back
+    /// under the derived UID, so every run pulled a delete of the local file
+    /// plus a second copy. Once bases are forgotten after a delete, the
+    /// restored file was pushed as a new Google task every run.
+    #[tokio::test]
+    async fn a_task_listed_under_a_derived_uid_keeps_its_local_uid() {
+        let (_tmp, mock, mut connection) = writable_connection();
+        let local = pushed_task("u_crawler-todo-1", "Hand in the essay", "gt-1");
+        connection.local().create_event(local.clone()).unwrap();
+        connection
+            .local
+            .record_sync_bases(vec![CalendarItem::Todo(local.clone())])
+            .unwrap();
+
+        mock.reply::<rpc::Capabilities>(task_writable_capabilities());
+        mock.reply::<rpc::ListEvents>(vec![CalendarItem::Todo(google_listed(&local, "gt-1"))]);
+        let diff = connection.diff(&DateRange::default()).await.unwrap();
+
+        assert!(
+            diff.is_empty(),
+            "incoming: {:#?}\noutgoing: {:#?}",
+            diff.incoming(),
+            diff.outgoing(),
+        );
+    }
+
+    #[tokio::test]
+    async fn a_remote_edit_to_a_derived_uid_task_updates_the_local_file() {
+        let (_tmp, mock, mut connection) = writable_connection();
+        let local = pushed_task("u_crawler-todo-1", "Hand in the essay", "gt-1");
+        connection.local().create_event(local.clone()).unwrap();
+        connection
+            .local
+            .record_sync_bases(vec![CalendarItem::Todo(local.clone())])
+            .unwrap();
+
+        let mut listed = google_listed(&local, "gt-1");
+        listed.status = TodoStatus::Completed;
+
+        mock.reply::<rpc::Capabilities>(task_writable_capabilities());
+        mock.reply::<rpc::ListEvents>(vec![CalendarItem::Todo(listed)]);
+        let diff = connection.diff(&DateRange::default()).await.unwrap();
+
+        let mut expected = local.clone();
+        expected.status = TodoStatus::Completed;
+        assert!(diff.outgoing().is_empty(), "{:#?}", diff.outgoing());
+        assert_eq!(
+            diff.incoming(),
+            &[EventChange::Update {
+                from: CalendarItem::Todo(local),
+                to: CalendarItem::Todo(expected),
+            }],
+        );
+    }
+
+    /// Bootstrap: an earlier binary pulled the derived copy next to the
+    /// local file. It is dropped locally and never pushed back to Google.
+    #[tokio::test]
+    async fn a_local_copy_under_the_derived_uid_is_dropped_locally() {
+        for copy_has_base in [true, false] {
+            let (_tmp, mock, mut connection) = writable_connection();
+            let local = pushed_task("u_crawler-todo-1", "Hand in the essay", "gt-1");
+            let listed = google_listed(&local, "gt-1");
+            connection.local().create_event(local.clone()).unwrap();
+            connection.local().create_event(listed.clone()).unwrap();
+            let mut bases = vec![CalendarItem::Todo(local.clone())];
+            if copy_has_base {
+                bases.push(CalendarItem::Todo(listed.clone()));
+            }
+            connection.local.record_sync_bases(bases).unwrap();
+
+            mock.reply::<rpc::Capabilities>(task_writable_capabilities());
+            mock.reply::<rpc::ListEvents>(vec![CalendarItem::Todo(listed.clone())]);
+            let diff = connection.diff(&DateRange::default()).await.unwrap();
+
+            assert!(diff.outgoing().is_empty(), "{:#?}", diff.outgoing());
+            assert_eq!(
+                diff.incoming(),
+                &[EventChange::Delete(CalendarItem::Todo(listed.clone()))],
+                "copy_has_base = {copy_has_base}",
+            );
+
+            connection.apply_incoming_diff(&diff).unwrap();
+            let uids: Vec<_> = connection
+                .local()
+                .events()
+                .unwrap()
+                .into_events()
+                .iter()
+                .map(|e| e.item().uid().as_str().to_string())
+                .collect();
+            assert_eq!(uids, vec!["u_crawler-todo-1"]);
+        }
+    }
+
+    /// A base whose local file is gone is not a mapping: adopting it would
+    /// turn a live Google task into an outgoing delete.
+    #[tokio::test]
+    async fn a_base_without_a_local_file_does_not_claim_a_remote_task() {
+        let (_tmp, mock, mut connection) = writable_connection();
+        let gone = pushed_task("u_crawler-todo-1", "Hand in the essay", "gt-1");
+        connection
+            .local
+            .record_sync_bases(vec![CalendarItem::Todo(gone.clone())])
+            .unwrap();
+        let listed = google_listed(&gone, "gt-1");
+
+        mock.reply::<rpc::Capabilities>(task_writable_capabilities());
+        mock.reply::<rpc::ListEvents>(vec![CalendarItem::Todo(listed.clone())]);
+        let diff = connection.diff(&DateRange::default()).await.unwrap();
+
+        assert!(diff.outgoing().is_empty(), "{:#?}", diff.outgoing());
+        assert_eq!(
+            diff.incoming(),
+            &[EventChange::Create(CalendarItem::Todo(listed))],
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ambiguous_provider_id_is_left_alone() {
+        let (_tmp, mock, mut connection) = writable_connection();
+        let first = pushed_task("u_crawler-todo-1", "Essay", "gt-1");
+        let second = pushed_task("u_crawler-todo-2", "Essay again", "gt-1");
+        connection.local().create_event(first.clone()).unwrap();
+        connection.local().create_event(second.clone()).unwrap();
+        let listed = google_listed(&first, "gt-1");
+
+        mock.reply::<rpc::Capabilities>(task_writable_capabilities());
+        mock.reply::<rpc::ListEvents>(vec![CalendarItem::Todo(listed.clone())]);
+        let diff = connection.diff(&DateRange::default()).await.unwrap();
+
+        assert_eq!(
+            diff.incoming(),
+            &[EventChange::Create(CalendarItem::Todo(listed))],
+        );
+    }
+
+    #[tokio::test]
+    async fn a_local_uid_already_listed_remotely_is_not_adopted_twice() {
+        let (_tmp, mock, mut connection) = writable_connection();
+        let local = pushed_task("u_crawler-todo-1", "Essay", "gt-1");
+        connection.local().create_event(local.clone()).unwrap();
+        connection
+            .local
+            .record_sync_bases(vec![CalendarItem::Todo(local.clone())])
+            .unwrap();
+        let stray = google_listed(&local, "gt-1");
+
+        mock.reply::<rpc::Capabilities>(task_writable_capabilities());
+        mock.reply::<rpc::ListEvents>(vec![
+            CalendarItem::Todo(local.clone()),
+            CalendarItem::Todo(stray.clone()),
+        ]);
+        let diff = connection.diff(&DateRange::default()).await.unwrap();
+
+        assert_eq!(
+            diff.incoming(),
+            &[EventChange::Create(CalendarItem::Todo(stray))],
+        );
+    }
+
+    /// End to end with a Google-shaped remote: push, then two more runs.
+    /// The run after the push must be empty.
+    #[tokio::test]
+    async fn a_pushed_task_listed_under_a_derived_uid_does_not_churn() {
+        let (_tmp, mock, mut connection) = writable_connection();
+        let mut todo = Todo::new("Hand in the essay");
+        todo.uid = EventUid::new("u_crawler-todo-1");
+        connection.local().create_event(todo.clone()).unwrap();
+
+        mock.reply::<rpc::Capabilities>(task_writable_capabilities());
+        mock.reply::<rpc::ListEvents>(vec![]);
+        let first = connection.diff(&DateRange::default()).await.unwrap();
+        assert_eq!(
+            first.outgoing(),
+            &[EventChange::Create(CalendarItem::Todo(todo.clone()))],
+        );
+
+        let pushed = pushed_task("u_crawler-todo-1", "Hand in the essay", "gt-1");
+        mock.reply::<rpc::CreateItem>(CalendarItem::Todo(pushed.clone()));
+        connection.apply_outgoing_diff(&first).await.unwrap();
+
+        for pass in 2..=3 {
+            connection.local = Calendar::load(connection.local().path()).unwrap();
+            mock.reply::<rpc::Capabilities>(task_writable_capabilities());
+            mock.reply::<rpc::ListEvents>(vec![CalendarItem::Todo(google_listed(&pushed, "gt-1"))]);
+            let diff = connection.diff(&DateRange::default()).await.unwrap();
+            assert!(
+                diff.is_empty(),
+                "pass {pass} churned — incoming: {:#?}\noutgoing: {:#?}",
+                diff.incoming(),
+                diff.outgoing(),
+            );
+        }
     }
 }

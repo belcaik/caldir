@@ -15,9 +15,10 @@ use crate::constants::PROVIDER_TASK_ID_PROPERTY;
 /// first seen remotely (criterion 7). Google Tasks has no iCalendar UID, so
 /// caldir derives one from the Google task id — the same shape
 /// `commands::list_events::cancellation_to_event` uses for a synthetic event
-/// UID (`format!("{}@google.com", ge.recurring_event_id)`). A locally-created
-/// task keeps its own UID on push; this function only fires for a
-/// task caldir has never seen before.
+/// UID (`format!("{}@google.com", ge.recurring_event_id)`). Every listed task
+/// gets this UID, including one caldir pushed under a local UID: core maps it
+/// back through `X-GOOGLE-TASK-ID` before diffing
+/// (`caldir_core::connection::task_identity`).
 pub fn derive_task_uid(google_task_id: &str) -> EventUid {
     EventUid::new(format!("{google_task_id}@google-tasks.com"))
 }
