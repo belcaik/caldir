@@ -322,7 +322,7 @@ mod tests {
     use super::*;
     use crate::Event;
     use crate::diff::EventChange;
-    use crate::event::{EventUid, XProperty};
+    use crate::event::{EventTime, EventUid, XProperty};
     use crate::provider::ProviderCapabilities;
     use crate::provider::mock_provider::MockProvider;
     use crate::test_utils::{
@@ -2729,7 +2729,7 @@ END:VCALENDAR\r\n";
     #[tokio::test]
     async fn a_pushed_task_listed_under_a_derived_uid_does_not_churn() {
         let (_tmp, mock, mut connection) = writable_connection();
-        let mut todo = Todo::new("Hand in the essay");
+        let mut todo = with_local_only_fields(Todo::new("Hand in the essay"));
         todo.uid = EventUid::new("u_crawler-todo-1");
         connection.local().create_event(todo.clone()).unwrap();
 
@@ -2741,14 +2741,19 @@ END:VCALENDAR\r\n";
             &[EventChange::Create(CalendarItem::Todo(todo.clone()))],
         );
 
-        let pushed = pushed_task("u_crawler-todo-1", "Hand in the essay", "gt-1");
+        let mut pushed = todo.clone();
+        pushed
+            .x_properties
+            .push(XProperty::new("X-GOOGLE-TASK-ID", "gt-1"));
         mock.reply::<rpc::CreateItem>(CalendarItem::Todo(pushed.clone()));
         connection.apply_outgoing_diff(&first).await.unwrap();
 
         for pass in 2..=3 {
             connection.local = Calendar::load(connection.local().path()).unwrap();
             mock.reply::<rpc::Capabilities>(task_writable_capabilities());
-            mock.reply::<rpc::ListEvents>(vec![CalendarItem::Todo(google_listed(&pushed, "gt-1"))]);
+            mock.reply::<rpc::ListEvents>(vec![CalendarItem::Todo(google_listing_of(
+                &pushed, "gt-1",
+            ))]);
             let diff = connection.diff(&DateRange::default()).await.unwrap();
             assert!(
                 diff.is_empty(),
@@ -2757,5 +2762,113 @@ END:VCALENDAR\r\n";
                 diff.outgoing(),
             );
         }
+    }
+
+    /// Google Tasks holds title, notes, due, status and completion only. The
+    /// rest of a pushed task is absent from every listing, which is not a
+    /// remote edit.
+    fn with_local_only_fields(mut todo: Todo) -> Todo {
+        todo.url = Some("https://lms.example/assignments/1".to_string());
+        todo.priority = Some(1);
+        todo.start = Some(EventTime::Date(
+            chrono::NaiveDate::from_ymd_opt(2026, 10, 1).unwrap(),
+        ));
+        todo.x_properties
+            .push(XProperty::new("X-VASSAGO-COURSE", "math"));
+        todo
+    }
+
+    fn google_listing_of(local: &Todo, google_id: &str) -> Todo {
+        let mut listed = Todo::new(local.summary.clone().unwrap());
+        listed.uid = EventUid::new(format!("{google_id}@google-tasks.com"));
+        listed.description = local.description.clone();
+        listed.due = local.due.clone();
+        listed.status = local.status;
+        listed.completed = local.completed.clone();
+        listed.x_properties = vec![XProperty::new("X-GOOGLE-TASK-ID", google_id)];
+        listed
+    }
+
+    #[tokio::test]
+    async fn fields_google_tasks_cannot_hold_are_not_a_remote_edit() {
+        let (_tmp, mock, mut connection) = writable_connection();
+        let local = with_local_only_fields(pushed_task("u_crawler-todo-1", "Essay", "gt-1"));
+        connection.local().create_event(local.clone()).unwrap();
+        connection
+            .local
+            .record_sync_bases(vec![CalendarItem::Todo(local.clone())])
+            .unwrap();
+
+        mock.reply::<rpc::Capabilities>(task_writable_capabilities());
+        mock.reply::<rpc::ListEvents>(vec![CalendarItem::Todo(google_listing_of(&local, "gt-1"))]);
+        let diff = connection.diff(&DateRange::default()).await.unwrap();
+
+        assert!(
+            diff.is_empty(),
+            "incoming: {:#?}\noutgoing: {:#?}",
+            diff.incoming(),
+            diff.outgoing(),
+        );
+    }
+
+    #[tokio::test]
+    async fn a_google_edit_is_pulled_without_losing_local_only_fields() {
+        let (_tmp, mock, mut connection) = writable_connection();
+        let local = with_local_only_fields(pushed_task("u_crawler-todo-1", "Essay", "gt-1"));
+        connection.local().create_event(local.clone()).unwrap();
+        connection
+            .local
+            .record_sync_bases(vec![CalendarItem::Todo(local.clone())])
+            .unwrap();
+
+        let mut listed = google_listing_of(&local, "gt-1");
+        listed.status = TodoStatus::Completed;
+
+        mock.reply::<rpc::Capabilities>(task_writable_capabilities());
+        mock.reply::<rpc::ListEvents>(vec![CalendarItem::Todo(listed)]);
+        let diff = connection.diff(&DateRange::default()).await.unwrap();
+
+        let mut expected = local.clone();
+        expected.status = TodoStatus::Completed;
+        assert!(diff.outgoing().is_empty(), "{:#?}", diff.outgoing());
+        let [
+            EventChange::Update {
+                to: CalendarItem::Todo(to),
+                ..
+            },
+        ] = diff.incoming()
+        else {
+            panic!("expected one incoming update, got {:#?}", diff.incoming());
+        };
+        assert_eq!(to, &expected);
+    }
+
+    /// A store that keeps every field (CalDAV) carries no provider task id,
+    /// so an empty field there is still a real remote edit.
+    #[tokio::test]
+    async fn a_remote_without_a_provider_task_id_can_still_clear_fields() {
+        let (_tmp, mock, mut connection) = writable_connection();
+        let mut local = with_local_only_fields(Todo::new("Essay"));
+        local.uid = EventUid::new("u_crawler-todo-1");
+        connection.local().create_event(local.clone()).unwrap();
+        connection
+            .local
+            .record_sync_bases(vec![CalendarItem::Todo(local.clone())])
+            .unwrap();
+
+        let mut cleared = local.clone();
+        cleared.url = None;
+
+        mock.reply::<rpc::Capabilities>(task_writable_capabilities());
+        mock.reply::<rpc::ListEvents>(vec![CalendarItem::Todo(cleared.clone())]);
+        let diff = connection.diff(&DateRange::default()).await.unwrap();
+
+        assert_eq!(
+            diff.incoming(),
+            &[EventChange::Update {
+                from: CalendarItem::Todo(local),
+                to: CalendarItem::Todo(cleared),
+            }],
+        );
     }
 }

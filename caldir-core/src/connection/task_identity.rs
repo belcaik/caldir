@@ -8,15 +8,17 @@
 //! local file and a second copy pulled under the derived UID, on every run.
 //!
 //! Before the diff, a remote task is therefore given back the local UID that
-//! carries its provider id. Only local *files* are consulted, never sync
+//! carries its provider id, and the fields the store cannot hold are taken
+//! from that local file, so they never read as a remote edit. Only local *files* are consulted, never sync
 //! bases: a base whose file is gone must not turn a remote task into a remote
 //! delete just because the two share an id.
 
 use std::collections::{HashMap, HashSet};
 
+use crate::event::XProperty;
 use crate::event::{EventInstanceId, EventUid};
 use crate::item::CalendarItem;
-use crate::todo::Todo;
+use crate::todo::{Todo, TodoStatus};
 use crate::{CalendarEvent, RemoteEvent};
 
 /// X-properties carrying a task's id in a store that has no iCalendar UID.
@@ -100,21 +102,30 @@ pub(super) fn adopt_local_task_uids(
         .into_iter()
         .enumerate()
         .map(|(index, remote)| {
-            let Some(local_uid) = adoptions.remove(&index) else {
+            let Some(remote_todo) = plain_task(remote.item()) else {
                 return remote;
             };
+            let mut todo = remote_todo.clone();
 
-            let CalendarItem::Todo(mut todo) = remote.item().clone() else {
-                unreachable!("only plain tasks are adopted");
-            };
-
-            let derived_id = remote.item().instance_id();
-            if let Some(shadow) = local_by_id.get(&derived_id) {
-                shadows.push((*shadow).clone());
+            if let Some(local_uid) = adoptions.remove(&index) {
+                if let Some(shadow) = local_by_id.get(&remote.item().instance_id()) {
+                    shadows.push((*shadow).clone());
+                }
+                todo.uid = local_uid;
             }
 
-            todo.uid = local_uid;
-            RemoteEvent::new(todo)
+            let local = local_by_id
+                .get(&EventInstanceId::todo(todo.uid.clone(), None))
+                .and_then(|item| plain_task(item));
+
+            match local {
+                Some(local) if shares_provider_id(&todo, local) => {
+                    keep_local_only_fields(&mut todo, local);
+                    RemoteEvent::new(todo)
+                }
+                _ if todo.uid != remote_todo.uid => RemoteEvent::new(todo),
+                _ => remote,
+            }
         })
         .collect();
 
@@ -122,6 +133,54 @@ pub(super) fn adopt_local_task_uids(
         remote_events,
         shadows,
     }
+}
+
+/// Fields a UID-less task store cannot hold, so a listing always reports them
+/// empty: there, empty means "not stored", never "cleared". Taken from the
+/// local file, the way the provider's push response already keeps them
+/// (caldir-provider-google `google_tasks::policy`, "preserved only locally").
+fn keep_local_only_fields(remote: &mut Todo, local: &Todo) {
+    remote.location = local.location.clone();
+    remote.start = local.start.clone();
+    remote.percent_complete = local.percent_complete;
+    remote.priority = local.priority;
+    remote.url = local.url.clone();
+    remote.organizer = local.organizer.clone();
+    remote.attendees = local.attendees.clone();
+    remote.reminders = local.reminders.clone();
+    remote.attachments = local.attachments.clone();
+
+    let provider: Vec<_> = remote
+        .x_properties
+        .drain(..)
+        .filter(is_provider_id)
+        .collect();
+    remote.x_properties = local
+        .x_properties
+        .iter()
+        .filter(|p| !is_provider_id(p))
+        .cloned()
+        .chain(provider)
+        .collect();
+
+    // No IN-PROCESS/CANCELLED in the store: it echoes the NEEDS-ACTION it was
+    // sent, which is not a remote edit.
+    if remote.status == TodoStatus::NeedsAction
+        && matches!(local.status, TodoStatus::InProcess | TodoStatus::Cancelled)
+    {
+        remote.status = local.status;
+    }
+}
+
+fn shares_provider_id(remote: &Todo, local: &Todo) -> bool {
+    let local_ids: HashSet<_> = provider_ids(local).collect();
+    provider_ids(remote).any(|key| local_ids.contains(&key))
+}
+
+fn is_provider_id(property: &XProperty) -> bool {
+    PROVIDER_TASK_ID_PROPERTIES
+        .iter()
+        .any(|name| property.name.eq_ignore_ascii_case(name))
 }
 
 /// A task without a recurrence id: the only kind a UID-less task store holds.
